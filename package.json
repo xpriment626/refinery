@@ -1,0 +1,16 @@
+{
+  "name": "refinery",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Refinery — local memory service. Ingestion-and-inspection slice (Stage A).",
+  "bin": {
+    "refinery": "src/cli.ts"
+  },
+  "scripts": {
+    "refinery": "node src/cli.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

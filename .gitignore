@@ -1,0 +1,5 @@
+# local Refinery instance data (DB + raw source store) — never committed
+.refinery/
+node_modules/
+*.log
+.DS_Store
