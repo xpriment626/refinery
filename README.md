@@ -1,12 +1,13 @@
 # refinery
 
-Local Refinery memory service — **ingestion-and-inspection slice** (Stage A).
+Local Refinery memory service — **Stage A local memory slice**.
 
-This is the first reroll-driven vertical slice. It does exactly one thing well:
-import the real Claude Code history for a working directory into a local
-canonical store and let you inspect it. Refinement, proposals, MCP retrieval,
-the dashboard, the watcher, auth, vector search, and cloud deployment are
-deliberately **out of scope** here — clean seams are left for them.
+This is a reroll-driven vertical slice. It imports real Claude Code history for
+a working directory into a local canonical store, lets you inspect it, governs
+proposal activation, and exposes active project memories through MCP read tools.
+Live LLM refinement, Coral coordination, the dashboard, the watcher, auth,
+vector search, source-snapshot writes, and cloud deployment remain out of scope
+for this slice.
 
 ## Requirements
 
@@ -38,9 +39,15 @@ node src/cli.ts proposals list              # list proposals + lifecycle status
 node src/cli.ts proposals show <id>         # full 8-field proposal contract
 node src/cli.ts proposals approve <id> [--by <actor>]   # the ONLY path to active memory
 node src/cli.ts proposals reject  <id> [--by <actor>]   # never becomes active
+
+# Run the MCP stdio server for agent-facing read tools.
+node src/mcp.ts
 ```
 
 `npm run refinery -- <args>` is also wired as a convenience.
+`npm run mcp` starts the MCP stdio server. `npm test` runs the local smoke tests.
+`npm run experiment:capture` runs one throwaway Capture-specialist LLM smoke
+test using the local `.env` model config.
 
 ## What it does
 
@@ -78,6 +85,50 @@ becomes active except through an explicit `approve`.** This slice seeds
 proposals deterministically; the LLM refiner that generates them is a later
 slice and plugs into this same contract.
 
+## MCP read tools
+
+The Stage A MCP server runs over stdio and exposes read-only tools:
+
+- `refinery_search_memory` — searches active project-scoped memories and returns
+  structured records with provenance.
+- `refinery_get_memory` — hydrates one active project-scoped memory by id.
+- `refinery_get_project_context` — returns readable project-context synthesis
+  plus structured supporting memories and provenance identifiers.
+
+The tools read from the canonical SQLite store under `REFINERY_HOME` or the
+default `.refinery/` instance. They do not write source snapshots, generate
+proposals, or activate memory.
+
+## Local specialist scaffold
+
+The first local refinement scaffold lives under `src/specialists/`:
+
+```
+Capture -> Distillation -> Schema -> Relevance
+```
+
+Each specialist is separate code with a prompt, input contract, output contract,
+and allowed/forbidden tool boundary. The sequential harness describes the local
+handoff shape and explicitly does **not** call a live LLM endpoint yet. Coral
+coordination is a later substitution for the harness, not part of this slice.
+
+## Local LLM experiments
+
+Throwaway specialist behavior tests are stored under `.refinery/experiments/`.
+They are local instance artifacts, not canonical memory state.
+
+```bash
+cp .env.example .env
+# set OPENROUTER_API_KEY in .env
+npm run experiment:capture
+```
+
+The Capture experiment selects a deterministic compact slice from imported
+Fabrick Claude Code session history, writes `input.json`, calls the configured
+OpenRouter model, saves `output.raw.md`, validates the Capture output contract
+into `output.parsed.json`, and writes `eval.md`. It does **not** write to
+`refinery.db`, create proposals, activate memory, or involve Coral.
+
 ## Storage layout (authority boundaries)
 
 The local instance lives under `.refinery/` (gitignored):
@@ -98,4 +149,8 @@ src/
   db.ts         # node:sqlite open + schema + idempotent helpers
   discovery.ts  # cwd → encoded path → session/memory discovery
   hash.ts       # sha256 of source files (read-only)
+  mcp.ts        # MCP stdio server exposing Stage A read tools
+  retrieval.ts  # active project memory retrieval + project context synthesis
+  experiments/  # throwaway LLM experiment harnesses
+  specialists/  # local specialist contracts + sequential harness scaffold
 ```

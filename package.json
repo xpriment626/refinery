@@ -8,7 +8,10 @@
     "refinery": "src/cli.ts"
   },
   "scripts": {
-    "refinery": "node src/cli.ts"
+    "refinery": "node src/cli.ts",
+    "mcp": "node src/mcp.ts",
+    "experiment:capture": "node src/experiments/capture.ts",
+    "test": "node --test src/*.test.ts"
   },
   "engines": {
     "node": ">=24"
