@@ -11,6 +11,9 @@
     "refinery": "node src/cli.ts",
     "mcp": "node src/mcp.ts",
     "experiment:capture": "node src/experiments/capture.ts",
+    "experiment:distillation": "node src/experiments/distillation.ts",
+    "experiment:schema": "node src/experiments/schema.ts",
+    "experiment:relevance": "node src/experiments/relevance.ts",
     "test": "node --test src/*.test.ts"
   },
   "engines": {

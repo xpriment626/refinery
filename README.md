@@ -46,8 +46,8 @@ node src/mcp.ts
 
 `npm run refinery -- <args>` is also wired as a convenience.
 `npm run mcp` starts the MCP stdio server. `npm test` runs the local smoke tests.
-`npm run experiment:capture` runs one throwaway Capture-specialist LLM smoke
-test using the local `.env` model config.
+`npm run experiment:<specialist>` runs one throwaway specialist LLM smoke test
+using the local `.env` model config.
 
 ## What it does
 
@@ -121,12 +121,19 @@ They are local instance artifacts, not canonical memory state.
 cp .env.example .env
 # set OPENROUTER_API_KEY in .env
 npm run experiment:capture
+npm run experiment:distillation
+npm run experiment:schema
+npm run experiment:relevance
 ```
 
-The Capture experiment selects a deterministic compact slice from imported
-Fabrick Claude Code session history, writes `input.json`, calls the configured
-OpenRouter model, saves `output.raw.md`, validates the Capture output contract
-into `output.parsed.json`, and writes `eval.md`. It does **not** write to
+Each experiment writes `input.json`, calls the configured OpenRouter model,
+saves `output.raw.md`, validates the specialist output contract into
+`output.parsed.json`, and writes `eval.md`. Capture selects a deterministic
+compact slice from imported Fabrick Claude Code session history. Distillation
+uses the latest successful Capture output when available, Schema uses the
+latest successful Distillation output when available, and Relevance uses the
+latest successful Schema output when available. Each runner also has a fixture
+fallback so it remains runnable independently. Experiments do **not** write to
 `refinery.db`, create proposals, activate memory, or involve Coral.
 
 ## Storage layout (authority boundaries)
