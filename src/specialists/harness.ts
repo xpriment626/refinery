@@ -3,6 +3,7 @@ import { captureSpecialist } from "./capture.ts";
 import { distillationSpecialist } from "./distillation.ts";
 import { schemaSpecialist } from "./schema.ts";
 import { relevanceSpecialist } from "./relevance.ts";
+import { contradictionSpecialist } from "./contradiction.ts";
 
 export interface SequentialRefinementHarness {
   order: SpecialistName[];
@@ -16,6 +17,7 @@ export const orderedSpecialists = [
   distillationSpecialist,
   schemaSpecialist,
   relevanceSpecialist,
+  contradictionSpecialist,
 ];
 
 export function createSequentialRefinementHarness(): SequentialRefinementHarness {
@@ -27,7 +29,7 @@ export function createSequentialRefinementHarness(): SequentialRefinementHarness
     describe() {
       return [
         "Local specialist scaffold only; no live LLM endpoint is invoked.",
-        "Handoff order: Capture -> Distillation -> Schema -> Relevance.",
+        "Handoff order: Capture -> Distillation -> Schema -> Relevance -> Contradiction.",
         "Each specialist owns a prompt, input contract, output contract, and tool boundary.",
       ].join(" ");
     },

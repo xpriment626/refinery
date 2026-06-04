@@ -104,7 +104,7 @@ proposals, or activate memory.
 The first local refinement scaffold lives under `src/specialists/`:
 
 ```
-Capture -> Distillation -> Schema -> Relevance
+Capture -> Distillation -> Schema -> Relevance -> Contradiction
 ```
 
 Each specialist is separate code with a prompt, input contract, output contract,
@@ -122,6 +122,12 @@ is `semantic`, `episodic`, `procedural`, `operational`, and `reflective`;
 operational candidates are treated as usually ephemeral or TTL-bound unless
 they can be reframed into a durable type.
 
+Contradiction is a bounded read-only comparison pass after Relevance. It
+compares proposal-shaped candidates against active project memories and
+classifies each relationship as `novel`, `duplicate`, `refinement`,
+`contradiction`, `supersession`, or `too_weak`. It does not write, promote,
+archive, or activate memory.
+
 ## Local LLM experiments
 
 Throwaway specialist behavior tests are stored under `.refinery/experiments/`.
@@ -134,6 +140,7 @@ npm run experiment:capture
 npm run experiment:distillation
 npm run experiment:schema
 npm run experiment:relevance
+npm run experiment:contradiction
 ```
 
 Each experiment writes `input.json`, wraps the specialist as a Mastra agent,
@@ -143,9 +150,11 @@ validates the specialist output contract into `output.parsed.json`, and writes
 Claude Code session history. Distillation uses the latest successful Capture
 output when available, Schema uses the latest successful Distillation output
 when available, and Relevance uses the latest successful Schema output when
-available. Each runner also has a fixture fallback so it remains runnable
-independently. Experiments do **not** write to `refinery.db`, create proposals,
-activate memory, or involve Coral.
+available. Contradiction uses the latest successful Relevance output when
+available and retrieves active project memory candidates for comparison. Each
+runner also has a fixture fallback so it remains runnable independently.
+Experiments do **not** write to `refinery.db`, create proposals, activate
+memory, or involve Coral.
 
 ## Storage layout (authority boundaries)
 

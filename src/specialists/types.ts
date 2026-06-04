@@ -1,4 +1,4 @@
-export type SpecialistName = "capture" | "distillation" | "schema" | "relevance";
+export type SpecialistName = "capture" | "distillation" | "schema" | "relevance" | "contradiction";
 
 export interface ToolBoundary {
   allowedTools: string[];

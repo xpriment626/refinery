@@ -14,6 +14,7 @@
     "experiment:distillation": "node src/experiments/distillation.ts",
     "experiment:schema": "node src/experiments/schema.ts",
     "experiment:relevance": "node src/experiments/relevance.ts",
+    "experiment:contradiction": "node src/experiments/contradiction.ts",
     "test": "node --test src/*.test.ts"
   },
   "engines": {

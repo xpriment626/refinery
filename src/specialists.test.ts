@@ -8,7 +8,7 @@ import {
 test("local specialists are scaffolded as separate agents with contracts", () => {
   assert.deepEqual(
     specialists.map((s) => s.name),
-    ["capture", "distillation", "schema", "relevance"],
+    ["capture", "distillation", "schema", "relevance", "contradiction"],
   );
 
   for (const specialist of specialists) {
@@ -23,7 +23,7 @@ test("local specialists are scaffolded as separate agents with contracts", () =>
 test("sequential harness describes handoff order without invoking a live LLM", () => {
   const harness = createSequentialRefinementHarness();
 
-  assert.deepEqual(harness.order, ["capture", "distillation", "schema", "relevance"]);
+  assert.deepEqual(harness.order, ["capture", "distillation", "schema", "relevance", "contradiction"]);
   assert.equal(harness.usesLiveLlm, false);
-  assert.match(harness.describe(), /Capture -> Distillation -> Schema -> Relevance/);
+  assert.match(harness.describe(), /Capture -> Distillation -> Schema -> Relevance -> Contradiction/);
 });
