@@ -18,5 +18,9 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.67",
+    "@mastra/core": "^1.40.0"
   }
 }

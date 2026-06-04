@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ModelConfig } from "../env.ts";
 import { loadModelConfig } from "../env.ts";
+import { createMastraModelCaller, mastraRuntimeMetadata } from "../mastra/runtime.ts";
 import type { LocalSpecialist } from "../specialists/types.ts";
-import { callOpenRouter, type ExperimentPaths, type ModelCaller } from "./capture.ts";
+import type { ExperimentPaths, ModelCaller } from "./capture.ts";
 
 export interface ArtifactRunResult<T> {
   runId: string;
@@ -79,6 +80,7 @@ export async function runArtifactExperiment<T>(args: {
       {
         run_id: args.runId,
         specialist: args.specialist,
+        runtime: mastraRuntimeMetadata(args.specialist),
         model: redactModel(args.model),
         ...args.inputPayload,
         prompt: args.prompt,
@@ -88,7 +90,7 @@ export async function runArtifactExperiment<T>(args: {
     ),
   );
 
-  const raw = await (args.callModel ?? callOpenRouter)({
+  const raw = await (args.callModel ?? createMastraModelCaller(args.specialist))({
     model: args.model,
     system: args.prompt.system,
     user: args.prompt.user,

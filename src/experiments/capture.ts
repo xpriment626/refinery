@@ -5,6 +5,7 @@ import type { RefineryPaths } from "../config.ts";
 import { resolvePaths } from "../config.ts";
 import { openDb } from "../db.ts";
 import { loadModelConfig, type ModelConfig } from "../env.ts";
+import { createMastraModelCaller, mastraRuntimeMetadata } from "../mastra/runtime.ts";
 import { captureSpecialist } from "../specialists/capture.ts";
 
 export type ExperimentPaths = RefineryPaths;
@@ -312,6 +313,7 @@ export async function runCaptureExperiment(
   const input = {
     run_id: runId,
     specialist: captureSpecialist,
+    runtime: mastraRuntimeMetadata(captureSpecialist),
     model: redactModel(model),
     source: {
       id: slice.source.id,
@@ -324,7 +326,7 @@ export async function runCaptureExperiment(
 
   fs.writeFileSync(path.join(runDir, "input.json"), JSON.stringify(input, null, 2));
 
-  const raw = await (options.callModel ?? callOpenRouter)({
+  const raw = await (options.callModel ?? createMastraModelCaller(captureSpecialist))({
     model,
     system: prompt.system,
     user: prompt.user,

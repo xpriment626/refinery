@@ -46,8 +46,8 @@ node src/mcp.ts
 
 `npm run refinery -- <args>` is also wired as a convenience.
 `npm run mcp` starts the MCP stdio server. `npm test` runs the local smoke tests.
-`npm run experiment:<specialist>` runs one throwaway specialist LLM smoke test
-using the local `.env` model config.
+`npm run experiment:<specialist>` runs one throwaway Mastra-backed specialist
+LLM smoke test using the local `.env` model config.
 
 ## What it does
 
@@ -109,8 +109,10 @@ Capture -> Distillation -> Schema -> Relevance
 
 Each specialist is separate code with a prompt, input contract, output contract,
 and allowed/forbidden tool boundary. The sequential harness describes the local
-handoff shape and explicitly does **not** call a live LLM endpoint yet. Coral
-coordination is a later substitution for the harness, not part of this slice.
+handoff shape. The live experiment runtime wraps those same framework-neutral
+specialist definitions as Mastra agents; Mastra is the execution adapter, not
+the domain contract. Coral coordination is a later substitution for the
+harness, not part of this slice.
 
 ## Local LLM experiments
 
@@ -126,15 +128,16 @@ npm run experiment:schema
 npm run experiment:relevance
 ```
 
-Each experiment writes `input.json`, calls the configured OpenRouter model,
-saves `output.raw.md`, validates the specialist output contract into
-`output.parsed.json`, and writes `eval.md`. Capture selects a deterministic
-compact slice from imported Fabrick Claude Code session history. Distillation
-uses the latest successful Capture output when available, Schema uses the
-latest successful Distillation output when available, and Relevance uses the
-latest successful Schema output when available. Each runner also has a fixture
-fallback so it remains runnable independently. Experiments do **not** write to
-`refinery.db`, create proposals, activate memory, or involve Coral.
+Each experiment writes `input.json`, wraps the specialist as a Mastra agent,
+calls the configured OpenRouter model through Mastra, saves `output.raw.md`,
+validates the specialist output contract into `output.parsed.json`, and writes
+`eval.md`. Capture selects a deterministic compact slice from imported Fabrick
+Claude Code session history. Distillation uses the latest successful Capture
+output when available, Schema uses the latest successful Distillation output
+when available, and Relevance uses the latest successful Schema output when
+available. Each runner also has a fixture fallback so it remains runnable
+independently. Experiments do **not** write to `refinery.db`, create proposals,
+activate memory, or involve Coral.
 
 ## Storage layout (authority boundaries)
 
@@ -156,6 +159,7 @@ src/
   db.ts         # node:sqlite open + schema + idempotent helpers
   discovery.ts  # cwd → encoded path → session/memory discovery
   hash.ts       # sha256 of source files (read-only)
+  mastra/       # Mastra runtime adapter for specialist experiments
   mcp.ts        # MCP stdio server exposing Stage A read tools
   retrieval.ts  # active project memory retrieval + project context synthesis
   experiments/  # throwaway LLM experiment harnesses

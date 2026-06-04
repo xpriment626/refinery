@@ -49,7 +49,9 @@ test("runDistillationExperiment writes artifacts and validates distilled output"
   assert.equal(fs.existsSync(path.join(result.runDir, "output.raw.md")), true);
   assert.equal(fs.existsSync(path.join(result.runDir, "output.parsed.json")), true);
   assert.equal(fs.existsSync(path.join(result.runDir, "eval.md")), true);
-  assert.doesNotMatch(fs.readFileSync(path.join(result.runDir, "input.json"), "utf8"), /test-key/);
+  const input = fs.readFileSync(path.join(result.runDir, "input.json"), "utf8");
+  assert.match(input, /"framework": "mastra"/);
+  assert.doesNotMatch(input, /test-key/);
 });
 
 test("runSchemaExperiment writes artifacts and validates typed output", async () => {
