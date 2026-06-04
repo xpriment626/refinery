@@ -65,6 +65,13 @@ test("runSchemaExperiment writes artifacts and validates typed output", async ()
           {
             body: "Memory refinement should run over source session history; existing memories are comparison baselines.",
             memory_type: "procedural",
+            primary_type: "procedural",
+            secondary_type: null,
+            type_confidence: 0.9,
+            type_rationale: "The candidate describes how refinement work should usually be performed.",
+            ambiguities: [],
+            durability: "durable",
+            ttl: null,
             proposed_scope: "project",
             mutation_op: "create",
             target_memory_id: null,
@@ -75,6 +82,11 @@ test("runSchemaExperiment writes artifacts and validates typed output", async ()
   });
 
   assert.equal(result.parsed.typed[0].memory_type, "procedural");
+  assert.equal(result.parsed.typed[0].primary_type, "procedural");
+  assert.equal(result.parsed.typed[0].secondary_type, null);
+  assert.equal(result.parsed.typed[0].type_confidence, 0.9);
+  assert.equal(result.parsed.typed[0].durability, "durable");
+  assert.equal(result.parsed.typed[0].ttl, null);
   assert.equal(result.parsed.typed[0].proposed_scope, "project");
   assert.equal(fs.existsSync(path.join(result.runDir, "output.parsed.json")), true);
 });

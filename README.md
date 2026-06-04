@@ -114,6 +114,14 @@ specialist definitions as Mastra agents; Mastra is the execution adapter, not
 the domain contract. Coral coordination is a later substitution for the
 harness, not part of this slice.
 
+Schema owns the authoritative memory-type routing. It emits `memory_type` for
+proposal compatibility and richer type metadata for evaluation:
+`primary_type`, optional `secondary_type`, `type_confidence`,
+`type_rationale`, `ambiguities`, `durability`, and `ttl`. The initial taxonomy
+is `semantic`, `episodic`, `procedural`, `operational`, and `reflective`;
+operational candidates are treated as usually ephemeral or TTL-bound unless
+they can be reframed into a durable type.
+
 ## Local LLM experiments
 
 Throwaway specialist behavior tests are stored under `.refinery/experiments/`.

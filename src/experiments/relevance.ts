@@ -43,6 +43,13 @@ const fixtureSchema: SchemaOutput = {
       body:
         "Memory refinement should run over source session history first; existing memories are weak ground-truth comparisons.",
       memory_type: "procedural",
+      primary_type: "procedural",
+      secondary_type: null,
+      type_confidence: 0.88,
+      type_rationale: "The candidate describes the normal refinement workflow source priority.",
+      ambiguities: [],
+      durability: "durable",
+      ttl: null,
       proposed_scope: "project",
       mutation_op: "create",
       target_memory_id: null,
@@ -63,6 +70,7 @@ function prompt(schema: SchemaOutput): { system: string; user: string } {
       "Return only JSON matching this shape:",
       `{"proposals":[{"memory_type":"procedural","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"mutation_op":"create","target_memory_id":null}],"rejected":[]}`,
       "For this smoke test, return at most one proposal. Use rejected when the candidate is too ephemeral.",
+      "Use the Schema primary_type/memory_type and durability metadata when deciding whether the candidate is worth proposing.",
       "Do not write to the database. Do not activate memory.",
     ].join("\n"),
     user: [
