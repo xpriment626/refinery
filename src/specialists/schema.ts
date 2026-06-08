@@ -12,7 +12,7 @@ reflective. Add a secondary type only when the candidate genuinely straddles
 two retrieval intents. Keep scope at project for this slice unless the input
 explicitly requires rejection, and propose create/update/supersede/archive/merge.
 When a candidate appears to replace an existing active memory, identify the
-target memory id for Contradiction/Relevance follow-up.
+target memory id for Relationship Review/Relevance follow-up.
 
 Use operational for short-lived task state. Operational memory is usually
 ephemeral or TTL-bound unless it can be reframed into durable semantic,

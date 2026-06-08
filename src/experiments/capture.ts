@@ -171,7 +171,7 @@ export function selectDeterministicSessionSlice(
   return { source, chunks };
 }
 
-function buildPrompt(slice: SessionSlice): { system: string; user: string } {
+export function buildCapturePrompt(slice: SessionSlice): { system: string; user: string } {
   const sourceChunks = slice.chunks
     .map(
       (chunk) =>
@@ -309,7 +309,7 @@ export async function runCaptureExperiment(
   fs.mkdirSync(runDir, { recursive: true });
 
   const slice = selectDeterministicSessionSlice(paths, options);
-  const prompt = buildPrompt(slice);
+  const prompt = buildCapturePrompt(slice);
   const input = {
     run_id: runId,
     specialist: captureSpecialist,

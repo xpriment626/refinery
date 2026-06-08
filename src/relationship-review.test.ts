@@ -5,13 +5,13 @@ import path from "node:path";
 import test from "node:test";
 import { openDb } from "./db.ts";
 import {
-  runContradictionExperiment,
-  type ContradictionOutput,
+  runRelationshipReviewExperiment,
+  type RelationshipReviewOutput,
   type ExperimentPaths,
-} from "./experiments/contradiction.ts";
+} from "./experiments/relationship-review.ts";
 
 function makePaths(): ExperimentPaths {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-contradiction-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-relationship-review-"));
   return {
     home,
     dbPath: path.join(home, "refinery.db"),
@@ -34,12 +34,12 @@ function seedActiveMemory(paths: ExperimentPaths): void {
   db.close();
 }
 
-test("runContradictionExperiment compares proposals to active memory and writes artifacts", async () => {
+test("runRelationshipReviewExperiment compares proposals to active memory and writes artifacts", async () => {
   const paths = makePaths();
   seedActiveMemory(paths);
 
-  const result = await runContradictionExperiment(paths, {
-    runId: "contradiction-test",
+  const result = await runRelationshipReviewExperiment(paths, {
+    runId: "relationship-review-test",
     model: {
       provider: "openrouter",
       baseUrl: "https://openrouter.invalid/api/v1",
@@ -59,7 +59,7 @@ test("runContradictionExperiment compares proposals to active memory and writes 
             memory_refs: [{ memory_id: 7, provenance_kind: "refinery-proposal" }],
           },
         ],
-      } satisfies ContradictionOutput),
+      } satisfies RelationshipReviewOutput),
   });
 
   assert.equal(result.parsed.findings.length, 1);

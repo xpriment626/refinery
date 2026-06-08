@@ -1,10 +1,10 @@
 import type { LocalSpecialist } from "./types.ts";
 
-export const contradictionSpecialist: LocalSpecialist = {
-  name: "contradiction",
+export const relationshipReviewSpecialist: LocalSpecialist = {
+  name: "relationship-review",
   kind: "local-specialist",
   purpose: "Compare proposal-shaped candidates against active memory and classify their relationship.",
-  prompt: `You are the Contradiction specialist for Refinery.
+  prompt: `You are the Relationship Review specialist for Refinery.
 
 Compare each proposal-shaped candidate against the supplied active project
 memories. Classify the relationship as exactly one of: novel, duplicate,
@@ -30,7 +30,7 @@ future value to justify a relationship decision.`,
     "findings[].memory_refs: objects with memory_id and provenance_kind for active memories used for the decision; never bare ids",
   ],
   toolBoundary: {
-    allowedTools: ["read_relevance_output", "search_active_memory", "emit_contradiction_findings"],
+    allowedTools: ["read_relevance_output", "search_active_memory", "emit_relationship_findings"],
     forbiddenTools: ["approve_proposal", "write_active_memory", "promote_memory", "call_live_llm_endpoint"],
   },
 };

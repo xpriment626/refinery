@@ -62,7 +62,7 @@ function loadSchemaSeed(paths: ExperimentPaths): SchemaOutput {
   return latestParsed<SchemaOutput>(paths, "schema") ?? fixtureSchema;
 }
 
-function prompt(schema: SchemaOutput): { system: string; user: string } {
+export function buildRelevancePrompt(schema: SchemaOutput): { system: string; user: string } {
   return {
     system: [
       relevanceSpecialist.prompt,
@@ -152,7 +152,7 @@ export async function runRelevanceExperiment(
   options: BaseExperimentOptions = {},
 ): Promise<ArtifactRunResult<RelevanceOutput>> {
   const schema = loadSchemaSeed(paths);
-  const builtPrompt = prompt(schema);
+  const builtPrompt = buildRelevancePrompt(schema);
   return runArtifactExperiment({
     paths,
     runId: options.runId ?? defaultRunId("relevance"),

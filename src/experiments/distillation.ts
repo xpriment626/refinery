@@ -39,7 +39,7 @@ function loadCaptureSeed(paths: ExperimentPaths): CaptureOutput {
   return latestParsed<CaptureOutput>(paths, "capture") ?? fixtureCapture;
 }
 
-function prompt(capture: CaptureOutput): { system: string; user: string } {
+export function buildDistillationPrompt(capture: CaptureOutput): { system: string; user: string } {
   return {
     system: [
       distillationSpecialist.prompt,
@@ -94,7 +94,7 @@ export async function runDistillationExperiment(
   options: BaseExperimentOptions = {},
 ): Promise<ArtifactRunResult<DistillationOutput>> {
   const capture = loadCaptureSeed(paths);
-  const builtPrompt = prompt(capture);
+  const builtPrompt = buildDistillationPrompt(capture);
   return runArtifactExperiment({
     paths,
     runId: options.runId ?? defaultRunId("distillation"),

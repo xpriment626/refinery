@@ -14,7 +14,8 @@
     "experiment:distillation": "node src/experiments/distillation.ts",
     "experiment:schema": "node src/experiments/schema.ts",
     "experiment:relevance": "node src/experiments/relevance.ts",
-    "experiment:contradiction": "node src/experiments/contradiction.ts",
+    "experiment:relationship-review": "node src/experiments/relationship-review.ts",
+    "experiment:workflow": "node src/experiments/workflow.ts",
     "test": "node --test src/*.test.ts"
   },
   "engines": {
@@ -22,6 +23,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.67",
-    "@mastra/core": "^1.40.0"
+    "@mastra/core": "^1.40.0",
+    "zod": "^4.4.3"
   }
 }

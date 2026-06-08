@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolvePaths } from "../config.ts";
 import { searchMemory, type SearchMemoryResult } from "../retrieval.ts";
-import { contradictionSpecialist } from "../specialists/contradiction.ts";
+import { relationshipReviewSpecialist } from "../specialists/relationship-review.ts";
 import type { ExperimentPaths } from "./capture.ts";
 import type { RelevanceOutput } from "./relevance.ts";
 import {
@@ -17,7 +17,7 @@ import {
 
 export type { ExperimentPaths } from "./capture.ts";
 
-export type ContradictionRelation =
+export type RelationshipRelation =
   | "novel"
   | "duplicate"
   | "refinement"
@@ -30,9 +30,9 @@ export interface MemoryRef {
   provenance_kind: string;
 }
 
-export interface ContradictionFinding {
+export interface RelationshipFinding {
   body: string;
-  relation: ContradictionRelation;
+  relation: RelationshipRelation;
   target_memory_id: number | null;
   confidence: number;
   rationale: string;
@@ -40,11 +40,11 @@ export interface ContradictionFinding {
   memory_refs: MemoryRef[];
 }
 
-export interface ContradictionOutput {
-  findings: ContradictionFinding[];
+export interface RelationshipReviewOutput {
+  findings: RelationshipFinding[];
 }
 
-interface ActiveMemoryCandidate {
+export interface ActiveMemoryCandidate {
   proposal_index: number;
   memories: Pick<SearchMemoryResult, "id" | "type" | "scope" | "body" | "confidence" | "provenance">[];
 }
@@ -72,7 +72,7 @@ function loadRelevanceSeed(paths: ExperimentPaths): RelevanceOutput {
   return latestParsed<RelevanceOutput>(paths, "relevance") ?? fixtureRelevance;
 }
 
-function loadActiveMemoryCandidates(
+export function loadActiveMemoryCandidates(
   paths: ExperimentPaths,
   relevance: RelevanceOutput,
 ): ActiveMemoryCandidate[] {
@@ -89,13 +89,13 @@ function loadActiveMemoryCandidates(
   }));
 }
 
-function prompt(args: {
+export function buildRelationshipReviewPrompt(args: {
   relevance: RelevanceOutput;
   activeMemoryCandidates: ActiveMemoryCandidate[];
 }): { system: string; user: string } {
   return {
     system: [
-      contradictionSpecialist.prompt,
+      relationshipReviewSpecialist.prompt,
       "",
       "Return only JSON matching this shape:",
       `{"findings":[{"body":"...","relation":"novel","target_memory_id":null,"confidence":0.8,"rationale":"...","source_refs":[],"memory_refs":[{"memory_id":1,"provenance_kind":"refinery-proposal"}]}]}`,
@@ -113,19 +113,19 @@ function prompt(args: {
   };
 }
 
-function isRelation(value: unknown): value is ContradictionRelation {
-  return typeof value === "string" && relations.includes(value as ContradictionRelation);
+function isRelation(value: unknown): value is RelationshipRelation {
+  return typeof value === "string" && relations.includes(value as RelationshipRelation);
 }
 
-export function parseContradictionOutput(raw: string): ContradictionOutput {
+export function parseRelationshipReviewOutput(raw: string): RelationshipReviewOutput {
   const parsed = extractJson(raw);
   if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { findings?: unknown }).findings)) {
-    throw new Error("Contradiction output must contain findings array.");
+    throw new Error("Relationship Review output must contain findings array.");
   }
   return {
     findings: (parsed as { findings: unknown[] }).findings.map((item, i) => {
       if (!item || typeof item !== "object") throw new Error(`Finding ${i} must be an object.`);
-      const finding = item as Partial<ContradictionFinding>;
+      const finding = item as Partial<RelationshipFinding>;
       if (typeof finding.body !== "string" || !finding.body.trim()) throw new Error(`Finding ${i} missing body.`);
       if (!isRelation(finding.relation)) throw new Error(`Finding ${i} has invalid relation.`);
       if (finding.target_memory_id !== null && typeof finding.target_memory_id !== "number") {
@@ -165,51 +165,51 @@ export function parseContradictionOutput(raw: string): ContradictionOutput {
   };
 }
 
-function evalMarkdown(parsed: ContradictionOutput): string {
+function evalMarkdown(parsed: RelationshipReviewOutput): string {
   const targeted = parsed.findings.filter((finding) => finding.target_memory_id !== null).length;
   return [
-    "# Contradiction Experiment Eval",
+    "# Relationship Review Experiment Eval",
     "",
     `- Findings: ${parsed.findings.length}`,
     `- Findings targeting active memory: ${targeted}`,
     `- Relations: ${parsed.findings.map((finding) => finding.relation).join(", ") || "none"}`,
-    "- Role boundary: contradiction-only output; no database writes, proposal creation, promotion, or activation attempted.",
+    "- Role boundary: relationship-review-only output; no database writes, proposal creation, promotion, or activation attempted.",
     "",
     "This is a throwaway local experiment artifact. It is not written to the canonical Refinery database.",
   ].join("\n");
 }
 
-export async function runContradictionExperiment(
+export async function runRelationshipReviewExperiment(
   paths: ExperimentPaths,
   options: BaseExperimentOptions = {},
-): Promise<ArtifactRunResult<ContradictionOutput>> {
+): Promise<ArtifactRunResult<RelationshipReviewOutput>> {
   const relevance = loadRelevanceSeed(paths);
   const activeMemoryCandidates = loadActiveMemoryCandidates(paths, relevance);
-  const builtPrompt = prompt({ relevance, activeMemoryCandidates });
+  const builtPrompt = buildRelationshipReviewPrompt({ relevance, activeMemoryCandidates });
   return runArtifactExperiment({
     paths,
-    runId: options.runId ?? defaultRunId("contradiction"),
-    specialist: contradictionSpecialist,
+    runId: options.runId ?? defaultRunId("relationship-review"),
+    specialist: relationshipReviewSpecialist,
     model: options.model ?? loadDefaultModel(),
     prompt: builtPrompt,
     inputPayload: {
       relevance_seed: relevance,
       active_memory_candidates: activeMemoryCandidates,
     },
-    parse: parseContradictionOutput,
+    parse: parseRelationshipReviewOutput,
     evalMarkdown,
     callModel: options.callModel,
   });
 }
 
-export async function runContradictionExperimentFromCli(): Promise<void> {
-  const result = await runContradictionExperiment(resolvePaths());
-  printCliResult("Contradiction", result, result.parsed.findings.length);
+export async function runRelationshipReviewExperimentFromCli(): Promise<void> {
+  const result = await runRelationshipReviewExperiment(resolvePaths());
+  printCliResult("Relationship Review", result, result.parsed.findings.length);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runContradictionExperimentFromCli().catch((e) => {
-    process.stderr.write(`Contradiction experiment failed: ${(e as Error).message}\n`);
+  runRelationshipReviewExperimentFromCli().catch((e) => {
+    process.stderr.write(`Relationship Review experiment failed: ${(e as Error).message}\n`);
     process.exit(1);
   });
 }

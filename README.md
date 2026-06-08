@@ -104,7 +104,7 @@ proposals, or activate memory.
 The first local refinement scaffold lives under `src/specialists/`:
 
 ```
-Capture -> Distillation -> Schema -> Relevance -> Contradiction
+Capture -> Distillation -> Schema -> Relevance -> Relationship Review
 ```
 
 Each specialist is separate code with a prompt, input contract, output contract,
@@ -122,7 +122,7 @@ is `semantic`, `episodic`, `procedural`, `operational`, and `reflective`;
 operational candidates are treated as usually ephemeral or TTL-bound unless
 they can be reframed into a durable type.
 
-Contradiction is a bounded read-only comparison pass after Relevance. It
+Relationship Review is a bounded read-only comparison pass after Relevance. It
 compares proposal-shaped candidates against active project memories and
 classifies each relationship as `novel`, `duplicate`, `refinement`,
 `contradiction`, `supersession`, or `too_weak`. It does not write, promote,
@@ -140,19 +140,39 @@ npm run experiment:capture
 npm run experiment:distillation
 npm run experiment:schema
 npm run experiment:relevance
-npm run experiment:contradiction
+npm run experiment:relationship-review
+npm run experiment:workflow
 ```
 
-Each experiment writes `input.json`, wraps the specialist as a Mastra agent,
-calls the configured OpenRouter model through Mastra, saves `output.raw.md`,
-validates the specialist output contract into `output.parsed.json`, and writes
-`eval.md`. Capture selects a deterministic compact slice from imported Fabrick
-Claude Code session history. Distillation uses the latest successful Capture
-output when available, Schema uses the latest successful Distillation output
-when available, and Relevance uses the latest successful Schema output when
-available. Contradiction uses the latest successful Relevance output when
-available and retrieves active project memory candidates for comparison. Each
-runner also has a fixture fallback so it remains runnable independently.
+Each one-by-one specialist experiment writes `input.json`, wraps the specialist
+as a Mastra agent, calls the configured OpenRouter model through Mastra, saves
+`output.raw.md`, validates the specialist output contract into
+`output.parsed.json`, and writes `eval.md`. Capture selects a deterministic
+compact slice from imported Fabrick Claude Code session history. Distillation
+uses the latest successful Capture output when available, Schema uses the
+latest successful Distillation output when available, and Relevance uses the
+latest successful Schema output when available. Relationship Review uses the
+latest successful Relevance output when available and retrieves active project
+memory candidates for comparison. Each runner also has a fixture fallback so it
+remains runnable independently.
+
+`npm run experiment:workflow` is the middle-ground baseline between isolated
+specialists and future Coral coordination. It uses Mastra's workflow primitive
+to run the same specialists sequentially in one shot:
+
+```
+.refinery/experiments/workflow-<timestamp>/
+  input.json
+  steps/
+    capture/{input.json,output.raw.md,output.parsed.json}
+    distillation/{input.json,output.raw.md,output.parsed.json}
+    schema/{input.json,output.raw.md,output.parsed.json}
+    relevance/{input.json,output.raw.md,output.parsed.json}
+    relationship-review/{input.json,output.raw.md,output.parsed.json}
+  workflow.output.json
+  eval.md
+```
+
 Experiments do **not** write to `refinery.db`, create proposals, activate
 memory, or involve Coral.
 
@@ -180,5 +200,6 @@ src/
   mcp.ts        # MCP stdio server exposing Stage A read tools
   retrieval.ts  # active project memory retrieval + project context synthesis
   experiments/  # throwaway LLM experiment harnesses
+  mastra/       # Mastra agent runtime adapter
   specialists/  # local specialist contracts + sequential harness scaffold
 ```

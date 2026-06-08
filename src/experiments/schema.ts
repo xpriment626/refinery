@@ -56,7 +56,7 @@ function loadDistillationSeed(paths: ExperimentPaths): DistillationOutput {
   return latestParsed<DistillationOutput>(paths, "distillation") ?? fixtureDistillation;
 }
 
-function prompt(distillation: DistillationOutput): { system: string; user: string } {
+export function buildSchemaPrompt(distillation: DistillationOutput): { system: string; user: string } {
   return {
     system: [
       schemaSpecialist.prompt,
@@ -163,7 +163,7 @@ export async function runSchemaExperiment(
   options: BaseExperimentOptions = {},
 ): Promise<ArtifactRunResult<SchemaOutput>> {
   const distillation = loadDistillationSeed(paths);
-  const builtPrompt = prompt(distillation);
+  const builtPrompt = buildSchemaPrompt(distillation);
   return runArtifactExperiment({
     paths,
     runId: options.runId ?? defaultRunId("schema"),
