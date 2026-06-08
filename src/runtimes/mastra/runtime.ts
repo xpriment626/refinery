@@ -1,8 +1,8 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { Agent } from "@mastra/core/agent";
-import type { ModelConfig } from "../env.ts";
-import type { LocalSpecialist } from "../specialists/types.ts";
-import type { ModelCaller } from "../experiments/capture.ts";
+import type { ModelConfig } from "../../env.ts";
+import type { LocalSpecialist, ModelCaller } from "../../core/specialists/types.ts";
+import { buildSpecialistInstructions } from "../../core/specialists/prompt.ts";
 
 export interface MastraRuntimeMetadata {
   framework: "mastra";
@@ -23,19 +23,7 @@ export function mastraRuntimeMetadata(specialist: LocalSpecialist): MastraRuntim
 }
 
 export function buildMastraInstructions(specialist: LocalSpecialist): string {
-  return [
-    specialist.prompt,
-    "",
-    "Input contract:",
-    ...specialist.inputContract.map((item) => `- ${item}`),
-    "",
-    "Output contract:",
-    ...specialist.outputContract.map((item) => `- ${item}`),
-    "",
-    "Tool boundary:",
-    `- Allowed tools: ${specialist.toolBoundary.allowedTools.join(", ") || "none"}`,
-    `- Forbidden tools: ${specialist.toolBoundary.forbiddenTools.join(", ") || "none"}`,
-  ].join("\n");
+  return buildSpecialistInstructions(specialist);
 }
 
 export function createMastraSpecialistAgent(specialist: LocalSpecialist, model: ModelConfig): Agent {

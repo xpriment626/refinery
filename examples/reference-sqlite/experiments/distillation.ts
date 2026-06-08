@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolvePaths } from "../config.ts";
-import { distillationSpecialist } from "../specialists/distillation.ts";
+import { distillationSpecialist } from "../../../src/core/specialists/distillation.ts";
 import type { CaptureOutput, CaptureCandidate, ExperimentPaths } from "./capture.ts";
 import {
   defaultRunId,

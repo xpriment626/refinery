@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   createSequentialRefinementHarness,
   specialists,
-} from "./specialists/index.ts";
+} from "./core/specialists/index.ts";
 
 test("local specialists are scaffolded as separate agents with contracts", () => {
   assert.deepEqual(

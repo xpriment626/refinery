@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolvePaths } from "../config.ts";
-import { relevanceSpecialist } from "../specialists/relevance.ts";
+import { relevanceSpecialist } from "../../../src/core/specialists/relevance.ts";
 import type { ExperimentPaths } from "./capture.ts";
 import type { SchemaOutput } from "./schema.ts";
 import {

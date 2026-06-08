@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ModelConfig } from "../env.ts";
-import { loadModelConfig } from "../env.ts";
-import { createMastraModelCaller, mastraRuntimeMetadata } from "../mastra/runtime.ts";
-import type { LocalSpecialist } from "../specialists/types.ts";
-import type { ExperimentPaths, ModelCaller } from "./capture.ts";
+import type { ModelConfig } from "../../../src/env.ts";
+import { loadModelConfig } from "../../../src/env.ts";
+import { createMastraModelCaller, mastraRuntimeMetadata } from "../../../src/runtimes/mastra/runtime.ts";
+import type { LocalSpecialist, ModelCaller } from "../../../src/core/specialists/types.ts";
+import type { ExperimentPaths } from "./capture.ts";
 
 export interface ArtifactRunResult<T> {
   runId: string;
@@ -23,7 +23,7 @@ export function defaultRunId(prefix: string): string {
 }
 
 export function loadDefaultModel(): ModelConfig {
-  return loadModelConfig(path.resolve(import.meta.dirname, "../.."));
+  return loadModelConfig(path.resolve(import.meta.dirname, "../../.."));
 }
 
 export function redactModel(config: ModelConfig): Omit<ModelConfig, "apiKey"> & {

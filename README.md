@@ -1,137 +1,131 @@
 # refinery
 
-Local Refinery memory service — **Stage A local memory slice**.
+Refinery is a storage-agnostic memory refinement core. It defines specialist
+contracts and runtime adapters for turning caller-provided session history,
+source slices, existing memory candidates, and policy context into structured
+memory-refinement outputs.
 
-This is a reroll-driven vertical slice. It imports real Claude Code history for
-a working directory into a local canonical store, lets you inspect it, governs
-proposal activation, and exposes active project memories through MCP read tools.
-Live LLM refinement, Coral coordination, the dashboard, the watcher, auth,
-vector search, source-snapshot writes, and cloud deployment remain out of scope
-for this slice.
+The core package does not require `refinery.db`, does not own customer memory
+storage, and does not activate durable memory on its own. Persistence of
+proposals, approvals, rejections, and final memories belongs to the integrating
+app or customer-owned store unless the optional reference adapter is selected.
 
 ## Requirements
 
-- Node.js >= 24 (uses built-in `node:sqlite` and native TypeScript type
-  stripping — no build step, no native modules to compile).
+- Node.js >= 24.
 
-## Commands
+## Product Boundary
+
+Refinery core owns:
+
+- framework-neutral specialist contracts under `src/core/specialists/`
+- stateless prompt construction for each specialist
+- runtime adapters such as the Mastra adapter under `src/runtimes/`
+- a stateless MCP stdio surface for exposing specialist contracts and prompt
+  construction
+
+Integrators own:
+
+- source discovery and normalization
+- durable storage
+- user approval workflows
+- final memory writes, updates, supersessions, archives, and merges
+- privacy, tenancy, auth, and customer-specific retention policy
+
+The current Claude/Codex session-history plus SQLite implementation lives under
+`examples/reference-sqlite/`. It is a runnable reference adapter for local
+experiments, not the required product surface.
+
+## Core Commands
 
 ```bash
-# Start the local Refinery instance (create/migrate the relational store + raw
-# source store). This is the single startup command.
-node src/cli.ts up
+# Run the storage-agnostic MCP stdio server.
+npm run mcp
 
-# Import Claude Code history for the CURRENT working directory.
-# The encoded Claude project path is derived from the cwd at runtime — never
-# hardcoded — so this works from any project directory.
-cd /path/to/your/project
-node /abs/path/to/refinery/src/cli.ts import claude-code
-#   ...or target another directory explicitly:
-node src/cli.ts import claude-code --path /path/to/your/project
-
-# Inspect what was imported.
-node src/cli.ts inspect sources    # JSONL sessions + legacy memory files, with provenance
-node src/cli.ts inspect memories   # memories (active/superseded/archived), with provenance
-
-# Proposal review & activation (approval-gated lifecycle).
-node src/cli.ts proposals seed              # insert deterministic seed proposals (idempotent)
-node src/cli.ts proposals list              # list proposals + lifecycle status
-node src/cli.ts proposals show <id>         # full 8-field proposal contract
-node src/cli.ts proposals approve <id> [--by <actor>]   # the ONLY path to active memory
-node src/cli.ts proposals reject  <id> [--by <actor>]   # never becomes active
-
-# Run the MCP stdio server for agent-facing read tools.
-node src/mcp.ts
+# Run all core and reference-adapter tests.
+npm test
 ```
 
-`npm run refinery -- <args>` is also wired as a convenience.
-`npm run mcp` starts the MCP stdio server. `npm test` runs the local smoke tests.
-`npm run experiment:<specialist>` runs one throwaway Mastra-backed specialist
-LLM smoke test using the local `.env` model config.
+The core MCP server exposes:
 
-## What it does
+- `refinery_list_specialists`
+- `refinery_get_specialist_contract`
+- `refinery_build_specialist_prompt`
 
-- **Discovery.** Maps the working directory to its Claude Code project-history
-  folder (`~/.claude/projects/<encoded-path>`) by deriving the encoding at
-  runtime (`/` and `.` → `-`).
-- **Import.** Ingests every top-level `*.jsonl` session and every legacy
-  `memory/*.md` file. Legacy memory files are imported as **active** memories
-  tagged with provenance `claude-memory-legacy`. Source files are read-only and
-  never modified; raw bytes are copied into a content-addressed raw store.
-- **Idempotent.** Re-running the import does not duplicate rows
-  (`UNIQUE(project_id, source_path)` and `UNIQUE(source_id)`).
-- **Inspectable.** Both sources and active memories list back with provenance
-  (source path, content hash, timestamps).
+These tools do not read or write SQLite. They expose the portable specialist
+contracts that other runtimes, MCP hosts, or agent frameworks can bind to their
+own data sources.
 
-## Proposal lifecycle (governance spine)
+## Specialist Pipeline
 
-Durable memory is governed (pattern-language §5: proposals-not-direct-writes).
-A proposal carries the full eight-field contract — memory type, proposed scope,
-atomic body, confidence, rationale, source transcript references, suggested
-mutation operation (`create`/`update`/`supersede`/`archive`/`merge`), and an
-existing-memory target when the op is not `create`.
+The first refinement scaffold is:
 
-```
-proposal (status 'proposed')
-  --approve--> ACTIVE memory   (records approver + timestamp; memory links back
-               (the only path)   to its originating proposal + source evidence)
-  --reject---> status 'rejected' (never activates)
-```
-
-Activation side-effects by op: `create` adds one active memory; `update` /
-`supersede` / `merge` add the new memory and demote the target to `superseded`
-(net active unchanged); `archive` moves the target to `archived`. **Nothing
-becomes active except through an explicit `approve`.** This slice seeds
-proposals deterministically; the LLM refiner that generates them is a later
-slice and plugs into this same contract.
-
-## MCP read tools
-
-The Stage A MCP server runs over stdio and exposes read-only tools:
-
-- `refinery_search_memory` — searches active project-scoped memories and returns
-  structured records with provenance.
-- `refinery_get_memory` — hydrates one active project-scoped memory by id.
-- `refinery_get_project_context` — returns readable project-context synthesis
-  plus structured supporting memories and provenance identifiers.
-
-The tools read from the canonical SQLite store under `REFINERY_HOME` or the
-default `.refinery/` instance. They do not write source snapshots, generate
-proposals, or activate memory.
-
-## Local specialist scaffold
-
-The first local refinement scaffold lives under `src/specialists/`:
-
-```
+```text
 Capture -> Distillation -> Schema -> Relevance -> Relationship Review
 ```
 
-Each specialist is separate code with a prompt, input contract, output contract,
-and allowed/forbidden tool boundary. The sequential harness describes the local
-handoff shape. The live experiment runtime wraps those same framework-neutral
-specialist definitions as Mastra agents; Mastra is the execution adapter, not
-the domain contract. Coral coordination is a later substitution for the
-harness, not part of this slice.
+Each specialist is defined as a prompt, input contract, output contract, and
+tool boundary. The definitions are framework-neutral; Mastra is currently an
+execution adapter, and Coral or another runtime can be added as another adapter.
 
-Schema owns the authoritative memory-type routing. It emits `memory_type` for
-proposal compatibility and richer type metadata for evaluation:
-`primary_type`, optional `secondary_type`, `type_confidence`,
-`type_rationale`, `ambiguities`, `durability`, and `ttl`. The initial taxonomy
-is `semantic`, `episodic`, `procedural`, `operational`, and `reflective`;
-operational candidates are treated as usually ephemeral or TTL-bound unless
-they can be reframed into a durable type.
+Schema owns memory-type routing. It emits proposal-compatible `memory_type`
+plus richer evaluation metadata: `primary_type`, optional `secondary_type`,
+`type_confidence`, `type_rationale`, `ambiguities`, `durability`, and `ttl`.
 
-Relationship Review is a bounded read-only comparison pass after Relevance. It
-compares proposal-shaped candidates against active project memories and
-classifies each relationship as `novel`, `duplicate`, `refinement`,
-`contradiction`, `supersession`, or `too_weak`. It does not write, promote,
-archive, or activate memory.
+Relationship Review is a bounded comparison pass. It classifies candidate
+relationships as `novel`, `duplicate`, `refinement`, `contradiction`,
+`supersession`, or `too_weak`. It does not write, promote, archive, or activate
+memory.
 
-## Local LLM experiments
+## Reference SQLite Adapter
+
+The optional reference adapter demonstrates one possible local implementation:
+
+- import Claude Code JSONL session history and legacy `memory/*.md`
+- copy raw source evidence into `.refinery/raw/`
+- store source, memory, and proposal lifecycle rows in `.refinery/refinery.db`
+- expose SQLite-backed MCP read tools
+- run throwaway Mastra-backed specialist experiments against imported local data
+
+```bash
+# Create/migrate the local reference instance.
+npm run reference:sqlite -- up
+
+# Import Claude Code history for the current working directory.
+cd /path/to/your/project
+node /abs/path/to/refinery/examples/reference-sqlite/cli.ts import claude-code
+
+# Or target another directory explicitly.
+npm run reference:sqlite -- import claude-code --path /path/to/your/project
+
+# Inspect reference-adapter data.
+npm run reference:sqlite -- inspect sources
+npm run reference:sqlite -- inspect memories
+
+# Approval-gated proposal lifecycle in the reference adapter.
+npm run reference:sqlite -- proposals seed
+npm run reference:sqlite -- proposals list
+npm run reference:sqlite -- proposals show <id>
+npm run reference:sqlite -- proposals approve <id> [--by <actor>]
+npm run reference:sqlite -- proposals reject <id> [--by <actor>]
+
+# Run the SQLite-backed MCP stdio server.
+npm run mcp:reference-sqlite
+```
+
+The reference MCP server exposes:
+
+- `refinery_search_memory`
+- `refinery_get_memory`
+- `refinery_get_project_context`
+
+Those tools are intentionally adapter-specific. They read from the reference
+SQLite store under `REFINERY_HOME` or the default `.refinery/` instance.
+
+## Reference Experiments
 
 Throwaway specialist behavior tests are stored under `.refinery/experiments/`.
-They are local instance artifacts, not canonical memory state.
+They are local artifacts, not canonical memory state.
 
 ```bash
 cp .env.example .env
@@ -144,23 +138,11 @@ npm run experiment:relationship-review
 npm run experiment:workflow
 ```
 
-Each one-by-one specialist experiment writes `input.json`, wraps the specialist
-as a Mastra agent, calls the configured OpenRouter model through Mastra, saves
-`output.raw.md`, validates the specialist output contract into
-`output.parsed.json`, and writes `eval.md`. Capture selects a deterministic
-compact slice from imported Fabrick Claude Code session history. Distillation
-uses the latest successful Capture output when available, Schema uses the
-latest successful Distillation output when available, and Relevance uses the
-latest successful Schema output when available. Relationship Review uses the
-latest successful Relevance output when available and retrieves active project
-memory candidates for comparison. Each runner also has a fixture fallback so it
-remains runnable independently.
+Each experiment writes `input.json`, `output.raw.md`, `output.parsed.json`, and
+`eval.md`. The sequential workflow experiment additionally writes per-step
+artifacts under:
 
-`npm run experiment:workflow` is the middle-ground baseline between isolated
-specialists and future Coral coordination. It uses Mastra's workflow primitive
-to run the same specialists sequentially in one shot:
-
-```
+```text
 .refinery/experiments/workflow-<timestamp>/
   input.json
   steps/
@@ -173,33 +155,28 @@ to run the same specialists sequentially in one shot:
   eval.md
 ```
 
-Experiments do **not** write to `refinery.db`, create proposals, activate
-memory, or involve Coral.
-
-## Storage layout (authority boundaries)
-
-The local instance lives under `.refinery/` (gitignored):
-
-- `.refinery/refinery.db` — **canonical** relational record (SQLite): `project`,
-  `source`, `memory`. Lifecycle (`status`), `scope`, `type`, and provenance are
-  first-class fields from the start.
-- `.refinery/raw/<sha256>` — **raw source evidence**: immutable, content-
-  addressed copies of every imported file. The object-store analog; the DB
-  points back to it.
+Experiments do not write to `refinery.db`, create proposals, activate memory, or
+involve Coral.
 
 ## Layout
 
-```
+```text
 src/
-  cli.ts        # command entrypoint (up | import claude-code | inspect …)
-  config.ts     # instance-home / db / raw-store path resolution
-  db.ts         # node:sqlite open + schema + idempotent helpers
-  discovery.ts  # cwd → encoded path → session/memory discovery
-  hash.ts       # sha256 of source files (read-only)
-  mastra/       # Mastra runtime adapter for specialist experiments
-  mcp.ts        # MCP stdio server exposing Stage A read tools
-  retrieval.ts  # active project memory retrieval + project context synthesis
-  experiments/  # throwaway LLM experiment harnesses
-  mastra/       # Mastra agent runtime adapter
-  specialists/  # local specialist contracts + sequential harness scaffold
+  core/
+    specialists/       # storage-agnostic specialist contracts and prompt helpers
+  runtimes/
+    mastra/            # Mastra adapter for specialist execution
+  env.ts               # local model config loader
+  mcp.ts               # storage-agnostic MCP stdio server
+
+examples/
+  reference-sqlite/
+    cli.ts             # local reference adapter CLI
+    config.ts          # .refinery path resolution
+    db.ts              # node:sqlite schema and migrations
+    discovery.ts       # Claude Code history discovery
+    retrieval.ts       # SQLite active-memory retrieval
+    proposals.ts       # reference approval lifecycle
+    mcp.ts             # SQLite-backed MCP read tools
+    experiments/       # local Mastra experiment harnesses
 ```

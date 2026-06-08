@@ -1,10 +1,6 @@
 #!/usr/bin/env node
-import {
-  buildSpecialistInstructions,
-  buildSpecialistUserPrompt,
-  specialists,
-  type SpecialistName,
-} from "./core/specialists/index.ts";
+import { resolvePaths } from "./config.ts";
+import { getMemory, getProjectContext, searchMemory } from "./retrieval.ts";
 
 type JsonRpcRequest = {
   jsonrpc?: string;
@@ -15,56 +11,44 @@ type JsonRpcRequest = {
 
 const tools = [
   {
-    name: "refinery_list_specialists",
-    description: "List storage-agnostic Refinery specialist contracts.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "refinery_get_specialist_contract",
-    description: "Return one specialist prompt, input contract, output contract, and tool boundary.",
+    name: "refinery_search_memory",
+    description: "Search active project-scoped Refinery memories with provenance.",
     inputSchema: {
       type: "object",
       properties: {
-        name: {
-          type: "string",
-          enum: specialists.map((specialist) => specialist.name),
-        },
+        query: { type: "string", description: "Lexical query over memory body and provenance." },
+        limit: { type: "number", description: "Maximum number of memories to return." },
+        type: { type: "string", description: "Optional memory type filter." },
       },
-      required: ["name"],
       additionalProperties: false,
     },
   },
   {
-    name: "refinery_build_specialist_prompt",
+    name: "refinery_get_memory",
+    description: "Get one active project-scoped Refinery memory by id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Memory id." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "refinery_get_project_context",
     description:
-      "Build a stateless system/user prompt pair for a specialist over caller-provided input.",
+      "Return readable project-context synthesis plus structured supporting active memories.",
     inputSchema: {
       type: "object",
       properties: {
-        name: {
-          type: "string",
-          enum: specialists.map((specialist) => specialist.name),
-        },
-        input: {
-          description: "Caller-provided source slice, candidates, proposals, or context.",
-        },
+        query: { type: "string", description: "Question or topic to orient around." },
+        limit: { type: "number", description: "Maximum number of supporting memories." },
       },
-      required: ["name", "input"],
       additionalProperties: false,
     },
   },
 ];
-
-function getSpecialist(name: unknown) {
-  if (typeof name !== "string") throw new Error("specialist name must be a string");
-  const specialist = specialists.find((candidate) => candidate.name === name);
-  if (!specialist) throw new Error(`Unknown specialist: ${name}`);
-  return specialist;
-}
 
 function textResult(text: string, structuredContent: unknown): Record<string, unknown> {
   return {
@@ -74,31 +58,30 @@ function textResult(text: string, structuredContent: unknown): Record<string, un
 }
 
 function handleToolCall(name: string, args: Record<string, unknown> = {}): Record<string, unknown> {
-  if (name === "refinery_list_specialists") {
-    const result = specialists.map((specialist) => ({
-      name: specialist.name,
-      purpose: specialist.purpose,
-      allowedTools: specialist.toolBoundary.allowedTools,
-      forbiddenTools: specialist.toolBoundary.forbiddenTools,
-    }));
-    return textResult(JSON.stringify(result, null, 2), { specialists: result });
+  const paths = resolvePaths();
+  if (name === "refinery_search_memory") {
+    const result = searchMemory(paths, {
+      query: typeof args.query === "string" ? args.query : undefined,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+      type: typeof args.type === "string" ? args.type : undefined,
+    });
+    return textResult(JSON.stringify(result, null, 2), { memories: result });
   }
 
-  if (name === "refinery_get_specialist_contract") {
-    const specialist = getSpecialist(args.name);
-    return textResult(JSON.stringify(specialist, null, 2), { specialist });
+  if (name === "refinery_get_memory") {
+    if (typeof args.id !== "number") throw new Error("refinery_get_memory requires numeric id");
+    const result = getMemory(paths, { id: args.id });
+    return textResult(result ? JSON.stringify(result, null, 2) : "Memory not found.", {
+      memory: result,
+    });
   }
 
-  if (name === "refinery_build_specialist_prompt") {
-    const specialist = getSpecialist(args.name) as (typeof specialists)[number] & {
-      name: SpecialistName;
-    };
-    const result = {
-      specialist: specialist.name,
-      system: buildSpecialistInstructions(specialist),
-      user: buildSpecialistUserPrompt(args.input),
-    };
-    return textResult(JSON.stringify(result, null, 2), result);
+  if (name === "refinery_get_project_context") {
+    const result = getProjectContext(paths, {
+      query: typeof args.query === "string" ? args.query : undefined,
+      limit: typeof args.limit === "number" ? args.limit : undefined,
+    });
+    return textResult(result.orientation, result);
   }
 
   throw new Error(`Unknown tool: ${name}`);
@@ -120,7 +103,7 @@ export function handleMessage(message: JsonRpcRequest): string | null {
       return response(message.id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "refinery-core", version: "0.0.1" },
+        serverInfo: { name: "refinery", version: "0.0.1" },
       });
     }
 

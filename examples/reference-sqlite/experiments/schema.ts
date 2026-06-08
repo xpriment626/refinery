@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolvePaths } from "../config.ts";
-import { schemaSpecialist } from "../specialists/schema.ts";
+import { schemaSpecialist } from "../../../src/core/specialists/schema.ts";
 import type { ExperimentPaths } from "./capture.ts";
 import type { DistillationOutput } from "./distillation.ts";
 import {

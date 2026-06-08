@@ -14,3 +14,9 @@ export interface LocalSpecialist {
   outputContract: string[];
   toolBoundary: ToolBoundary;
 }
+
+export type ModelCaller = (args: {
+  model: import("../../env.ts").ModelConfig;
+  system: string;
+  user: string;
+}) => Promise<string>;

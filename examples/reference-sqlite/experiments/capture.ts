@@ -4,9 +4,10 @@ import type { DatabaseSync } from "node:sqlite";
 import type { RefineryPaths } from "../config.ts";
 import { resolvePaths } from "../config.ts";
 import { openDb } from "../db.ts";
-import { loadModelConfig, type ModelConfig } from "../env.ts";
-import { createMastraModelCaller, mastraRuntimeMetadata } from "../mastra/runtime.ts";
-import { captureSpecialist } from "../specialists/capture.ts";
+import { loadModelConfig, type ModelConfig } from "../../../src/env.ts";
+import { createMastraModelCaller, mastraRuntimeMetadata } from "../../../src/runtimes/mastra/runtime.ts";
+import { captureSpecialist } from "../../../src/core/specialists/capture.ts";
+import type { ModelCaller } from "../../../src/core/specialists/types.ts";
 
 export type ExperimentPaths = RefineryPaths;
 
@@ -42,12 +43,6 @@ export interface CaptureExperimentResult {
   runDir: string;
   parsed: CaptureOutput;
 }
-
-export type ModelCaller = (request: {
-  model: ModelConfig;
-  system: string;
-  user: string;
-}) => Promise<string>;
 
 interface SourceRow {
   id: number;
@@ -303,7 +298,7 @@ export async function runCaptureExperiment(
   paths: ExperimentPaths,
   options: RunCaptureExperimentOptions = {},
 ): Promise<CaptureExperimentResult> {
-  const model = options.model ?? loadModelConfig(path.resolve(import.meta.dirname, "../.."));
+  const model = options.model ?? loadModelConfig(path.resolve(import.meta.dirname, "../../.."));
   const runId = options.runId ?? defaultRunId();
   const runDir = path.join(paths.home, "experiments", runId);
   fs.mkdirSync(runDir, { recursive: true });

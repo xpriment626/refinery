@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildMastraInstructions, createMastraSpecialistAgent, mastraRuntimeMetadata } from "./mastra/runtime.ts";
-import { captureSpecialist } from "./specialists/capture.ts";
+import { buildMastraInstructions, createMastraSpecialistAgent, mastraRuntimeMetadata } from "./runtimes/mastra/runtime.ts";
+import { captureSpecialist } from "./core/specialists/capture.ts";
 
 const model = {
   provider: "openrouter",

@@ -4,13 +4,13 @@ import path from "node:path";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { resolvePaths } from "../config.ts";
-import type { ModelConfig } from "../env.ts";
-import { createMastraModelCaller } from "../mastra/runtime.ts";
-import { captureSpecialist } from "../specialists/capture.ts";
-import { distillationSpecialist } from "../specialists/distillation.ts";
-import { relationshipReviewSpecialist } from "../specialists/relationship-review.ts";
-import { relevanceSpecialist } from "../specialists/relevance.ts";
-import { schemaSpecialist } from "../specialists/schema.ts";
+import type { ModelConfig } from "../../../src/env.ts";
+import { createMastraModelCaller } from "../../../src/runtimes/mastra/runtime.ts";
+import { captureSpecialist } from "../../../src/core/specialists/capture.ts";
+import { distillationSpecialist } from "../../../src/core/specialists/distillation.ts";
+import { relationshipReviewSpecialist } from "../../../src/core/specialists/relationship-review.ts";
+import { relevanceSpecialist } from "../../../src/core/specialists/relevance.ts";
+import { schemaSpecialist } from "../../../src/core/specialists/schema.ts";
 import {
   buildCapturePrompt,
   parseCaptureOutput,

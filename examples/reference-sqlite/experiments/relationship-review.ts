@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { resolvePaths } from "../config.ts";
 import { searchMemory, type SearchMemoryResult } from "../retrieval.ts";
-import { relationshipReviewSpecialist } from "../specialists/relationship-review.ts";
+import { relationshipReviewSpecialist } from "../../../src/core/specialists/relationship-review.ts";
 import type { ExperimentPaths } from "./capture.ts";
 import type { RelevanceOutput } from "./relevance.ts";
 import {

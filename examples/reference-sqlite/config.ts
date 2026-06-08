@@ -17,7 +17,7 @@ export interface RefineryPaths {
 
 export function resolvePaths(): RefineryPaths {
   // Default instance home: <package-root>/.refinery (gitignored).
-  const packageRoot = path.resolve(import.meta.dirname, "..");
+  const packageRoot = path.resolve(import.meta.dirname, "../..");
   const home = process.env.REFINERY_HOME
     ? path.resolve(process.env.REFINERY_HOME)
     : path.join(packageRoot, ".refinery");
