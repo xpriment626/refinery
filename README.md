@@ -48,6 +48,9 @@ refinery instance init --from /path/to/old/.refinery --reset --json
 # Validate an agent-facing memory-store adapter.
 refinery adapter check --adapter ./my-memory-adapter.mjs --json
 
+# Probe adapter reads and validate returned record shapes.
+refinery adapter check --adapter ./my-memory-adapter.mjs --probe --scope project --json
+
 # Run a dry-run memory review over an adapter and emit proposal artifacts.
 refinery review --adapter ./my-memory-adapter.mjs --scope project --json
 
@@ -56,7 +59,8 @@ refinery review --mode live --adapter ./my-memory-adapter.mjs --scope project --
 
 # Deliver the final review bundle to an app-owned callback/sink.
 refinery review --adapter ./my-memory-adapter.mjs --scope project \
-  --sink-url https://your-app.example/refinery/proposals --json
+  --sink-url https://your-app.example/refinery/proposals \
+  --sink-timeout-ms 10000 --json
 
 # Run the same CLI path over the bundled reference SQLite adapter.
 refinery review --adapter reference-sqlite --scope project --json
@@ -90,13 +94,23 @@ and hand proposal bundles to their own approval/apply path.
 The CLI currently exposes:
 
 - `refinery instance init --home <dir> --from <dir> --reset --json`
-- `refinery adapter check --adapter <path|reference-sqlite> --json`
-- `refinery review --mode deterministic|live --adapter <path|reference-sqlite> --scope <scope> --home <dir> --sink-url <url> --json`
+- `refinery adapter check --adapter <path|reference-sqlite> --probe --scope <scope> --json`
+- `refinery review --mode deterministic|live --adapter <path|reference-sqlite> --scope <scope> --home <dir> --run-id <id> --sink-url <url> --sink-timeout-ms <ms> --json`
 
 `review` is dry-run only in both modes. It reads source evidence and active
 memories through the adapter contract, writes a run directory, and emits
 proposal-shaped JSON. It does not approve proposals, mutate memory, or write to
 the backing store.
+
+JSON output is the machine contract. Successful review payloads include
+`ok: true`, `schemaVersion: "refinery.review.v1"`, `metadata`, `proposals`, and
+`rejected`. When `--json` is present, CLI failures emit `ok: false` with
+`error.code`, `error.message`, optional `error.phase`, and `runId`/`runDir` when
+available. Non-JSON terminal usage still reports failures on stderr.
+
+Review metadata records reproducibility inputs: mode, adapter, scope, creation
+time, sink URL, source limits, specialist order, runtime adapter, and redacted
+model provider/base URL/model name for live runs. API keys are never emitted.
 
 Modes:
 
@@ -108,6 +122,8 @@ Sink/callback behavior is deliberately app-owned. `--sink-url` posts the final
 review bundle after artifacts are written. The receiving app decides whether to
 commit memory updates, queue human review, archive for auditability, or reject
 the proposals. The sink result is written to `sink.json` inside the trial.
+HTTP sink calls time out after 10000ms by default; override with
+`--sink-timeout-ms`.
 
 ### Local Instance Home
 
@@ -143,6 +159,12 @@ steps/
   relationship-review/output.parsed.json
 ```
 
+Failed reviews that reach a run directory write `status.json` and a failed
+`review.json` containing `status: "failed"`, the error payload, failed step
+when known, and a raw-output path when a live specialist returned invalid JSON.
+Live step directories preserve `input.json` and `output.raw.md` when available
+so another agent can inspect the failed run.
+
 The first CLI scaffold uses deterministic local passes to prove the adapter,
 JSON, artifact, and proposal contracts without requiring a live model. Model
 backed specialist execution can replace those internals without changing the
@@ -163,6 +185,11 @@ Adapters are caller-owned bridges to external memory stores. They must expose:
 Optional mutation capability:
 
 - `applyProposal({ proposal, approvedBy, dryRun? })`
+
+`adapter check` validates the adapter shape by default. Add `--probe` to perform
+small `listSourceEvidence` and `listActiveMemories` reads and validate returned
+record shapes. Probe mode expects opaque string IDs, source text, and active
+memory `id`, `type`, `scope`, `status`, and `body` fields.
 
 Agent-facing records should use opaque string IDs. Numeric database IDs are an
 adapter implementation detail and should not leak into core contracts.
