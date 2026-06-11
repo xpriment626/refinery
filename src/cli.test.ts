@@ -98,6 +98,22 @@ export const adapter = {
   return adapterPath;
 }
 
+function makeShapeInvalidAdapter(tmp: string): string {
+  const adapterPath = path.join(tmp, "shape-invalid-adapter.mjs");
+  fs.writeFileSync(
+    adapterPath,
+    `
+export const adapter = {
+  name: "shape-invalid",
+  async listSourceEvidence() {
+    return [];
+  }
+};
+`,
+  );
+  return adapterPath;
+}
+
 function makeInvalidMemoryAdapter(tmp: string): string {
   const adapterPath = path.join(tmp, "invalid-memory-adapter.mjs");
   fs.writeFileSync(
@@ -242,6 +258,63 @@ test("refinery review with --json emits structured errors for invalid mode", () 
   assert.equal(parsed.ok, false);
   assert.equal(parsed.command, "review");
   assert.equal((parsed.error as { code: string }).code, "INVALID_OPTION");
+});
+
+test("refinery adapter check with --json emits structured errors for adapter load failure", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-adapter-load-fail-"));
+
+  const result = runCli(["adapter", "check", "--adapter", path.join(tmp, "missing.mjs"), "--json"]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "adapter check");
+  assert.equal((parsed.error as { code: string }).code, "ADAPTER_LOAD_FAILED");
+});
+
+test("refinery review with --json emits structured errors for adapter validation failure", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-adapter-validation-fail-"));
+  const adapterPath = makeShapeInvalidAdapter(tmp);
+
+  const result = runCli(["review", "--adapter", adapterPath, "--json"]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "review");
+  assert.equal((parsed.error as { code: string }).code, "ADAPTER_INVALID");
+  assert.match(JSON.stringify(parsed.error), /searchSourceEvidence/);
+});
+
+test("refinery review live with --json emits structured errors for model caller load failure", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-model-caller-load-fail-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+
+  const result = runCli(
+    [
+      "review",
+      "--mode",
+      "live",
+      "--adapter",
+      adapterPath,
+      "--model-caller",
+      path.join(tmp, "missing-model.mjs"),
+      "--json",
+    ],
+    {
+      OPENROUTER_API_KEY: "test-key",
+      REFINERY_MODEL_NAME: "deepseek/deepseek-v4-pro",
+    },
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "review");
+  assert.equal((parsed.error as { code: string }).code, "MODEL_CALLER_LOAD_FAILED");
 });
 
 test("refinery review validates source limits and run ids before writing artifacts", () => {
