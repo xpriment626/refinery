@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -153,9 +153,86 @@ function startFailingSink(): Promise<{
   url: string;
   close: () => Promise<void>;
 }> {
-  const server = http.createServer((_req, res) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-failing-sink-"));
+  const serverPath = path.join(tmp, "server.mjs");
+  const portPath = path.join(tmp, "port.txt");
+  fs.writeFileSync(
+    serverPath,
+    `
+import fs from "node:fs";
+import http from "node:http";
+
+const portPath = process.argv[2];
+const server = http.createServer((req, res) => {
+  req.resume();
+  req.on("end", () => {
     res.writeHead(503, { "content-type": "text/plain" });
     res.end("sink unavailable");
+  });
+});
+
+server.listen(0, "127.0.0.1", () => {
+  const address = server.address();
+  fs.writeFileSync(portPath, String(address.port));
+});
+
+process.on("SIGTERM", () => {
+  server.close(() => process.exit(0));
+});
+
+setInterval(() => {}, 1000);
+`,
+  );
+  const child = spawn(process.execPath, [serverPath, portPath], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    let settled = false;
+    let poll: NodeJS.Timeout;
+    const failStartup = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      child.kill("SIGTERM");
+      reject(error);
+    };
+    child.once("exit", (code, signal) => {
+      failStartup(new Error(`Failing sink fixture exited before startup: code=${code} signal=${signal}`));
+    });
+    poll = setInterval(() => {
+      if (!fs.existsSync(portPath)) {
+        if (Date.now() - startedAt > 5000) {
+          failStartup(new Error("Timed out starting failing sink fixture."));
+        }
+        return;
+      }
+      settled = true;
+      clearInterval(poll);
+      const port = fs.readFileSync(portPath, "utf8");
+      resolve({
+        url: `http://127.0.0.1:${port}/refinery-callback`,
+        close: () =>
+          new Promise((done) => {
+            if (child.exitCode !== null || child.signalCode !== null) {
+              done();
+              return;
+            }
+            child.once("exit", () => done());
+            child.kill("SIGTERM");
+          }),
+      });
+    }, 10);
+  });
+}
+
+function startHangingSink(): Promise<{
+  url: string;
+  close: () => Promise<void>;
+}> {
+  const server = http.createServer((_req, _res) => {
+    // Intentionally left open so the CLI timeout path must abort the request.
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -324,8 +401,12 @@ test("refinery review validates source limits and run ids before writing artifac
   for (const args of [
     ["review", "--adapter", adapterPath, "--source-limit", "not-a-number", "--json"],
     ["review", "--adapter", adapterPath, "--source-limit", "-1", "--json"],
+    ["review", "--adapter", adapterPath, "--source-limit", "0", "--json"],
+    ["review", "--adapter", adapterPath, "--source-limit", "1.5", "--json"],
+    ["review", "--adapter", adapterPath, "--source-char-limit", "0", "--json"],
     ["review", "--adapter", adapterPath, "--source-char-limit", "1.5", "--json"],
     ["review", "--adapter", adapterPath, "--run-id", "../escape", "--json"],
+    ["review", "--adapter", adapterPath, "--run-id", "bad:name", "--json"],
   ]) {
     const result = runCli(args);
     assert.equal(result.status, 1, args.join(" "));
@@ -443,12 +524,17 @@ export async function callModel({ specialist }) {
   assert.equal(status.status, "failed");
   assert.equal(status.failedStep, "distillation");
   assert.equal(
+    fs.existsSync(path.join(tmp, "runs", "live-failure-test", "steps", "distillation", "input.json")),
+    true,
+  );
+  assert.equal(
     fs.existsSync(path.join(tmp, "runs", "live-failure-test", "steps", "distillation", "output.raw.md")),
     true,
   );
+  assert.match(status.rawOutputPath, /steps\/distillation\/output\.raw\.md$/);
 });
 
-test("refinery review sink failure emits JSON failure and failed-run artifacts", async () => {
+test("refinery review sink non-2xx emits JSON failure and failed-run artifacts", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-sink-failure-"));
   const adapterPath = makeFixtureAdapter(tmp);
   const sink = await startFailingSink();
@@ -465,6 +551,40 @@ test("refinery review sink failure emits JSON failure and failed-run artifacts",
       path.join(tmp, "runs"),
       "--sink-url",
       sink.url,
+      "--json",
+    ]);
+
+    assert.equal(result.status, 1);
+    const parsed = parseJsonOutput(result);
+    assert.equal(parsed.ok, false);
+    assert.equal((parsed.error as { code: string }).code, "SINK_CALLBACK_FAILED");
+    const status = JSON.parse(
+      fs.readFileSync(path.join(tmp, "runs", "sink-failure-test", "status.json"), "utf8"),
+    );
+    assert.equal(status.status, "failed");
+    assert.equal(status.error.code, "SINK_CALLBACK_FAILED");
+  } finally {
+    await sink.close();
+  }
+});
+
+test("refinery review sink timeout emits JSON failure without hanging", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-sink-timeout-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+  const sink = await startHangingSink();
+  try {
+    const result = runCli([
+      "review",
+      "--adapter",
+      adapterPath,
+      "--scope",
+      "project",
+      "--run-id",
+      "sink-timeout-test",
+      "--output-dir",
+      path.join(tmp, "runs"),
+      "--sink-url",
+      sink.url,
       "--sink-timeout-ms",
       "20",
       "--json",
@@ -475,7 +595,7 @@ test("refinery review sink failure emits JSON failure and failed-run artifacts",
     assert.equal(parsed.ok, false);
     assert.equal((parsed.error as { code: string }).code, "SINK_CALLBACK_TIMEOUT");
     const status = JSON.parse(
-      fs.readFileSync(path.join(tmp, "runs", "sink-failure-test", "status.json"), "utf8"),
+      fs.readFileSync(path.join(tmp, "runs", "sink-timeout-test", "status.json"), "utf8"),
     );
     assert.equal(status.status, "failed");
     assert.equal(status.error.code, "SINK_CALLBACK_TIMEOUT");
@@ -601,6 +721,19 @@ test("package bin target is executable and supports help output", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /agent-callable memory review CLI/);
+});
+
+test("package bin supports adapter check", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-bin-adapter-check-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+
+  const result = runBin(["adapter", "check", "--adapter", adapterPath, "--json"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "adapter check");
+  assert.equal(parsed.adapter.name, "fixture-memory");
 });
 
 test("refinery review writes to REFINERY_HOME trials by default", () => {
