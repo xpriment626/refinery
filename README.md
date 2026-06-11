@@ -39,6 +39,31 @@ experiments, not the required product surface.
 ## Core Commands
 
 ```bash
+# Create a local Refinery instance under ./.refinery.
+refinery instance init --json
+
+# Create a fresh local instance from a previous .refinery DB/raw store.
+refinery instance init --from /path/to/old/.refinery --reset --json
+
+# Validate an agent-facing memory-store adapter.
+refinery adapter check --adapter ./my-memory-adapter.mjs --json
+
+# Run a dry-run memory review over an adapter and emit proposal artifacts.
+refinery review --adapter ./my-memory-adapter.mjs --scope project --json
+
+# Run the same review with live sequential specialist calls.
+refinery review --mode live --adapter ./my-memory-adapter.mjs --scope project --json
+
+# Deliver the final review bundle to an app-owned callback/sink.
+refinery review --adapter ./my-memory-adapter.mjs --scope project \
+  --sink-url https://your-app.example/refinery/proposals --json
+
+# Run the same CLI path over the bundled reference SQLite adapter.
+refinery review --adapter reference-sqlite --scope project --json
+
+# From a local checkout before linking/installing the bin:
+node src/cli.ts review --adapter reference-sqlite --scope project --json
+
 # Run the storage-agnostic MCP stdio server.
 npm run mcp
 
@@ -55,6 +80,99 @@ The core MCP server exposes:
 These tools do not read or write SQLite. They expose the portable specialist
 contracts that other runtimes, MCP hosts, or agent frameworks can bind to their
 own data sources.
+
+## Agent-Callable CLI
+
+The promoted integration surface is CLI-first. Agents and automations should be
+able to call Refinery, receive stable JSON, inspect deterministic run artifacts,
+and hand proposal bundles to their own approval/apply path.
+
+The CLI currently exposes:
+
+- `refinery instance init --home <dir> --from <dir> --reset --json`
+- `refinery adapter check --adapter <path|reference-sqlite> --json`
+- `refinery review --mode deterministic|live --adapter <path|reference-sqlite> --scope <scope> --home <dir> --sink-url <url> --json`
+
+`review` is dry-run only in both modes. It reads source evidence and active
+memories through the adapter contract, writes a run directory, and emits
+proposal-shaped JSON. It does not approve proposals, mutate memory, or write to
+the backing store.
+
+Modes:
+
+- `deterministic` (default): local scaffold pass, no model calls.
+- `live`: sequential non-coordinated specialist calls:
+  `Capture -> Distillation -> Schema -> Relevance -> Relationship Review`.
+
+Sink/callback behavior is deliberately app-owned. `--sink-url` posts the final
+review bundle after artifacts are written. The receiving app decides whether to
+commit memory updates, queue human review, archive for auditability, or reject
+the proposals. The sink result is written to `sink.json` inside the trial.
+
+### Local Instance Home
+
+The packaged CLI defaults to a caller-owned local instance at `$PWD/.refinery`.
+Set `REFINERY_HOME` or pass `--home <dir>` to point at a different instance.
+The instance layout is:
+
+```text
+.refinery/
+  refinery.db       # optional reference SQLite state
+  raw/              # immutable source evidence copied by reference ingestion
+  trials/           # dry-run review outputs
+```
+
+`refinery instance init --from <old-home> --reset --json` archives any existing
+destination home as `.refinery.archive-<timestamp>`, copies `refinery.db` and
+`raw/` from the old home, and starts with an empty `trials/` directory. It does
+not copy old `experiments/`, `runs/`, or prior `trials/` directories.
+
+Run artifacts are written under `.refinery/trials/<run-id>/` by default:
+
+```text
+input.json
+metadata.json
+proposals.json
+rejected.json
+review.json
+steps/
+  capture/output.parsed.json
+  distillation/output.parsed.json
+  schema/output.parsed.json
+  relevance/output.parsed.json
+  relationship-review/output.parsed.json
+```
+
+The first CLI scaffold uses deterministic local passes to prove the adapter,
+JSON, artifact, and proposal contracts without requiring a live model. Model
+backed specialist execution can replace those internals without changing the
+agent-facing command shape.
+
+### Adapter Contract
+
+Adapters are caller-owned bridges to external memory stores. They must expose:
+
+- `name: string`
+- `listSourceEvidence({ scope, limit? })`
+- `searchSourceEvidence({ scope, query, limit? })`
+- `getSourceEvidence({ scope, id })`
+- `listActiveMemories({ scope, limit? })`
+- `searchActiveMemories({ scope, query, limit? })`
+- `getActiveMemory({ scope, id })`
+
+Optional mutation capability:
+
+- `applyProposal({ proposal, approvedBy, dryRun? })`
+
+Agent-facing records should use opaque string IDs. Numeric database IDs are an
+adapter implementation detail and should not leak into core contracts.
+
+The action taxonomy for maintenance proposals is:
+
+```text
+create, update, supersede, merge, archive, retag, quarantine,
+promote, demote, ttl_update, contradiction_review
+```
 
 ## Specialist Pipeline
 
@@ -158,11 +276,27 @@ artifacts under:
 Experiments do not write to `refinery.db`, create proposals, activate memory, or
 involve Coral.
 
+## Harness Surfaces
+
+Refinery core does not depend on Pi, OpenCode, Cursor, or Coral.
+
+- Pi is a candidate runtime for optional interactive workbench sessions,
+  specialist follow-up, and custom harnesses.
+- OpenCode is a useful reference for open coding-agent server integration.
+- Cursor is a useful reference for managed cloud coding-agent orchestration.
+
+The default product surface remains the agent-callable CLI. Harness-specific
+work should stay optional and outside `refinery-core` unless a stable adapter or
+runtime boundary has been proven.
+
 ## Layout
 
 ```text
 src/
+  cli.ts                # agent-callable CLI entrypoint
   core/
+    adapter.ts          # storage-adapter and proposal/action contracts
+    review.ts           # dry-run review scaffold over an adapter
     specialists/       # storage-agnostic specialist contracts and prompt helpers
   runtimes/
     mastra/            # Mastra adapter for specialist execution
