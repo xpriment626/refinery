@@ -121,6 +121,7 @@ async function runSpecialistStep<T>(args: {
     model: args.context.model,
     system: args.prompt.system,
     user: args.prompt.user,
+    specialist: args.specialist,
   });
   fs.writeFileSync(path.join(stepDir, "output.raw.md"), raw);
   const parsed = args.parse(raw);

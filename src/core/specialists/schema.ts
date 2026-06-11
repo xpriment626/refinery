@@ -32,7 +32,7 @@ episodic, procedural, or reflective memory.`,
     "typed[].durability: durable | ttl | ephemeral",
     "typed[].ttl: TTL string when durability is ttl, otherwise null",
     "typed[].proposed_scope: project for Stage A",
-    "typed[].mutation_op: create | update | supersede | archive | merge",
+    "typed[].action: create | update | supersede | archive | merge",
     "typed[].target_memory_id: existing memory id when applicable",
   ],
   toolBoundary: {

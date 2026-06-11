@@ -43,16 +43,44 @@ export function createMastraSpecialistAgent(specialist: LocalSpecialist, model: 
   });
 }
 
-export function createMastraModelCaller(specialist: LocalSpecialist): ModelCaller {
-  return async ({ model, system, user }) => {
-    const agent = createMastraSpecialistAgent(specialist, model);
-    const result = await agent.generate([
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ]);
-    if (typeof result.text !== "string" || !result.text.trim()) {
-      throw new Error("Mastra agent response did not include text.");
-    }
-    return result.text;
+export async function callOpenRouterChat(request: {
+  model: ModelConfig;
+  system: string;
+  user: string;
+}): Promise<string> {
+  if (request.model.provider !== "openrouter") {
+    throw new Error(`Unsupported model provider: ${request.model.provider}`);
+  }
+  const response = await fetch(`${request.model.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${request.model.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: request.model.modelName,
+      messages: [
+        { role: "system", content: request.system },
+        { role: "user", content: request.user },
+      ],
+      temperature: 0.1,
+      max_tokens: 3000,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`OpenRouter request failed (${response.status}): ${body.slice(0, 500)}`);
+  }
+  const json = (await response.json()) as {
+    choices?: { message?: { content?: string } }[];
   };
+  const content = json.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("OpenRouter response did not include message content.");
+  }
+  return content;
+}
+
+export function createMastraModelCaller(specialist: LocalSpecialist): ModelCaller {
+  return async ({ model, system, user }) => callOpenRouterChat({ model, system, user });
 }

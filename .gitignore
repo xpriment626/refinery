@@ -1,5 +1,6 @@
 # local Refinery instance data (DB + raw source store) — never committed
 .refinery/
+.refinery.archive-*/
 .env
 node_modules/
 *.log

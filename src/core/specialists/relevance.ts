@@ -11,7 +11,7 @@ ephemeral run noise, one-off operational details, and memories without clear
 future retrieval value. Emit final proposal-shaped records only; activation is
 reserved for the reviewer path.`,
   inputContract: [
-    "typed[].body, memory_type, proposed_scope, mutation_op, and source_refs from Schema",
+    "typed[].body, memory_type, proposed_scope, action, and source_refs from Schema",
     "typed[].target_memory_id when applicable",
   ],
   outputContract: [
@@ -21,7 +21,7 @@ reserved for the reviewer path.`,
     "proposals[].confidence",
     "proposals[].rationale",
     "proposals[].source_refs",
-    "proposals[].mutation_op",
+    "proposals[].action",
     "proposals[].target_memory_id",
     "rejected[].reason for candidates filtered out before proposal creation",
   ],

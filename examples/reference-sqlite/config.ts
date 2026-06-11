@@ -1,5 +1,8 @@
-import path from "node:path";
-import os from "node:os";
+import {
+  expandHome,
+  resolveRefineryPaths,
+  type ResolveRefineryPathsOptions,
+} from "../../src/core/instance.ts";
 
 /**
  * Resolution of the local Refinery instance data location.
@@ -15,23 +18,15 @@ export interface RefineryPaths {
   rawDir: string;
 }
 
-export function resolvePaths(): RefineryPaths {
-  // Default instance home: <package-root>/.refinery (gitignored).
-  const packageRoot = path.resolve(import.meta.dirname, "../..");
-  const home = process.env.REFINERY_HOME
-    ? path.resolve(process.env.REFINERY_HOME)
-    : path.join(packageRoot, ".refinery");
+export function resolvePaths(options: ResolveRefineryPathsOptions = {}): RefineryPaths {
+  // Default instance home: <caller cwd>/.refinery. This keeps packaged CLI
+  // installs from writing inside the npm package directory.
+  const paths = resolveRefineryPaths(options);
 
   return {
-    home,
-    dbPath: path.join(home, "refinery.db"),
-    rawDir: path.join(home, "raw"),
+    home: paths.home,
+    dbPath: paths.dbPath,
+    rawDir: paths.rawDir,
   };
 }
-
-/** Expand a leading ~ to the user home directory. */
-export function expandHome(p: string): string {
-  if (p === "~") return os.homedir();
-  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
-  return p;
-}
+export { expandHome };

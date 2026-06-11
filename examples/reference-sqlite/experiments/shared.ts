@@ -94,6 +94,7 @@ export async function runArtifactExperiment<T>(args: {
     model: args.model,
     system: args.prompt.system,
     user: args.prompt.user,
+    specialist: args.specialist,
   });
   fs.writeFileSync(path.join(runDir, "output.raw.md"), raw);
 

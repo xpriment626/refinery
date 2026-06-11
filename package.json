@@ -5,9 +5,11 @@
   "type": "module",
   "description": "Refinery — storage-agnostic memory refinement core with reference adapters.",
   "bin": {
+    "refinery": "src/cli.ts",
     "refinery-reference-sqlite": "examples/reference-sqlite/cli.ts"
   },
   "scripts": {
+    "cli": "node src/cli.ts",
     "reference:sqlite": "node examples/reference-sqlite/cli.ts",
     "mcp": "node src/mcp.ts",
     "mcp:reference-sqlite": "node examples/reference-sqlite/mcp.ts",
