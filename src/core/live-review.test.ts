@@ -267,3 +267,98 @@ test("runLiveReview accepts legacy mutation_op but emits canonical action", asyn
   assert.equal(relevance.proposals[0].action, "supersede");
   assert.equal("mutation_op" in relevance.proposals[0], false);
 });
+
+test("runLiveReview accepts the full memory maintenance action taxonomy", async () => {
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-live-review-extended-action-"));
+  const responses = [
+    {
+      candidates: [
+        {
+          claim: "A durable memory should be retagged when its type is wrong but content remains useful.",
+          source_refs: [{ source_id: "source:1", chunk_index: 0 }],
+          why_future_useful: "Retagging is a maintenance operation distinct from rewriting body text.",
+        },
+      ],
+    },
+    {
+      distilled: [
+        {
+          body: "Retag useful memories when their type is wrong but their content remains valid.",
+          source_refs: [{ source_id: "source:1", chunk_index: 0 }],
+          rationale: "Captures an extended maintenance action.",
+        },
+      ],
+    },
+    {
+      typed: [
+        {
+          body: "Retag useful memories when their type is wrong but their content remains valid.",
+          memory_type: "procedural",
+          primary_type: "procedural",
+          secondary_type: null,
+          type_confidence: 0.82,
+          type_rationale: "It describes a memory maintenance procedure.",
+          ambiguities: [],
+          durability: "durable",
+          ttl: null,
+          proposed_scope: "project",
+          action: "retag",
+          target_memory_id: "memory:1",
+          source_refs: [{ source_id: "source:1", chunk_index: 0 }],
+        },
+      ],
+    },
+    {
+      proposals: [
+        {
+          memory_type: "procedural",
+          proposed_scope: "project",
+          body: "Retag useful memories when their type is wrong but their content remains valid.",
+          confidence: 0.8,
+          rationale: "Useful for maintenance workflows.",
+          source_refs: [{ source_id: "source:1", chunk_index: 0 }],
+          action: "retag",
+          target_memory_id: "memory:1",
+        },
+      ],
+      rejected: [],
+    },
+    {
+      findings: [
+        {
+          body: "Retag useful memories when their type is wrong but their content remains valid.",
+          relation: "refinement",
+          target_memory_id: "memory:1",
+          confidence: 0.74,
+          rationale: "Targets an existing memory for metadata correction.",
+          source_refs: [{ source_id: "source:1", chunk_index: 0 }],
+          memory_refs: [{ memory_id: "memory:1", provenance_kind: "fixture" }],
+        },
+      ],
+    },
+  ];
+  let calls = 0;
+
+  const result = await runLiveReview({
+    adapter: fixtureAdapter(),
+    scope: "project",
+    runId: "extended-action-test",
+    outputDir,
+    model: {
+      provider: "openrouter",
+      baseUrl: "https://openrouter.invalid/api/v1",
+      modelName: "deepseek/deepseek-v4-pro",
+      apiKey: "test-key",
+    },
+    callModel: async () => JSON.stringify(responses[calls++]),
+  });
+
+  assert.equal(result.schemaVersion, "refinery.review.v1");
+  assert.equal(result.proposals[0].action, "retag");
+  assert.equal(result.proposals[0].schemaVersion, "refinery.review.v1");
+  const relevance = JSON.parse(
+    fs.readFileSync(path.join(outputDir, "extended-action-test", "steps", "relevance", "output.parsed.json"), "utf8"),
+  );
+  assert.equal(relevance.proposals[0].action, "retag");
+  assert.equal("mutation_op" in relevance.proposals[0], false);
+});

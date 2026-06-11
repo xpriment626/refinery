@@ -3,9 +3,15 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
+  probeMemoryStoreAdapter,
   validateMemoryStoreAdapter,
   type MemoryStoreAdapter,
 } from "./core/adapter.ts";
+import {
+  asRefineryError,
+  RefineryError,
+  serializeRefineryError,
+} from "./core/errors.ts";
 import { initializeRefineryInstance, resolveRefineryPaths } from "./core/instance.ts";
 import { runLiveReview } from "./core/live-review.ts";
 import { runReview, type ReviewSinkOptions } from "./core/review.ts";
@@ -15,8 +21,8 @@ const HELP = `refinery — agent-callable memory review CLI
 
 USAGE
   refinery instance init [--home <dir>] [--from <dir>] [--reset] [--json]
-  refinery adapter check --adapter <path|reference-sqlite> [--json]
-  refinery review --adapter <path|reference-sqlite> --scope <scope> [--mode deterministic|live] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--json]
+  refinery adapter check --adapter <path|reference-sqlite> [--probe] [--scope <scope>] [--json]
+  refinery review --adapter <path|reference-sqlite> --scope <scope> [--mode deterministic|live] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
 
 The CLI is dry-run by default. Review emits proposal artifacts and does not write durable memory.
 Refinery instance data defaults to $PWD/.refinery unless REFINERY_HOME or --home is set.`;
@@ -30,42 +36,148 @@ function defaultRunId(): string {
 }
 
 async function loadAdapter(spec: string): Promise<MemoryStoreAdapter> {
-  if (spec === "reference-sqlite") {
-    const mod = await import("../examples/reference-sqlite/adapter.ts");
-    return mod.adapter as MemoryStoreAdapter;
-  }
+  try {
+    if (spec === "reference-sqlite") {
+      const mod = await import("../examples/reference-sqlite/adapter.ts");
+      return mod.adapter as MemoryStoreAdapter;
+    }
 
-  const resolved = path.resolve(spec);
-  const mod = await import(pathToFileURL(resolved).href);
-  return (mod.adapter ?? mod.default) as MemoryStoreAdapter;
+    const resolved = path.resolve(spec);
+    const mod = await import(pathToFileURL(resolved).href);
+    return (mod.adapter ?? mod.default) as MemoryStoreAdapter;
+  } catch (error) {
+    throw new RefineryError(
+      "ADAPTER_LOAD_FAILED",
+      error instanceof Error ? error.message : String(error),
+      { phase: "adapter" },
+    );
+  }
 }
 
 async function loadSink(spec: string): Promise<ReviewSinkOptions> {
   const resolved = path.resolve(spec);
-  const mod = await import(pathToFileURL(resolved).href);
+  let mod: Record<string, unknown>;
+  try {
+    mod = await import(pathToFileURL(resolved).href) as Record<string, unknown>;
+  } catch (error) {
+    throw new RefineryError(
+      "SINK_LOAD_FAILED",
+      error instanceof Error ? error.message : String(error),
+      { phase: "sink" },
+    );
+  }
   const sink = mod.sink ?? mod.default;
   if (!sink || typeof sink !== "object" || typeof sink.url !== "string") {
-    throw new Error("sink module must export { sink: { url, headers? } } or default { url, headers? }");
+    throw new RefineryError(
+      "SINK_LOAD_FAILED",
+      "sink module must export { sink: { url, headers? } } or default { url, headers? }",
+      { phase: "sink" },
+    );
   }
   return sink as ReviewSinkOptions;
 }
 
 async function loadModelCaller(spec: string): Promise<ModelCaller> {
   const resolved = path.resolve(spec);
-  const mod = await import(pathToFileURL(resolved).href);
+  let mod: Record<string, unknown>;
+  try {
+    mod = await import(pathToFileURL(resolved).href) as Record<string, unknown>;
+  } catch (error) {
+    throw new RefineryError(
+      "MODEL_CALLER_LOAD_FAILED",
+      error instanceof Error ? error.message : String(error),
+      { phase: "model-caller" },
+    );
+  }
   const caller = mod.callModel ?? mod.default;
   if (typeof caller !== "function") {
-    throw new Error("model caller module must export callModel(args) or a default function");
+    throw new RefineryError(
+      "MODEL_CALLER_LOAD_FAILED",
+      "model caller module must export callModel(args) or a default function",
+      { phase: "model-caller" },
+    );
   }
   return caller as ModelCaller;
 }
 
 function parseOptionArgs(args: string[], options: Parameters<typeof parseArgs>[0]["options"]) {
-  return parseArgs({
-    args,
-    options,
-    allowPositionals: false,
-  }).values;
+  try {
+    return parseArgs({
+      args,
+      options,
+      allowPositionals: false,
+    }).values;
+  } catch (error) {
+    throw new RefineryError(
+      "INVALID_OPTION",
+      error instanceof Error ? error.message : String(error),
+      { phase: "args" },
+    );
+  }
+}
+
+function parsePositiveIntegerOption(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a positive integer.`, { phase: "args" });
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a positive integer.`, { phase: "args" });
+  }
+  return parsed;
+}
+
+function validateRunId(runId: string): string {
+  if (
+    !runId ||
+    runId.includes("/") ||
+    runId.includes("\\") ||
+    runId.includes("..") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)
+  ) {
+    throw new RefineryError(
+      "INVALID_OPTION",
+      "--run-id must be path-safe: non-empty, no slashes, no dot-dot, and only alphanumerics, dot, underscore, or dash.",
+      { phase: "args", runId },
+    );
+  }
+  return runId;
+}
+
+function ensureRunDirInside(outputDir: string, runId: string): void {
+  const resolvedOutput = path.resolve(outputDir);
+  const resolvedRun = path.resolve(resolvedOutput, runId);
+  const relative = path.relative(resolvedOutput, resolvedRun);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new RefineryError("INVALID_OPTION", "--run-id must not escape the output directory.", {
+      phase: "args",
+      runId,
+      runDir: resolvedRun,
+    });
+  }
+}
+
+function inferCommand(argv: string[]): string {
+  if (argv[0] === "adapter" && argv[1] === "check") return "adapter check";
+  if (argv[0] === "instance" && argv[1] === "init") return "instance init";
+  return argv[0] ?? "unknown";
+}
+
+function wantsJson(argv: string[]): boolean {
+  return argv.includes("--json");
+}
+
+function writeJsonFailure(argv: string[], error: unknown): void {
+  const refined = asRefineryError(error, { code: "CLI_ERROR", phase: "cli" });
+  const output = {
+    ok: false,
+    command: inferCommand(argv),
+    error: serializeRefineryError(refined),
+    ...(refined.runId ? { runId: refined.runId } : {}),
+    ...(refined.runDir ? { runDir: refined.runDir } : {}),
+  };
+  process.stdout.write(stableJson(output));
 }
 
 async function cmdAdapter(rest: string[]): Promise<number> {
@@ -73,6 +185,8 @@ async function cmdAdapter(rest: string[]): Promise<number> {
   if (sub !== "check") throw new Error("Unknown adapter command. Use: refinery adapter check");
   const values = parseOptionArgs(rest.slice(1), {
     adapter: { type: "string" },
+    probe: { type: "boolean", default: false },
+    scope: { type: "string", default: "project" },
     json: { type: "boolean", default: false },
   });
   if (!values.adapter || typeof values.adapter !== "string") {
@@ -81,14 +195,62 @@ async function cmdAdapter(rest: string[]): Promise<number> {
   const adapter = await loadAdapter(values.adapter);
   const validation = validateMemoryStoreAdapter(adapter);
   const output = {
+    ok: validation.valid,
     command: "adapter check",
     adapter: { name: validation.name },
     valid: validation.valid,
     capabilities: validation.capabilities,
     errors: validation.errors,
+    probed: false,
+    probeErrors: [] as string[],
   };
+  if (!validation.valid) {
+    process.stdout.write(
+      stableJson({
+        ...output,
+        error: {
+          code: "ADAPTER_INVALID",
+          message: validation.errors.join("; "),
+          phase: "adapter",
+        },
+      }),
+    );
+    return 1;
+  }
+
+  if (values.probe) {
+    const probe = await probeMemoryStoreAdapter(adapter, {
+      scope: String(values.scope ?? "project"),
+      limit: 3,
+    });
+    const probedOutput = {
+      ...output,
+      ok: probe.valid,
+      probed: true,
+      sourceCount: probe.sourceCount,
+      activeMemoryCount: probe.activeMemoryCount,
+      probeErrors: probe.errors,
+    };
+    if (!probe.valid) {
+      process.stdout.write(
+        stableJson({
+          ...probedOutput,
+          error: {
+            code: "ADAPTER_PROBE_FAILED",
+            message: probe.errors.join("; "),
+            phase: "adapter",
+            details: probe.errors,
+          },
+        }),
+      );
+      return 1;
+    }
+    process.stdout.write(stableJson(probedOutput));
+    return 0;
+  }
+
   process.stdout.write(stableJson(output));
-  return validation.valid ? 0 : 1;
+  return 0;
 }
 
 async function cmdInstance(rest: string[]): Promise<number> {
@@ -106,7 +268,7 @@ async function cmdInstance(rest: string[]): Promise<number> {
     from: typeof values.from === "string" ? values.from : undefined,
     reset: Boolean(values.reset),
   });
-  process.stdout.write(stableJson(result));
+  process.stdout.write(stableJson({ ok: true, ...result }));
   return 0;
 }
 
@@ -120,27 +282,32 @@ async function cmdReview(rest: string[]): Promise<number> {
     "output-dir": { type: "string" },
     sink: { type: "string" },
     "sink-url": { type: "string" },
+    "sink-timeout-ms": { type: "string" },
     "model-caller": { type: "string" },
     "source-limit": { type: "string" },
     "source-char-limit": { type: "string" },
     json: { type: "boolean", default: false },
   });
   if (!values.adapter || typeof values.adapter !== "string") {
-    throw new Error("review requires --adapter <path|reference-sqlite>");
+    throw new RefineryError("INVALID_OPTION", "review requires --adapter <path|reference-sqlite>", { phase: "args" });
   }
+  const mode = String(values.mode ?? "deterministic");
+  if (mode !== "deterministic" && mode !== "live") {
+    throw new RefineryError("INVALID_OPTION", "review --mode must be deterministic or live", { phase: "args" });
+  }
+  const runId = validateRunId(typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId());
+  const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
+  const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
+  const sinkTimeoutMs = parsePositiveIntegerOption(values["sink-timeout-ms"], "--sink-timeout-ms");
 
   const adapter = await loadAdapter(values.adapter);
   const validation = validateMemoryStoreAdapter(adapter);
   if (!validation.valid) {
-    process.stdout.write(
-      stableJson({
-        command: "review",
-        adapter: { name: validation.name },
-        valid: false,
-        errors: validation.errors,
-      }),
+    throw new RefineryError(
+      "ADAPTER_INVALID",
+      validation.errors.join("; "),
+      { phase: "adapter", details: validation.errors },
     );
-    return 1;
   }
 
   const instancePaths = resolveRefineryPaths({
@@ -148,29 +315,26 @@ async function cmdReview(rest: string[]): Promise<number> {
   });
   const outputDir =
     typeof values["output-dir"] === "string" ? path.resolve(values["output-dir"]) : instancePaths.trialsDir;
+  ensureRunDirInside(outputDir, runId);
 
-  const sink =
+  const loadedSink =
     typeof values.sink === "string"
       ? await loadSink(values.sink)
       : typeof values["sink-url"] === "string"
         ? { url: values["sink-url"] }
         : undefined;
-  const mode = String(values.mode ?? "deterministic");
-  if (mode !== "deterministic" && mode !== "live") {
-    throw new Error("review --mode must be deterministic or live");
-  }
+  const sink = loadedSink && sinkTimeoutMs ? { ...loadedSink, timeoutMs: sinkTimeoutMs } : loadedSink;
 
   if (mode === "live") {
     const result = await runLiveReview({
       adapter,
       scope: String(values.scope ?? "project"),
-      runId: typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId(),
+      runId,
       outputDir,
       sink,
       callModel: typeof values["model-caller"] === "string" ? await loadModelCaller(values["model-caller"]) : undefined,
-      sourceLimit: typeof values["source-limit"] === "string" ? Number(values["source-limit"]) : undefined,
-      sourceCharLimit:
-        typeof values["source-char-limit"] === "string" ? Number(values["source-char-limit"]) : undefined,
+      sourceLimit,
+      sourceCharLimit,
     });
     process.stdout.write(stableJson(result));
     return 0;
@@ -179,7 +343,7 @@ async function cmdReview(rest: string[]): Promise<number> {
   const result = await runReview({
     adapter,
     scope: String(values.scope ?? "project"),
-    runId: typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId(),
+    runId,
     outputDir,
     sink,
   });
@@ -200,12 +364,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().then(
+  const argv = process.argv.slice(2);
+  main(argv).then(
     (code) => {
       process.exitCode = code;
     },
     (error: unknown) => {
-      process.stderr.write(`${(error as Error).message}\n`);
+      if (wantsJson(argv)) {
+        writeJsonFailure(argv, error);
+      } else {
+        process.stderr.write(`${(error as Error).message}\n`);
+      }
       process.exitCode = 1;
     },
   );

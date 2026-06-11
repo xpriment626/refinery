@@ -2,7 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadModelConfig, type ModelConfig } from "../env.ts";
 import { createMastraModelCaller, mastraRuntimeMetadata } from "../runtimes/mastra/runtime.ts";
-import type { ActiveMemory, MemoryProposal, MemoryStoreAdapter, SourceEvidence } from "./adapter.ts";
+import {
+  memoryMaintenanceActions,
+  refineryReviewSchemaVersion,
+  type ActiveMemory,
+  type MemoryMaintenanceAction,
+  type MemoryProposal,
+  type MemoryStoreAdapter,
+  type SourceEvidence,
+} from "./adapter.ts";
+import {
+  applyErrorContext,
+  asRefineryError,
+  RefineryError,
+} from "./errors.ts";
 import {
   captureSpecialist,
   distillationSpecialist,
@@ -13,13 +26,14 @@ import {
 import type { LocalSpecialist, ModelCaller } from "./specialists/types.ts";
 import {
   deliverReviewSink,
+  writeReviewFailureStatus,
   type ReviewRejected,
   type ReviewRunResult,
   type ReviewSinkOptions,
   type ReviewSinkResult,
 } from "./review.ts";
 
-type MutationOp = "create" | "update" | "supersede" | "archive" | "merge";
+const specialistOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
 
 export interface LiveReviewRunOptions {
   adapter: MemoryStoreAdapter;
@@ -64,7 +78,7 @@ export interface TypedCandidate {
   durability: "durable" | "ttl" | "ephemeral";
   ttl: string | null;
   proposed_scope: string;
-  action: MutationOp;
+  action: MemoryMaintenanceAction;
   target_memory_id: string | number | null;
   source_refs: unknown[];
 }
@@ -80,7 +94,7 @@ export interface RelevanceProposal {
   confidence: number;
   rationale: string;
   source_refs: unknown[];
-  action: MutationOp;
+  action: MemoryMaintenanceAction;
   target_memory_id: string | number | null;
 }
 
@@ -156,12 +170,12 @@ function normalizeId(value: string | number | null): string | null {
   return typeof value === "number" ? `memory:${value}` : value;
 }
 
-function parseAction(value: unknown, legacyValue: unknown, label: string): MutationOp {
+function parseAction(value: unknown, legacyValue: unknown, label: string): MemoryMaintenanceAction {
   const action = value ?? legacyValue;
-  if (!["create", "update", "supersede", "archive", "merge"].includes(String(action))) {
+  if (!memoryMaintenanceActions.includes(action as MemoryMaintenanceAction)) {
     throw new Error(`${label} has invalid action.`);
   }
-  return action as MutationOp;
+  return action as MemoryMaintenanceAction;
 }
 
 function parseCapture(raw: string): CaptureOutput {
@@ -367,6 +381,7 @@ async function runStep<T>(args: {
   callModel?: ModelCaller;
 }): Promise<T> {
   const stepDir = path.join(args.runDir, "steps", args.stepName);
+  const rawOutputPath = path.join(stepDir, "output.raw.md");
   fs.mkdirSync(stepDir, { recursive: true });
   writeJson(path.join(stepDir, "input.json"), {
     step: args.stepName,
@@ -376,14 +391,37 @@ async function runStep<T>(args: {
     input: args.inputPayload,
     prompt: args.prompt,
   });
-  const raw = await (args.callModel ?? createMastraModelCaller(args.specialist))({
-    model: args.model,
-    system: args.prompt.system,
-    user: args.prompt.user,
-    specialist: args.specialist,
-  });
-  fs.writeFileSync(path.join(stepDir, "output.raw.md"), raw);
-  const parsed = args.parse(raw);
+  let raw: string;
+  try {
+    raw = await (args.callModel ?? createMastraModelCaller(args.specialist))({
+      model: args.model,
+      system: args.prompt.system,
+      user: args.prompt.user,
+      specialist: args.specialist,
+    });
+  } catch (error) {
+    throw new RefineryError(
+      "MODEL_CALL_FAILED",
+      error instanceof Error ? error.message : String(error),
+      { phase: "live", runDir: args.runDir, failedStep: args.stepName },
+    );
+  }
+  fs.writeFileSync(rawOutputPath, raw);
+  let parsed: T;
+  try {
+    parsed = args.parse(raw);
+  } catch (error) {
+    throw new RefineryError(
+      "MODEL_OUTPUT_INVALID",
+      error instanceof Error ? error.message : String(error),
+      {
+        phase: "live",
+        runDir: args.runDir,
+        failedStep: args.stepName,
+        rawOutputPath,
+      },
+    );
+  }
   writeJson(path.join(stepDir, "output.parsed.json"), parsed);
   return parsed;
 }
@@ -425,6 +463,7 @@ function activeMemoryCandidates(memories: ActiveMemory[], relevance: RelevanceOu
 
 function toMemoryProposal(runId: string, proposal: RelevanceProposal, index: number): MemoryProposal {
   return {
+    schemaVersion: refineryReviewSchemaVersion,
     id: `proposal:${runId}:${index + 1}`,
     action: proposal.action,
     memoryType: proposal.memory_type,
@@ -439,9 +478,12 @@ function toMemoryProposal(runId: string, proposal: RelevanceProposal, index: num
 
 export async function runLiveReview(options: LiveReviewRunOptions): Promise<LiveReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
+  const createdAt = new Date().toISOString();
   const model = options.model ?? loadModelConfig();
   const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? 3, 10));
   const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? 6000, 24000));
+  fs.mkdirSync(runDir, { recursive: true });
+  try {
   const [sources, activeMemories] = await Promise.all([
     options.adapter.listSourceEvidence({ scope: options.scope, limit: sourceLimit }),
     options.adapter.listActiveMemories({ scope: options.scope, limit: 50 }),
@@ -559,6 +601,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
   writeJson(path.join(runDir, "rejected.json"), rejected);
 
   const result: LiveReviewRunResult = {
+    ok: true,
+    schemaVersion: refineryReviewSchemaVersion,
     command: "review",
     mode: "live",
     adapter: { name: options.adapter.name },
@@ -576,19 +620,25 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     },
     proposals,
     rejected,
+    metadata: {
+      schemaVersion: refineryReviewSchemaVersion,
+      runId: options.runId,
+      adapter: options.adapter.name,
+      scope: options.scope,
+      dryRun: true,
+      mode: "live",
+      model: redactModel(model),
+      createdAt,
+      writesAttempted: false,
+      sinkUrl: options.sink?.url ?? null,
+      runtime: { adapter: "mastra" },
+      specialistOrder,
+      sourceLimit,
+      sourceCharLimit,
+    },
   };
 
-  writeJson(path.join(runDir, "metadata.json"), {
-    runId: options.runId,
-    adapter: options.adapter.name,
-    scope: options.scope,
-    dryRun: true,
-    mode: "live",
-    model: redactModel(model),
-    createdAt: new Date().toISOString(),
-    writesAttempted: false,
-    sinkUrl: options.sink?.url ?? null,
-  });
+  writeJson(path.join(runDir, "metadata.json"), result.metadata);
   writeJson(path.join(runDir, "review.json"), result);
 
   if (!options.sink) return result;
@@ -597,4 +647,21 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
   writeJson(path.join(runDir, "sink.json"), sink);
   writeJson(path.join(runDir, "review.json"), resultWithSink);
   return resultWithSink;
+  } catch (error) {
+    const refineryError = applyErrorContext(asRefineryError(error, { code: "LIVE_REVIEW_FAILED" }), {
+      phase: "live",
+      runId: options.runId,
+      runDir,
+    });
+    writeReviewFailureStatus({
+      runDir,
+      runId: options.runId,
+      adapterName: options.adapter.name,
+      scope: options.scope,
+      mode: "live",
+      createdAt,
+      error: refineryError,
+    });
+    throw refineryError;
+  }
 }

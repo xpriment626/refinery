@@ -6,7 +6,17 @@ import {
   type MemoryProposal,
   type MemoryStoreAdapter,
   type SourceEvidence,
+  refineryReviewSchemaVersion,
 } from "./adapter.ts";
+import {
+  applyErrorContext,
+  asRefineryError,
+  RefineryError,
+  serializeRefineryError,
+} from "./errors.ts";
+
+const DEFAULT_SINK_TIMEOUT_MS = 10_000;
+const MAX_SINK_RESPONSE_TEXT_CHARS = 4000;
 
 export interface ReviewRunOptions {
   adapter: MemoryStoreAdapter;
@@ -19,6 +29,7 @@ export interface ReviewRunOptions {
 export interface ReviewSinkOptions {
   url: string;
   headers?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 export interface ReviewSinkResult {
@@ -43,6 +54,8 @@ export interface RelationshipFinding {
 }
 
 export interface ReviewRunResult {
+  ok: true;
+  schemaVersion: typeof refineryReviewSchemaVersion;
   command: "review";
   adapter: { name: string };
   scope: string;
@@ -57,12 +70,79 @@ export interface ReviewRunResult {
   };
   proposals: MemoryProposal[];
   rejected: ReviewRejected[];
+  metadata: ReviewRunMetadata;
   sink?: ReviewSinkResult;
+}
+
+export interface ReviewRunMetadata {
+  schemaVersion: typeof refineryReviewSchemaVersion;
+  runId: string;
+  adapter: string;
+  scope: string;
+  dryRun: true;
+  mode: "deterministic" | "live";
+  createdAt: string;
+  writesAttempted: false;
+  sinkUrl: string | null;
+  runtime: {
+    adapter: string;
+  };
+  specialistOrder: string[];
+  sourceLimit: number | null;
+  sourceCharLimit: number | null;
+  model?: Record<string, unknown>;
+}
+
+export interface ReviewFailureStatus {
+  ok: false;
+  schemaVersion: typeof refineryReviewSchemaVersion;
+  command: "review";
+  status: "failed";
+  runId: string;
+  runDir: string;
+  adapter: string | null;
+  scope: string;
+  mode: "deterministic" | "live";
+  failedStep: string | null;
+  rawOutputPath: string | null;
+  createdAt: string;
+  failedAt: string;
+  error: Record<string, unknown>;
 }
 
 function writeJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+export function writeReviewFailureStatus(args: {
+  runDir: string;
+  runId: string;
+  adapterName?: string | null;
+  scope: string;
+  mode: "deterministic" | "live";
+  createdAt: string;
+  error: RefineryError;
+}): ReviewFailureStatus {
+  const status: ReviewFailureStatus = {
+    ok: false,
+    schemaVersion: refineryReviewSchemaVersion,
+    command: "review",
+    status: "failed",
+    runId: args.runId,
+    runDir: args.runDir,
+    adapter: args.adapterName ?? null,
+    scope: args.scope,
+    mode: args.mode,
+    failedStep: args.error.failedStep ?? null,
+    rawOutputPath: args.error.rawOutputPath ?? null,
+    createdAt: args.createdAt,
+    failedAt: new Date().toISOString(),
+    error: serializeRefineryError(args.error),
+  };
+  writeJson(path.join(args.runDir, "status.json"), status);
+  writeJson(path.join(args.runDir, "review.json"), status);
+  return status;
 }
 
 function compactText(text: string, max = 420): string {
@@ -136,15 +216,33 @@ export async function deliverReviewSink(
     };
   }
 
-  const response = await fetch(sink.url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(sink.headers ?? {}),
-    },
-    body: JSON.stringify(result),
-  });
-  const responseText = await response.text();
+  const timeoutMs = sink.timeoutMs ?? DEFAULT_SINK_TIMEOUT_MS;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(sink.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(sink.headers ?? {}),
+      },
+      body: JSON.stringify(result),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new RefineryError(
+        "SINK_CALLBACK_TIMEOUT",
+        `Review sink callback timed out after ${timeoutMs}ms.`,
+        { phase: "sink" },
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+  const responseText = (await response.text()).slice(0, MAX_SINK_RESPONSE_TEXT_CHARS);
   const sinkResult = {
     url: sink.url,
     ok: response.ok,
@@ -153,18 +251,25 @@ export async function deliverReviewSink(
     responseText,
   };
   if (!response.ok) {
-    throw new Error(`Review sink callback failed with status ${response.status}: ${responseText}`);
+    throw new RefineryError(
+      "SINK_CALLBACK_FAILED",
+      `Review sink callback failed with status ${response.status}: ${responseText}`,
+      { phase: "sink", status: response.status },
+    );
   }
   return sinkResult;
 }
 
 export async function runReview(options: ReviewRunOptions): Promise<ReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
-  const scopeInput = { scope: options.scope };
-  const [sources, activeMemories] = await Promise.all([
-    options.adapter.listSourceEvidence(scopeInput),
-    options.adapter.listActiveMemories(scopeInput),
-  ]);
+  const createdAt = new Date().toISOString();
+  fs.mkdirSync(runDir, { recursive: true });
+  try {
+    const scopeInput = { scope: options.scope };
+    const [sources, activeMemories] = await Promise.all([
+      options.adapter.listSourceEvidence(scopeInput),
+      options.adapter.listActiveMemories(scopeInput),
+    ]);
 
   writeJson(path.join(runDir, "input.json"), {
     adapter: options.adapter.name,
@@ -215,6 +320,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
 
   const rejected: ReviewRejected[] = [];
   const proposals: MemoryProposal[] = schema.typed.map((item, index) => ({
+    schemaVersion: refineryReviewSchemaVersion,
     id: `proposal:${options.runId}:${index + 1}`,
     action: "create",
     memoryType: item.memory_type,
@@ -236,6 +342,8 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
   writeJson(path.join(runDir, "rejected.json"), rejected);
 
   const result: ReviewRunResult = {
+    ok: true,
+    schemaVersion: refineryReviewSchemaVersion,
     command: "review",
     adapter: { name: options.adapter.name },
     scope: options.scope,
@@ -250,18 +358,24 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
     },
     proposals,
     rejected,
+    metadata: {
+      schemaVersion: refineryReviewSchemaVersion,
+      runId: options.runId,
+      adapter: options.adapter.name,
+      scope: options.scope,
+      dryRun: true,
+      mode: "deterministic",
+      createdAt,
+      writesAttempted: false,
+      sinkUrl: options.sink?.url ?? null,
+      runtime: { adapter: "deterministic" },
+      specialistOrder: ["capture", "distillation", "schema", "relevance", "relationship-review"],
+      sourceLimit: null,
+      sourceCharLimit: null,
+    },
   };
 
-  writeJson(path.join(runDir, "metadata.json"), {
-    runId: options.runId,
-    adapter: options.adapter.name,
-    scope: options.scope,
-    dryRun: true,
-    mode: "deterministic",
-    createdAt: new Date().toISOString(),
-    writesAttempted: false,
-    sinkUrl: options.sink?.url ?? null,
-  });
+  writeJson(path.join(runDir, "metadata.json"), result.metadata);
   writeJson(path.join(runDir, "review.json"), result);
   if (!options.sink) return result;
 
@@ -270,4 +384,21 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
   writeJson(path.join(runDir, "sink.json"), sink);
   writeJson(path.join(runDir, "review.json"), resultWithSink);
   return resultWithSink;
+  } catch (error) {
+    const refineryError = applyErrorContext(asRefineryError(error, { code: "REVIEW_FAILED" }), {
+      phase: "deterministic",
+      runId: options.runId,
+      runDir,
+    });
+    writeReviewFailureStatus({
+      runDir,
+      runId: options.runId,
+      adapterName: options.adapter.name,
+      scope: options.scope,
+      mode: "deterministic",
+      createdAt,
+      error: refineryError,
+    });
+    throw refineryError;
+  }
 }

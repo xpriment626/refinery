@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 const cliPath = path.resolve(import.meta.dirname, "cli.ts");
+const packagePath = path.resolve(import.meta.dirname, "..", "package.json");
+
+function parseJsonOutput(result: ReturnType<typeof runCli>): Record<string, unknown> {
+  assert.doesNotThrow(() => JSON.parse(result.stdout), result.stderr || result.stdout);
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+}
 
 function makeFixtureAdapter(tmp: string): string {
   const adapterPath = path.join(tmp, "fixture-adapter.mjs");
@@ -54,9 +61,113 @@ export const adapter = {
   return adapterPath;
 }
 
+function makeInvalidSourceAdapter(tmp: string): string {
+  const adapterPath = path.join(tmp, "invalid-source-adapter.mjs");
+  fs.writeFileSync(
+    adapterPath,
+    `
+export const adapter = {
+  name: "invalid-source-memory",
+  async listSourceEvidence() {
+    return [{ id: 123, kind: "session", text: "bad id" }];
+  },
+  async searchSourceEvidence() {
+    return [];
+  },
+  async getSourceEvidence() {
+    return null;
+  },
+  async listActiveMemories() {
+    return [{
+      id: "memory:1",
+      type: "semantic",
+      scope: "project",
+      status: "active",
+      body: "Valid memory."
+    }];
+  },
+  async searchActiveMemories() {
+    return [];
+  },
+  async getActiveMemory() {
+    return null;
+  }
+};
+`,
+  );
+  return adapterPath;
+}
+
+function makeInvalidMemoryAdapter(tmp: string): string {
+  const adapterPath = path.join(tmp, "invalid-memory-adapter.mjs");
+  fs.writeFileSync(
+    adapterPath,
+    `
+export const adapter = {
+  name: "invalid-memory",
+  async listSourceEvidence() {
+    return [{
+      id: "source:1",
+      kind: "session",
+      text: "Valid source."
+    }];
+  },
+  async searchSourceEvidence() {
+    return [];
+  },
+  async getSourceEvidence() {
+    return null;
+  },
+  async listActiveMemories() {
+    return [{ id: "memory:1", type: "semantic", scope: "project", body: "Missing status." }];
+  },
+  async searchActiveMemories() {
+    return [];
+  },
+  async getActiveMemory() {
+    return null;
+  }
+};
+`,
+  );
+  return adapterPath;
+}
+
+function startFailingSink(): Promise<{
+  url: string;
+  close: () => Promise<void>;
+}> {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(503, { "content-type": "text/plain" });
+    res.end("sink unavailable");
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      resolve({
+        url: `http://127.0.0.1:${address.port}/refinery-callback`,
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
 function runCli(args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: path.resolve(import.meta.dirname, ".."),
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  });
+}
+
+function runBin(args: string[], env: NodeJS.ProcessEnv = {}) {
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+    bin: { refinery: string };
+  };
+  const binPath = path.resolve(path.dirname(packagePath), packageJson.bin.refinery);
+  return spawnSync(process.execPath, [binPath, ...args], {
+    cwd: path.dirname(packagePath),
     env: { ...process.env, ...env },
     encoding: "utf8",
   });
@@ -71,12 +182,84 @@ test("refinery adapter check emits stable JSON for a valid adapter module", () =
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.command, "adapter check");
+  assert.equal(parsed.ok, true);
   assert.equal(parsed.adapter.name, "fixture-memory");
   assert.equal(parsed.valid, true);
   assert.equal(parsed.capabilities.listSourceEvidence, true);
   assert.equal(parsed.capabilities.searchSourceEvidence, true);
   assert.equal(parsed.capabilities.getSourceEvidence, true);
   assert.equal(parsed.capabilities.applyProposal, false);
+});
+
+test("refinery adapter check probe validates adapter record shapes", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-adapter-probe-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+
+  const result = runCli(["adapter", "check", "--adapter", adapterPath, "--probe", "--scope", "project", "--json"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.probed, true);
+  assert.deepEqual(parsed.probeErrors, []);
+});
+
+test("refinery adapter check probe emits structured errors for invalid source records", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-adapter-invalid-source-"));
+  const adapterPath = makeInvalidSourceAdapter(tmp);
+
+  const result = runCli(["adapter", "check", "--adapter", adapterPath, "--probe", "--scope", "project", "--json"]);
+
+  assert.equal(result.status, 1);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal((parsed.error as { code: string }).code, "ADAPTER_PROBE_FAILED");
+  assert.match(JSON.stringify(parsed), /sources\[0\]\.id/);
+});
+
+test("refinery adapter check probe emits structured errors for invalid memory records", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-adapter-invalid-memory-"));
+  const adapterPath = makeInvalidMemoryAdapter(tmp);
+
+  const result = runCli(["adapter", "check", "--adapter", adapterPath, "--probe", "--scope", "project", "--json"]);
+
+  assert.equal(result.status, 1);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal((parsed.error as { code: string }).code, "ADAPTER_PROBE_FAILED");
+  assert.match(JSON.stringify(parsed), /activeMemories\[0\]\.status/);
+});
+
+test("refinery review with --json emits structured errors for invalid mode", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-json-mode-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+
+  const result = runCli(["review", "--adapter", adapterPath, "--mode", "sideways", "--json"]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "review");
+  assert.equal((parsed.error as { code: string }).code, "INVALID_OPTION");
+});
+
+test("refinery review validates source limits and run ids before writing artifacts", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-validation-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+
+  for (const args of [
+    ["review", "--adapter", adapterPath, "--source-limit", "not-a-number", "--json"],
+    ["review", "--adapter", adapterPath, "--source-limit", "-1", "--json"],
+    ["review", "--adapter", adapterPath, "--source-char-limit", "1.5", "--json"],
+    ["review", "--adapter", adapterPath, "--run-id", "../escape", "--json"],
+  ]) {
+    const result = runCli(args);
+    assert.equal(result.status, 1, args.join(" "));
+    const parsed = parseJsonOutput(result);
+    assert.equal(parsed.ok, false);
+    assert.equal((parsed.error as { code: string }).code, "INVALID_OPTION");
+  }
 });
 
 test("refinery review emits proposal JSON and deterministic dry-run artifacts", () => {
@@ -99,6 +282,8 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
 
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.schemaVersion, "refinery.review.v1");
   assert.equal(parsed.command, "review");
   assert.equal(parsed.adapter.name, "fixture-memory");
   assert.equal(parsed.scope, "project");
@@ -107,6 +292,7 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
   assert.equal(parsed.counts.activeMemories, 1);
   assert.equal(parsed.counts.proposals, 1);
   assert.equal(parsed.proposals[0].action, "create");
+  assert.equal(parsed.proposals[0].schemaVersion, "refinery.review.v1");
   assert.equal(parsed.proposals[0].targetMemoryId, null);
   assert.match(parsed.proposals[0].body, /agent-callable CLIs/);
 
@@ -128,6 +314,101 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
   const schema = JSON.parse(fs.readFileSync(path.join(runDir, "steps/schema/output.parsed.json"), "utf8"));
   assert.equal(schema.typed[0].action, "create");
   assert.equal("mutation_op" in schema.typed[0], false);
+});
+
+test("refinery review live malformed model output emits JSON failure and failed-run artifacts", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-live-failure-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+  const modelPath = path.join(tmp, "bad-model.mjs");
+  fs.writeFileSync(
+    modelPath,
+    `
+const responses = {
+  "capture": {"candidates":[{"claim":"Capture succeeds.","source_refs":[{"source_id":"source:session-a"}],"why_future_useful":"Sets up later parse failure."}]},
+  "distillation": {"not_distilled":[]}
+};
+export async function callModel({ specialist }) {
+  return JSON.stringify(responses[specialist.name] ?? {});
+}
+`,
+  );
+
+  const result = runCli(
+    [
+      "review",
+      "--mode",
+      "live",
+      "--adapter",
+      adapterPath,
+      "--scope",
+      "project",
+      "--run-id",
+      "live-failure-test",
+      "--output-dir",
+      path.join(tmp, "runs"),
+      "--model-caller",
+      modelPath,
+      "--json",
+    ],
+    {
+      OPENROUTER_API_KEY: "test-key",
+      REFINERY_MODEL_NAME: "deepseek/deepseek-v4-pro",
+    },
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.runId, "live-failure-test");
+  assert.equal(parsed.runDir, path.join(tmp, "runs", "live-failure-test"));
+  assert.equal((parsed.error as { phase: string; code: string }).phase, "live");
+  assert.equal((parsed.error as { failedStep: string }).failedStep, "distillation");
+  const statusPath = path.join(tmp, "runs", "live-failure-test", "status.json");
+  assert.equal(fs.existsSync(statusPath), true);
+  const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+  assert.equal(status.status, "failed");
+  assert.equal(status.failedStep, "distillation");
+  assert.equal(
+    fs.existsSync(path.join(tmp, "runs", "live-failure-test", "steps", "distillation", "output.raw.md")),
+    true,
+  );
+});
+
+test("refinery review sink failure emits JSON failure and failed-run artifacts", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-sink-failure-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+  const sink = await startFailingSink();
+  try {
+    const result = runCli([
+      "review",
+      "--adapter",
+      adapterPath,
+      "--scope",
+      "project",
+      "--run-id",
+      "sink-failure-test",
+      "--output-dir",
+      path.join(tmp, "runs"),
+      "--sink-url",
+      sink.url,
+      "--sink-timeout-ms",
+      "20",
+      "--json",
+    ]);
+
+    assert.equal(result.status, 1);
+    const parsed = parseJsonOutput(result);
+    assert.equal(parsed.ok, false);
+    assert.equal((parsed.error as { code: string }).code, "SINK_CALLBACK_TIMEOUT");
+    const status = JSON.parse(
+      fs.readFileSync(path.join(tmp, "runs", "sink-failure-test", "status.json"), "utf8"),
+    );
+    assert.equal(status.status, "failed");
+    assert.equal(status.error.code, "SINK_CALLBACK_TIMEOUT");
+  } finally {
+    await sink.close();
+  }
 });
 
 test("refinery review accepts a sink callback URL", () => {
@@ -160,9 +441,12 @@ export const sink = {
 
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.schemaVersion, "refinery.review.v1");
   assert.equal(parsed.sink.ok, true);
   assert.equal(fs.existsSync(path.join(tmp, "callback.json")), true);
   const callback = JSON.parse(fs.readFileSync(path.join(tmp, "callback.json"), "utf8"));
+  assert.equal(callback.schemaVersion, "refinery.review.v1");
   assert.equal(callback.command, "review");
   assert.equal(callback.proposals.length, 1);
 });
@@ -212,13 +496,38 @@ export async function callModel({ specialist }) {
 
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.schemaVersion, "refinery.review.v1");
   assert.equal(parsed.mode, "live");
   assert.equal(parsed.model.modelName, "deepseek/deepseek-v4-pro");
+  assert.equal("apiKey" in parsed.model, false);
+  assert.equal(parsed.metadata.sourceLimit, 3);
+  assert.deepEqual(parsed.metadata.specialistOrder, [
+    "capture",
+    "distillation",
+    "schema",
+    "relevance",
+    "relationship-review",
+  ]);
   assert.equal(parsed.counts.proposals, 1);
   assert.equal(
     fs.existsSync(path.join(tmp, "runs", "live-cli-test", "steps", "relationship-review", "output.raw.md")),
     true,
   );
+});
+
+test("package bin target is executable and supports help output", () => {
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+    bin: { refinery: string };
+  };
+  assert.equal(packageJson.bin.refinery, "src/cli.ts");
+  const binPath = path.resolve(path.dirname(packagePath), packageJson.bin.refinery);
+  assert.notEqual(fs.statSync(binPath).mode & 0o111, 0);
+
+  const result = runBin(["--help"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /agent-callable memory review CLI/);
 });
 
 test("refinery review writes to REFINERY_HOME trials by default", () => {
@@ -303,7 +612,10 @@ test("refinery instance init refuses a missing source before archiving existing 
   ]);
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Source Refinery home not found/);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, false);
+  assert.match((parsed.error as { message: string }).message, /Source Refinery home not found/);
   assert.equal(fs.readFileSync(path.join(home, "keep.txt"), "utf8"), "do not move");
   assert.equal(
     fs.readdirSync(tmp).some((entry) => entry.includes(".refinery.archive-")),
