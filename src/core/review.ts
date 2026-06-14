@@ -14,6 +14,7 @@ import {
   RefineryError,
   serializeRefineryError,
 } from "./errors.ts";
+import { writeReviewArtifactManifest } from "./artifacts.ts";
 
 const DEFAULT_SINK_TIMEOUT_MS = 10_000;
 const MAX_SINK_RESPONSE_TEXT_CHARS = 4000;
@@ -142,6 +143,19 @@ export function writeReviewFailureStatus(args: {
   };
   writeJson(path.join(args.runDir, "status.json"), status);
   writeJson(path.join(args.runDir, "review.json"), status);
+  writeReviewArtifactManifest({
+    runDir: args.runDir,
+    runId: args.runId,
+    adapterName: args.adapterName ?? null,
+    scope: args.scope,
+    mode: args.mode,
+    status: "failed",
+    createdAt: args.createdAt,
+    failedAt: status.failedAt,
+    failedStep: status.failedStep,
+    rawOutputPath: status.rawOutputPath,
+    error: status.error,
+  });
   return status;
 }
 
@@ -323,6 +337,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
     schemaVersion: refineryReviewSchemaVersion,
     id: `proposal:${options.runId}:${index + 1}`,
     action: "create",
+    lifecycle: "proposed",
     memoryType: item.memory_type,
     scope: item.proposed_scope,
     body: item.body,
@@ -377,28 +392,50 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
 
   writeJson(path.join(runDir, "metadata.json"), result.metadata);
   writeJson(path.join(runDir, "review.json"), result);
+  writeReviewArtifactManifest({
+    runDir,
+    runId: options.runId,
+    adapterName: options.adapter.name,
+    scope: options.scope,
+    mode: "deterministic",
+    status: "succeeded",
+    createdAt,
+    counts: result.counts,
+    metadata: result.metadata,
+  });
   if (!options.sink) return result;
 
   const sink = await deliverReviewSink(options.sink, result);
   const resultWithSink = { ...result, sink };
   writeJson(path.join(runDir, "sink.json"), sink);
   writeJson(path.join(runDir, "review.json"), resultWithSink);
+  writeReviewArtifactManifest({
+    runDir,
+    runId: options.runId,
+    adapterName: options.adapter.name,
+    scope: options.scope,
+    mode: "deterministic",
+    status: "succeeded",
+    createdAt,
+    counts: result.counts,
+    metadata: result.metadata,
+  });
   return resultWithSink;
-  } catch (error) {
-    const refineryError = applyErrorContext(asRefineryError(error, { code: "REVIEW_FAILED" }), {
-      phase: "deterministic",
-      runId: options.runId,
-      runDir,
-    });
-    writeReviewFailureStatus({
-      runDir,
-      runId: options.runId,
-      adapterName: options.adapter.name,
-      scope: options.scope,
-      mode: "deterministic",
-      createdAt,
-      error: refineryError,
-    });
-    throw refineryError;
-  }
+} catch (error) {
+  const refineryError = applyErrorContext(asRefineryError(error, { code: "REVIEW_FAILED" }), {
+    phase: "deterministic",
+    runId: options.runId,
+    runDir,
+  });
+  writeReviewFailureStatus({
+    runDir,
+    runId: options.runId,
+    adapterName: options.adapter.name,
+    scope: options.scope,
+    mode: "deterministic",
+    createdAt,
+    error: refineryError,
+  });
+  throw refineryError;
+}
 }

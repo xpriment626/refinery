@@ -32,6 +32,7 @@ import {
   type ReviewSinkOptions,
   type ReviewSinkResult,
 } from "./review.ts";
+import { writeReviewArtifactManifest } from "./artifacts.ts";
 
 const specialistOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
 
@@ -466,6 +467,7 @@ function toMemoryProposal(runId: string, proposal: RelevanceProposal, index: num
     schemaVersion: refineryReviewSchemaVersion,
     id: `proposal:${runId}:${index + 1}`,
     action: proposal.action,
+    lifecycle: "proposed",
     memoryType: proposal.memory_type,
     scope: proposal.proposed_scope,
     body: proposal.body,
@@ -640,28 +642,50 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
 
   writeJson(path.join(runDir, "metadata.json"), result.metadata);
   writeJson(path.join(runDir, "review.json"), result);
+  writeReviewArtifactManifest({
+    runDir,
+    runId: options.runId,
+    adapterName: options.adapter.name,
+    scope: options.scope,
+    mode: "live",
+    status: "succeeded",
+    createdAt,
+    counts: result.counts,
+    metadata: result.metadata,
+  });
 
   if (!options.sink) return result;
   const sink = await deliverReviewSink(options.sink, result);
   const resultWithSink = { ...result, sink };
   writeJson(path.join(runDir, "sink.json"), sink);
   writeJson(path.join(runDir, "review.json"), resultWithSink);
+  writeReviewArtifactManifest({
+    runDir,
+    runId: options.runId,
+    adapterName: options.adapter.name,
+    scope: options.scope,
+    mode: "live",
+    status: "succeeded",
+    createdAt,
+    counts: result.counts,
+    metadata: result.metadata,
+  });
   return resultWithSink;
-  } catch (error) {
-    const refineryError = applyErrorContext(asRefineryError(error, { code: "LIVE_REVIEW_FAILED" }), {
-      phase: "live",
-      runId: options.runId,
-      runDir,
-    });
-    writeReviewFailureStatus({
-      runDir,
-      runId: options.runId,
-      adapterName: options.adapter.name,
-      scope: options.scope,
-      mode: "live",
-      createdAt,
-      error: refineryError,
-    });
-    throw refineryError;
-  }
+} catch (error) {
+  const refineryError = applyErrorContext(asRefineryError(error, { code: "LIVE_REVIEW_FAILED" }), {
+    phase: "live",
+    runId: options.runId,
+    runDir,
+  });
+  writeReviewFailureStatus({
+    runDir,
+    runId: options.runId,
+    adapterName: options.adapter.name,
+    scope: options.scope,
+    mode: "live",
+    createdAt,
+    error: refineryError,
+  });
+  throw refineryError;
+}
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -12,8 +13,10 @@ import {
   RefineryError,
   serializeRefineryError,
 } from "./core/errors.ts";
+import { inspectReviewRun } from "./core/artifacts.ts";
 import { initializeRefineryInstance, resolveRefineryPaths } from "./core/instance.ts";
 import { runLiveReview } from "./core/live-review.ts";
+import { validateRefineryModuleDescriptor } from "./core/modules.ts";
 import { runReview, type ReviewSinkOptions } from "./core/review.ts";
 import type { ModelCaller } from "./core/specialists/types.ts";
 
@@ -23,6 +26,8 @@ USAGE
   refinery instance init [--home <dir>] [--from <dir>] [--reset] [--json]
   refinery adapter check --adapter <path|reference-sqlite> [--probe] [--scope <scope>] [--json]
   refinery review --adapter <path|reference-sqlite> --scope <scope> [--mode deterministic|live] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
+  refinery trial inspect --run-dir <dir> [--json]
+  refinery module check --descriptor <path> [--json]
 
 The CLI is dry-run by default. Review emits proposal artifacts and does not write durable memory.
 Refinery instance data defaults to $PWD/.refinery unless REFINERY_HOME or --home is set.`;
@@ -161,6 +166,8 @@ function ensureRunDirInside(outputDir: string, runId: string): void {
 function inferCommand(argv: string[]): string {
   if (argv[0] === "adapter" && argv[1] === "check") return "adapter check";
   if (argv[0] === "instance" && argv[1] === "init") return "instance init";
+  if (argv[0] === "trial" && argv[1] === "inspect") return "trial inspect";
+  if (argv[0] === "module" && argv[1] === "check") return "module check";
   return argv[0] ?? "unknown";
 }
 
@@ -272,6 +279,67 @@ async function cmdInstance(rest: string[]): Promise<number> {
   return 0;
 }
 
+async function cmdTrial(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub !== "inspect") throw new Error("Unknown trial command. Use: refinery trial inspect");
+  const values = parseOptionArgs(rest.slice(1), {
+    "run-dir": { type: "string" },
+    json: { type: "boolean", default: false },
+  });
+  if (!values["run-dir"] || typeof values["run-dir"] !== "string") {
+    throw new RefineryError("INVALID_OPTION", "trial inspect requires --run-dir <dir>", { phase: "args" });
+  }
+  const result = inspectReviewRun(values["run-dir"]);
+  process.stdout.write(stableJson(result));
+  return 0;
+}
+
+async function cmdModule(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub !== "check") throw new Error("Unknown module command. Use: refinery module check");
+  const values = parseOptionArgs(rest.slice(1), {
+    descriptor: { type: "string" },
+    json: { type: "boolean", default: false },
+  });
+  if (!values.descriptor || typeof values.descriptor !== "string") {
+    throw new RefineryError("INVALID_OPTION", "module check requires --descriptor <path>", { phase: "args" });
+  }
+  const descriptorPath = path.resolve(values.descriptor);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+  } catch (error) {
+    throw new RefineryError(
+      "MODULE_DESCRIPTOR_LOAD_FAILED",
+      error instanceof Error ? error.message : String(error),
+      { phase: "module", details: { descriptorPath } },
+    );
+  }
+  const validation = validateRefineryModuleDescriptor(parsed);
+  const output = {
+    ok: validation.valid,
+    command: "module check",
+    descriptorPath,
+    valid: validation.valid,
+    descriptor: validation.descriptor,
+    errors: validation.errors,
+  };
+  if (!validation.valid) {
+    process.stdout.write(stableJson({
+      ...output,
+      error: {
+        code: "MODULE_DESCRIPTOR_INVALID",
+        message: validation.errors.join("; "),
+        phase: "module",
+        details: validation.errors,
+      },
+    }));
+    return 1;
+  }
+  process.stdout.write(stableJson(output));
+  return 0;
+}
+
 async function cmdReview(rest: string[]): Promise<number> {
   const values = parseOptionArgs(rest, {
     adapter: { type: "string" },
@@ -359,6 +427,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   if (command === "adapter") return cmdAdapter(argv.slice(1));
   if (command === "instance") return cmdInstance(argv.slice(1));
+  if (command === "trial") return cmdTrial(argv.slice(1));
+  if (command === "module") return cmdModule(argv.slice(1));
   if (command === "review") return cmdReview(argv.slice(1));
   throw new Error(`Unknown command: ${command}`);
 }

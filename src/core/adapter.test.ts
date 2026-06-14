@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  memoryProposalLifecycleStates,
   memoryMaintenanceActions,
   validateMemoryStoreAdapter,
   type MemoryStoreAdapter,
@@ -19,6 +20,19 @@ test("memory maintenance actions include review-only operations beyond create/up
     "demote",
     "ttl_update",
     "contradiction_review",
+  ]);
+});
+
+test("memory proposal lifecycle states distinguish review flow from action taxonomy", () => {
+  assert.deepEqual(memoryProposalLifecycleStates, [
+    "proposed",
+    "needs_review",
+    "accepted",
+    "rejected",
+    "deferred",
+    "applied_externally",
+    "superseded",
+    "archived_for_audit",
   ]);
 });
 

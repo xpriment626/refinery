@@ -149,6 +149,27 @@ export const adapter = {
   return adapterPath;
 }
 
+function makeModuleDescriptor(tmp: string, overrides: Record<string, unknown> = {}): string {
+  const descriptorPath = path.join(tmp, "module-descriptor.json");
+  fs.writeFileSync(
+    descriptorPath,
+    JSON.stringify(
+      {
+        schemaVersion: "refinery.module.v1",
+        kind: "runtime",
+        name: "refinery-fixture-runtime",
+        version: "0.0.1",
+        entrypoint: "./runtime.mjs",
+        capabilities: ["review.live"],
+        ...overrides,
+      },
+      null,
+      2,
+    ),
+  );
+  return descriptorPath;
+}
+
 function startFailingSink(): Promise<{
   url: string;
   close: () => Promise<void>;
@@ -446,6 +467,7 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
   assert.equal(parsed.counts.activeMemories, 1);
   assert.equal(parsed.counts.proposals, 1);
   assert.equal(parsed.proposals[0].action, "create");
+  assert.equal(parsed.proposals[0].lifecycle, "proposed");
   assert.equal(parsed.proposals[0].schemaVersion, "refinery.review.v1");
   assert.equal(parsed.proposals[0].targetMemoryId, null);
   assert.match(parsed.proposals[0].body, /agent-callable CLIs/);
@@ -454,6 +476,7 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
   for (const rel of [
     "input.json",
     "metadata.json",
+    "manifest.json",
     "proposals.json",
     "rejected.json",
     "review.json",
@@ -465,9 +488,68 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
   ]) {
     assert.equal(fs.existsSync(path.join(runDir, rel)), true, rel);
   }
+  const manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"));
+  assert.equal(manifest.schemaVersion, "refinery.review.v1");
+  assert.equal(manifest.runId, "run-test");
+  assert.equal(manifest.status, "succeeded");
+  assert.equal(manifest.mode, "deterministic");
+  assert.equal(manifest.artifacts.review, "review.json");
+  assert.equal(manifest.artifacts.proposals, "proposals.json");
+  assert.equal(manifest.artifacts.steps.capture.outputParsed, "steps/capture/output.parsed.json");
+  for (const artifact of [
+    manifest.artifacts.input,
+    manifest.artifacts.metadata,
+    manifest.artifacts.review,
+    manifest.artifacts.proposals,
+    manifest.artifacts.rejected,
+    manifest.artifacts.steps.capture.outputParsed,
+  ]) {
+    assert.equal(fs.existsSync(path.join(runDir, artifact)), true, artifact);
+  }
   const schema = JSON.parse(fs.readFileSync(path.join(runDir, "steps/schema/output.parsed.json"), "utf8"));
   assert.equal(schema.typed[0].action, "create");
   assert.equal("mutation_op" in schema.typed[0], false);
+});
+
+test("refinery trial inspect summarizes deterministic run artifacts without rerunning", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-inspect-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+  const runHome = path.join(tmp, "runs");
+
+  const review = runCli([
+    "review",
+    "--adapter",
+    adapterPath,
+    "--scope",
+    "project",
+    "--run-id",
+    "inspect-test",
+    "--output-dir",
+    runHome,
+    "--json",
+  ]);
+  assert.equal(review.status, 0, review.stderr);
+
+  const result = runCli([
+    "trial",
+    "inspect",
+    "--run-dir",
+    path.join(runHome, "inspect-test"),
+    "--json",
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.command, "trial inspect");
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.status, "succeeded");
+  assert.equal(parsed.schemaVersion, "refinery.review.v1");
+  assert.equal(parsed.runId, "inspect-test");
+  assert.equal(parsed.mode, "deterministic");
+  assert.deepEqual(parsed.actionDistribution, { create: 1 });
+  assert.deepEqual(parsed.lifecycleDistribution, { proposed: 1 });
+  assert.equal((parsed.steps as Record<string, { outputParsed: boolean }>).capture.outputParsed, true);
+  assert.equal((parsed.artifacts as Record<string, string>).manifest, "manifest.json");
 });
 
 test("refinery review live malformed model output emits JSON failure and failed-run artifacts", () => {
@@ -532,6 +614,84 @@ export async function callModel({ specialist }) {
     true,
   );
   assert.match(status.rawOutputPath, /steps\/distillation\/output\.raw\.md$/);
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(tmp, "runs", "live-failure-test", "manifest.json"), "utf8"),
+  );
+  assert.equal(manifest.status, "failed");
+  assert.equal(manifest.failedStep, "distillation");
+  assert.equal(manifest.artifacts.status, "status.json");
+  assert.equal(manifest.artifacts.review, "review.json");
+  assert.equal(manifest.artifacts.steps.distillation.input, "steps/distillation/input.json");
+  assert.equal(manifest.artifacts.steps.distillation.outputRaw, "steps/distillation/output.raw.md");
+});
+
+test("refinery trial inspect summarizes failed runs without treating inspection as failure", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-inspect-failed-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+  const modelPath = path.join(tmp, "bad-model.mjs");
+  fs.writeFileSync(
+    modelPath,
+    `
+export async function callModel() {
+  return JSON.stringify({not_candidates: []});
+}
+`,
+  );
+  const runDir = path.join(tmp, "runs", "failed-inspect-test");
+  const review = runCli(
+    [
+      "review",
+      "--mode",
+      "live",
+      "--adapter",
+      adapterPath,
+      "--scope",
+      "project",
+      "--run-id",
+      "failed-inspect-test",
+      "--output-dir",
+      path.join(tmp, "runs"),
+      "--model-caller",
+      modelPath,
+      "--json",
+    ],
+    {
+      OPENROUTER_API_KEY: "test-key",
+      REFINERY_MODEL_NAME: "deepseek/deepseek-v4-pro",
+    },
+  );
+  assert.equal(review.status, 1);
+
+  const result = runCli(["trial", "inspect", "--run-dir", runDir, "--json"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.command, "trial inspect");
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.status, "failed");
+  assert.equal(parsed.runId, "failed-inspect-test");
+  assert.equal((parsed.error as { code: string }).code, "MODEL_OUTPUT_INVALID");
+  assert.equal((parsed.steps as Record<string, { input: boolean; outputRaw: boolean }>).capture.input, true);
+  assert.equal((parsed.steps as Record<string, { input: boolean; outputRaw: boolean }>).capture.outputRaw, true);
+});
+
+test("refinery trial inspect emits structured JSON failure for missing run dirs", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-inspect-missing-"));
+
+  const result = runCli([
+    "trial",
+    "inspect",
+    "--run-dir",
+    path.join(tmp, "missing-run"),
+    "--json",
+  ]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.command, "trial inspect");
+  assert.equal(parsed.ok, false);
+  assert.equal((parsed.error as { code: string }).code, "TRIAL_NOT_FOUND");
 });
 
 test("refinery review sink non-2xx emits JSON failure and failed-run artifacts", async () => {
@@ -642,6 +802,7 @@ export const sink = {
   assert.equal(callback.schemaVersion, "refinery.review.v1");
   assert.equal(callback.command, "review");
   assert.equal(callback.proposals.length, 1);
+  assert.equal(callback.proposals[0].lifecycle, "proposed");
 });
 
 test("refinery review live mode accepts an injected model caller and writes live artifacts", () => {
@@ -694,6 +855,7 @@ export async function callModel({ specialist }) {
   assert.equal(parsed.mode, "live");
   assert.equal(parsed.model.modelName, "deepseek/deepseek-v4-pro");
   assert.equal("apiKey" in parsed.model, false);
+  assert.equal(parsed.proposals[0].lifecycle, "proposed");
   assert.equal(parsed.metadata.sourceLimit, 3);
   assert.deepEqual(parsed.metadata.specialistOrder, [
     "capture",
@@ -707,6 +869,106 @@ export async function callModel({ specialist }) {
     fs.existsSync(path.join(tmp, "runs", "live-cli-test", "steps", "relationship-review", "output.raw.md")),
     true,
   );
+});
+
+test("refinery module check validates a descriptor without loading module code", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-module-check-"));
+  const descriptorPath = makeModuleDescriptor(tmp);
+
+  const result = runCli(["module", "check", "--descriptor", descriptorPath, "--json"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.command, "module check");
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.valid, true);
+  assert.equal((parsed.descriptor as { kind: string }).kind, "runtime");
+});
+
+test("refinery module check emits structured errors for invalid descriptors", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-module-invalid-"));
+  const descriptorPath = makeModuleDescriptor(tmp, { kind: "coral", capabilities: ["review.live", 1] });
+
+  const result = runCli(["module", "check", "--descriptor", descriptorPath, "--json"]);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "");
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.command, "module check");
+  assert.equal(parsed.ok, false);
+  assert.equal((parsed.error as { code: string }).code, "MODULE_DESCRIPTOR_INVALID");
+  assert.match(JSON.stringify(parsed.error), /capabilities\[1\]/);
+});
+
+test("downstream module compatibility fixture parses CLI contracts without prose scraping", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-compat-"));
+  const adapterPath = makeFixtureAdapter(tmp);
+  const sinkPath = path.join(tmp, "compat-sink.mjs");
+  const callbackPath = path.join(tmp, "compat-callback.json");
+  fs.writeFileSync(sinkPath, `export default { url: "file://${callbackPath}" };`);
+  const runDir = path.join(tmp, "runs", "compat-success");
+
+  const review = runBin([
+    "review",
+    "--adapter",
+    adapterPath,
+    "--scope",
+    "project",
+    "--run-id",
+    "compat-success",
+    "--output-dir",
+    path.join(tmp, "runs"),
+    "--sink",
+    sinkPath,
+    "--json",
+  ]);
+
+  assert.equal(review.status, 0, review.stderr);
+  const reviewJson = parseJsonOutput(review);
+  assert.equal(reviewJson.ok, true);
+  assert.equal((reviewJson.proposals as Array<{ lifecycle: string }>)[0].lifecycle, "proposed");
+  const manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"));
+  assert.equal(manifest.artifacts.proposals, "proposals.json");
+  assert.equal(manifest.artifacts.sink, "sink.json");
+  const callback = JSON.parse(fs.readFileSync(callbackPath, "utf8"));
+  assert.equal(callback.proposals[0].lifecycle, "proposed");
+
+  const inspect = runBin(["trial", "inspect", "--run-dir", runDir, "--json"]);
+  assert.equal(inspect.status, 0, inspect.stderr);
+  const inspected = parseJsonOutput(inspect);
+  assert.equal(inspected.status, "succeeded");
+  assert.deepEqual(inspected.lifecycleDistribution, { proposed: 1 });
+
+  const failedModelPath = path.join(tmp, "bad-model.mjs");
+  fs.writeFileSync(failedModelPath, `export async function callModel() { return "{}"; }`);
+  const failed = runBin(
+    [
+      "review",
+      "--mode",
+      "live",
+      "--adapter",
+      adapterPath,
+      "--scope",
+      "project",
+      "--run-id",
+      "compat-failed",
+      "--output-dir",
+      path.join(tmp, "runs"),
+      "--model-caller",
+      failedModelPath,
+      "--json",
+    ],
+    {
+      OPENROUTER_API_KEY: "test-key",
+      REFINERY_MODEL_NAME: "deepseek/deepseek-v4-pro",
+    },
+  );
+  assert.equal(failed.status, 1);
+  const failedJson = parseJsonOutput(failed);
+  assert.equal((failedJson.error as { code: string }).code, "MODEL_OUTPUT_INVALID");
+  const failedManifest = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "compat-failed", "manifest.json"), "utf8"));
+  assert.equal(failedManifest.status, "failed");
+  assert.equal(failedManifest.artifacts.status, "status.json");
 });
 
 test("package bin target is executable and supports help output", () => {

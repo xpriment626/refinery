@@ -12,9 +12,21 @@ export const memoryMaintenanceActions = [
   "contradiction_review",
 ] as const;
 
+export const memoryProposalLifecycleStates = [
+  "proposed",
+  "needs_review",
+  "accepted",
+  "rejected",
+  "deferred",
+  "applied_externally",
+  "superseded",
+  "archived_for_audit",
+] as const;
+
 export const refineryReviewSchemaVersion = "refinery.review.v1";
 
 export type MemoryMaintenanceAction = (typeof memoryMaintenanceActions)[number];
+export type MemoryProposalLifecycle = (typeof memoryProposalLifecycleStates)[number];
 
 export interface SourceEvidence {
   id: string;
@@ -53,6 +65,7 @@ export interface MemoryProposal {
   schemaVersion: typeof refineryReviewSchemaVersion;
   id: string;
   action: MemoryMaintenanceAction;
+  lifecycle: MemoryProposalLifecycle;
   memoryType: string;
   scope: string;
   body: string;
