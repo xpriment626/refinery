@@ -57,10 +57,16 @@ refinery review --adapter ./my-memory-adapter.mjs --scope project --json
 # Run the same review with live sequential specialist calls.
 refinery review --mode live --adapter ./my-memory-adapter.mjs --scope project --json
 
+# Inspect an existing review trial without re-running review.
+refinery trial inspect --run-dir ./.refinery/trials/<run-id> --json
+
 # Deliver the final review bundle to an app-owned callback/sink.
 refinery review --adapter ./my-memory-adapter.mjs --scope project \
   --sink-url https://your-app.example/refinery/proposals \
   --sink-timeout-ms 10000 --json
+
+# Validate a local module descriptor without loading module code.
+refinery module check --descriptor ./refinery-module.json --json
 
 # Run the same CLI path over the bundled reference SQLite adapter.
 refinery review --adapter reference-sqlite --scope project --json
@@ -96,6 +102,8 @@ The CLI currently exposes:
 - `refinery instance init --home <dir> --from <dir> --reset --json`
 - `refinery adapter check --adapter <path|reference-sqlite> --probe --scope <scope> --json`
 - `refinery review --mode deterministic|live --adapter <path|reference-sqlite> --scope <scope> --home <dir> --run-id <id> --sink-url <url> --sink-timeout-ms <ms> --json`
+- `refinery trial inspect --run-dir <dir> --json`
+- `refinery module check --descriptor <path> --json`
 
 `review` is dry-run only in both modes. It reads source evidence and active
 memories through the adapter contract, writes a run directory, and emits
@@ -125,6 +133,18 @@ the proposals. The sink result is written to `sink.json` inside the trial.
 HTTP sink calls time out after 10000ms by default; override with
 `--sink-timeout-ms`.
 
+Every review run writes `manifest.json` as the module-facing artifact index.
+The manifest records schema version, run id, mode, adapter, scope, status,
+timestamps, runtime/model metadata when present, step order, and paths to
+review, proposal, rejection, status, sink, and step artifacts.
+
+`refinery trial inspect --run-dir <dir> --json` reads an existing run directory
+without invoking an adapter or model. It returns run status, counts, proposal
+action distribution, proposal lifecycle distribution, step artifact presence,
+sink summary, and failed-run error details when present. Inspecting a failed run
+succeeds as an inspection command while reporting that run's own `ok: false`
+and `status: "failed"`.
+
 ### Local Instance Home
 
 The packaged CLI defaults to a caller-owned local instance at `$PWD/.refinery`.
@@ -147,6 +167,7 @@ Run artifacts are written under `.refinery/trials/<run-id>/` by default:
 
 ```text
 input.json
+manifest.json
 metadata.json
 proposals.json
 rejected.json
@@ -164,6 +185,11 @@ Failed reviews that reach a run directory write `status.json` and a failed
 when known, and a raw-output path when a live specialist returned invalid JSON.
 Live step directories preserve `input.json` and `output.raw.md` when available
 so another agent can inspect the failed run.
+
+Proposals use two separate vocabularies:
+
+- `action`: the recommended memory-maintenance operation.
+- `lifecycle`: the review/workflow state of the recommendation.
 
 The first CLI scaffold uses deterministic local passes to prove the adapter,
 JSON, artifact, and proposal contracts without requiring a live model. Model
@@ -200,6 +226,52 @@ The action taxonomy for maintenance proposals is:
 create, update, supersede, merge, archive, retag, quarantine,
 promote, demote, ttl_update, contradiction_review
 ```
+
+The lifecycle taxonomy for proposal handling is:
+
+```text
+proposed, needs_review, accepted, rejected, deferred,
+applied_externally, superseded, archived_for_audit
+```
+
+Newly emitted proposals default to `lifecycle: "proposed"`. `accepted` means a
+reviewer or workflow accepted the recommendation. `applied_externally` means a
+host app or customer-owned system performed the durable mutation. Refinery core
+does not perform that mutation.
+
+### Module Descriptor Contract
+
+Module descriptors are minimal, machine-checkable records for future runtime,
+adapter, sink, and workbench packages. `refinery module check` validates the
+descriptor shape without importing or executing module code.
+
+```json
+{
+  "schemaVersion": "refinery.module.v1",
+  "kind": "runtime",
+  "name": "refinery-example-runtime",
+  "version": "0.0.1",
+  "entrypoint": "./dist/index.js",
+  "capabilities": ["review.live"]
+}
+```
+
+Supported descriptor kinds are `runtime`, `adapter`, `sink`, and `workbench`.
+This is a compatibility skeleton, not package discovery or Coral/Pi loading.
+
+### Module Invocation Contract
+
+Future Coral, Pi, and workbench modules should treat the CLI as a subprocess
+contract:
+
+- pass `--json` and parse stdout as JSON
+- use `--output-dir` and `--run-id` for deterministic artifact locations
+- inspect `schemaVersion` before consuming outputs
+- read `manifest.json` instead of inferring artifact paths from prose
+- use `trial inspect` for post-run summaries
+- rely on structured `ok`/`error.code` envelopes for failure handling
+- rely on redacted metadata only; secrets such as API keys are never emitted
+- keep durable memory writes in the host app or adapter layer
 
 ## Specialist Pipeline
 
