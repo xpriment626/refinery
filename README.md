@@ -1,9 +1,9 @@
 # refinery
 
-Refinery is a storage-agnostic memory refinement core. It defines specialist
-contracts and runtime adapters for turning caller-provided session history,
-source slices, existing memory candidates, and policy context into structured
-memory-refinement outputs.
+Refinery is a Coral-first memory-maintenance CLI and storage-agnostic refinement
+core. Its default product path runs coordinated Coral specialists over local
+session history and existing memory candidates, then emits reviewable proposal
+artifacts for the host app or coding agent to apply elsewhere.
 
 The core package does not require `refinery.db`, does not own customer memory
 storage, and does not activate durable memory on its own. Persistence of
@@ -51,28 +51,38 @@ refinery adapter check --adapter ./my-memory-adapter.mjs --json
 # Probe adapter reads and validate returned record shapes.
 refinery adapter check --adapter ./my-memory-adapter.mjs --probe --scope project --json
 
-# Run a dry-run memory review over an adapter and emit proposal artifacts.
-refinery review --adapter ./my-memory-adapter.mjs --scope project --json
+# Run the default Coral-coordinated dry-run review over local Claude Code sessions.
+refinery review --project . --source claude-code-sessions --target codex-memory --json
 
-# Run the same review with live sequential specialist calls.
-refinery review --mode live --adapter ./my-memory-adapter.mjs --scope project --json
+# Advanced local debugging: run the old sequential adapter-backed scaffold.
+refinery review --runtime sequential --adapter ./my-memory-adapter.mjs --scope project --json
+
+# Advanced local debugging: run live sequential specialist calls.
+refinery review --runtime sequential --mode live --adapter ./my-memory-adapter.mjs --scope project --json
 
 # Inspect an existing review trial without re-running review.
 refinery trial inspect --run-dir ./.refinery/trials/<run-id> --json
 
 # Deliver the final review bundle to an app-owned callback/sink.
-refinery review --adapter ./my-memory-adapter.mjs --scope project \
+refinery review --project . --source claude-code-sessions --target codex-memory \
   --sink-url https://your-app.example/refinery/proposals \
   --sink-timeout-ms 10000 --json
 
 # Validate a local module descriptor without loading module code.
 refinery module check --descriptor ./refinery-module.json --json
 
-# Run the same CLI path over the bundled reference SQLite adapter.
-refinery review --adapter reference-sqlite --scope project --json
+# Run the same CLI path against an existing Coral server without starting one.
+refinery review --project . --source claude-code-sessions --target codex-memory \
+  --coral-url http://localhost:5555 --coral-no-start --json
+
+# Advanced attachment: reuse a caller-owned Coral session/thread.
+refinery review --project . --source claude-code-sessions --target codex-memory \
+  --coral-url http://localhost:5555 --coral-no-start \
+  --coral-namespace existing-namespace \
+  --coral-session-id existing-session --coral-thread-id existing-thread --json
 
 # From a local checkout before linking/installing the bin:
-node src/cli.ts review --adapter reference-sqlite --scope project --json
+node src/cli.ts review --project . --source claude-code-sessions --target codex-memory --json
 
 # Run the storage-agnostic MCP stdio server.
 npm run mcp
@@ -101,14 +111,20 @@ The CLI currently exposes:
 
 - `refinery instance init --home <dir> --from <dir> --reset --json`
 - `refinery adapter check --adapter <path|reference-sqlite> --probe --scope <scope> --json`
-- `refinery review --mode deterministic|live --adapter <path|reference-sqlite> --scope <scope> --home <dir> --run-id <id> --sink-url <url> --sink-timeout-ms <ms> --json`
+- `refinery review --project <dir> --source claude-code-sessions --target codex-memory --home <dir> --run-id <id> --sink-url <url> --sink-timeout-ms <ms> --json`
 - `refinery trial inspect --run-dir <dir> --json`
 - `refinery module check --descriptor <path> --json`
 
-`review` is dry-run only in both modes. It reads source evidence and active
-memories through the adapter contract, writes a run directory, and emits
-proposal-shaped JSON. It does not approve proposals, mutate memory, or write to
-the backing store.
+`review` is dry-run only. By default it starts or targets Coral, creates a
+bounded session/thread, waits for the five Refinery specialists, seeds a review
+intake, collects outputs through Coral extended state, writes a run directory,
+and emits proposal-shaped JSON. It does not approve proposals, mutate memory,
+or write to the backing store.
+
+Advanced attachment flags let a caller provide an existing Coral URL,
+namespace, session id, and thread id. Refinery only tears down the session and
+server process it created itself; caller-owned Coral sessions/threads are left
+running.
 
 JSON output is the machine contract. Successful review payloads include
 `ok: true`, `schemaVersion: "refinery.review.v1"`, `metadata`, `proposals`, and
@@ -117,14 +133,19 @@ JSON output is the machine contract. Successful review payloads include
 available. Non-JSON terminal usage still reports failures on stderr.
 
 Review metadata records reproducibility inputs: mode, adapter, scope, creation
-time, sink URL, source limits, specialist order, runtime adapter, and redacted
-model provider/base URL/model name for live runs. API keys are never emitted.
+time, sink URL, source limits, specialist order, runtime adapter, Coral
+namespace/session/thread refs, and redacted model provider/base URL/model name
+for live sequential runs. API keys are never emitted.
 
 Modes:
 
-- `deterministic` (default): local scaffold pass, no model calls.
-- `live`: sequential non-coordinated specialist calls:
+- `coral` (default): coordinated Coral specialist run.
+- `sequential deterministic`: advanced local scaffold pass, no model calls.
+- `sequential live`: advanced non-coordinated specialist calls:
   `Capture -> Distillation -> Schema -> Relevance -> Relationship Review`.
+
+Use `--runtime sequential` to access the sequential modes for local debugging.
+The default `review` command is the Coral-coordinated product path.
 
 Sink/callback behavior is deliberately app-owned. `--sink-url` posts the final
 review bundle after artifacts are written. The receiving app decides whether to
@@ -136,7 +157,8 @@ HTTP sink calls time out after 10000ms by default; override with
 Every review run writes `manifest.json` as the module-facing artifact index.
 The manifest records schema version, run id, mode, adapter, scope, status,
 timestamps, runtime/model metadata when present, step order, and paths to
-review, proposal, rejection, status, sink, and step artifacts.
+review, proposal, rejection, status, sink, Coral, transcript, and step
+artifacts.
 
 `refinery trial inspect --run-dir <dir> --json` reads an existing run directory
 without invoking an adapter or model. It returns run status, counts, proposal
@@ -172,29 +194,31 @@ metadata.json
 proposals.json
 rejected.json
 review.json
+coral.json         # Coral session/thread/runtime evidence for coordinated runs
+transcript.json    # transcript excerpts for coordinated runs
 steps/
-  capture/output.parsed.json
-  distillation/output.parsed.json
-  schema/output.parsed.json
-  relevance/output.parsed.json
-  relationship-review/output.parsed.json
+  capture/{input.json,output.raw.md,output.parsed.json}
+  distillation/{input.json,output.raw.md,output.parsed.json}
+  schema/{input.json,output.raw.md,output.parsed.json}
+  relevance/{input.json,output.raw.md,output.parsed.json}
+  relationship-review/{input.json,output.raw.md,output.parsed.json}
 ```
 
 Failed reviews that reach a run directory write `status.json` and a failed
 `review.json` containing `status: "failed"`, the error payload, failed step
 when known, and a raw-output path when a live specialist returned invalid JSON.
-Live step directories preserve `input.json` and `output.raw.md` when available
-so another agent can inspect the failed run.
+Coral failures also write `coral.json` with session/thread/runtime evidence
+available up to the failure point. Step directories preserve `input.json` and
+`output.raw.md` when available so another agent can inspect the failed run.
 
 Proposals use two separate vocabularies:
 
 - `action`: the recommended memory-maintenance operation.
 - `lifecycle`: the review/workflow state of the recommendation.
 
-The first CLI scaffold uses deterministic local passes to prove the adapter,
-JSON, artifact, and proposal contracts without requiring a live model. Model
-backed specialist execution can replace those internals without changing the
-agent-facing command shape.
+The default CLI path uses Coral coordination to prove the installed-agent
+surface. The sequential scaffold remains available for local debugging of
+adapter, JSON, artifact, and proposal contracts without starting Coral.
 
 ### Adapter Contract
 
@@ -282,8 +306,9 @@ Capture -> Distillation -> Schema -> Relevance -> Relationship Review
 ```
 
 Each specialist is defined as a prompt, input contract, output contract, and
-tool boundary. The definitions are framework-neutral; Mastra is currently an
-execution adapter, and Coral or another runtime can be added as another adapter.
+tool boundary. The definitions are framework-neutral. The default CLI path
+binds them as separate Coral agents, while Mastra/sequential runners remain
+debugging and experimentation surfaces.
 
 Schema owns memory-type routing. It emits proposal-compatible `memory_type`
 plus richer evaluation metadata: `primary_type`, optional `secondary_type`,
