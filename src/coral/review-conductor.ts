@@ -606,6 +606,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
           modelBaseUrl: configuredModel.baseUrl,
           reasoningEffort: configuredModel.reasoningEffort,
           maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? "2",
+          ttlMs: Math.max(timeoutMs + 60_000, 180_000),
+          holdAfterExitMs: Math.max(timeoutMs + 60_000, 180_000),
         }),
       );
       sessionCreated = true;

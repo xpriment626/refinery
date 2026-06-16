@@ -17,7 +17,7 @@ import {
   refineryCoralAgentGlobForRepo,
   getCoralAgentBySpecialistName,
 } from "./coral/definitions.ts";
-import { buildLiveReviewEnvelope } from "./coral/worker.ts";
+import { buildLiveReviewEnvelope, isCoralWaitTimeout } from "./coral/worker.ts";
 
 const repoRoot = process.cwd();
 
@@ -198,6 +198,12 @@ test("Coral worker live envelope reports invalid model JSON without fallback", a
   assert.equal((envelope.error as { code: string }).code, "MODEL_OUTPUT_INVALID");
   assert.equal(envelope.rawOutput, "not json");
   assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "or-worker-bad-json");
+});
+
+test("Coral worker treats wait_for_mention timeouts as idle waits", () => {
+  assert.equal(isCoralWaitTimeout(new Error("MCP error -32001: Request timed out")), true);
+  assert.equal(isCoralWaitTimeout("timeout of 1m occurred waiting for message that matches mentions"), true);
+  assert.equal(isCoralWaitTimeout(new Error("MCP connection refused")), false);
 });
 
 test("ping-pong evaluator requires each expected specialist to be mentioned and respond", () => {

@@ -69,6 +69,11 @@ function parseMaxTurns(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 2;
 }
 
+export function isCoralWaitTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /request timed out|timeout of .* occurred waiting|timed out/i.test(message);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -429,6 +434,11 @@ async function main(): Promise<void> {
         arguments: { currentUnixTime: cursorMs, maxWaitMs: 60_000 },
       });
     } catch (error) {
+      if (isCoralWaitTimeout(error)) {
+        cursorMs = beforeWait;
+        log(definition.agentName, `wait_for_mention timed out; continuing idle wait`);
+        continue;
+      }
       log(definition.agentName, `wait_for_mention failed: ${(error as Error).message}`);
       await connection.client.close();
       process.exit(0);
