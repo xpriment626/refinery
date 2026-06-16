@@ -95,6 +95,9 @@ test("Coral worker live envelope uses injected model output and redacts secrets"
     envelope: {
       type: "refinery-review-intake",
       runId: "run-live-worker",
+      intent: "stale-audit",
+      request: "Find memories that may be stale.",
+      intentDescription: "Identify active memories that may be stale.",
       source_chunks: [
         {
           id: "source:1",
@@ -149,7 +152,9 @@ test("Coral worker live envelope uses injected model output and redacts secrets"
   assert.equal(envelope.step, "capture");
   assert.equal(calls.length, 1);
   assert.match(calls[0].system, /Return only JSON/);
+  assert.match(calls[0].system, /stale audit/);
   assert.match(calls[0].user, /source_chunks/);
+  assert.match(calls[0].user, /review_intent/);
   assert.equal((envelope.output as { candidates: unknown[] }).candidates.length, 1);
   assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "or-worker-1");
   assert.equal("apiKey" in (envelope.model as Record<string, unknown>), false);

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { refineryReviewSchemaVersion } from "./adapter.ts";
 import { RefineryError } from "./errors.ts";
+import { type ReviewIntent } from "./intents.ts";
 
 export const reviewStepOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
 
@@ -24,6 +25,8 @@ export interface ReviewArtifactManifest {
   mode: ReviewRunMode;
   adapter: string | null;
   scope: string;
+  intent?: ReviewIntent;
+  request?: string | null;
   status: ReviewRunStatus;
   createdAt: string;
   failedAt?: string;
@@ -139,6 +142,8 @@ export function writeReviewArtifactManifest(args: {
   counts?: Record<string, number>;
   metadata?: Record<string, unknown>;
   error?: Record<string, unknown>;
+  intent?: ReviewIntent;
+  request?: string | null;
 }): ReviewArtifactManifest {
   const counts = args.counts ?? {
     proposals: readArrayCount(args.runDir, "proposals.json"),
@@ -153,6 +158,8 @@ export function writeReviewArtifactManifest(args: {
     mode: args.mode,
     adapter: args.adapterName,
     scope: args.scope,
+    ...(args.intent ? { intent: args.intent } : {}),
+    ...(args.request !== undefined ? { request: args.request } : {}),
     status: args.status,
     createdAt: args.createdAt,
     ...(args.failedAt ? { failedAt: args.failedAt } : {}),

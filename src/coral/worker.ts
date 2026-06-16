@@ -1,5 +1,5 @@
 import { loadLocalEnv } from "../env.ts";
-import type { ModelConfig } from "../env.ts";
+import { parseModelMaxTokens, type ModelConfig } from "../env.ts";
 import {
   parseCapture,
   parseDistillation,
@@ -55,6 +55,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()): WorkerModelConfig {
     baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
     apiKey: apiKey ?? "",
     reasoningEffort: readEnv("REASONING_EFFORT", localEnv) ?? refineryCoralModelDefaults.reasoningEffort,
+    maxTokens: parseModelMaxTokens(readEnv("MODEL_MAX_TOKENS", localEnv) ?? readEnv("REFINERY_MODEL_MAX_TOKENS", localEnv)),
     apiKeyPresent: Boolean(apiKey),
   };
 }
@@ -110,10 +111,32 @@ function parseReviewEnvelope(text: string): Record<string, unknown> | null {
 }
 
 function contextFrom(envelope: Record<string, unknown>): Record<string, unknown> {
-  if (isRecord(envelope.context)) return envelope.context;
-  return {
+  const base = isRecord(envelope.context)
+    ? envelope.context
+    : {
     source_chunks: Array.isArray(envelope.source_chunks) ? envelope.source_chunks : [],
     active_memory_hints: Array.isArray(envelope.active_memory_hints) ? envelope.active_memory_hints : [],
+  };
+  return {
+    ...base,
+    review_intent:
+      typeof envelope.intent === "string"
+        ? envelope.intent
+        : typeof base.review_intent === "string"
+          ? base.review_intent
+          : "general-review",
+    review_request:
+      typeof envelope.request === "string"
+        ? envelope.request
+        : typeof base.review_request === "string"
+          ? base.review_request
+          : null,
+    intent_description:
+      typeof envelope.intentDescription === "string"
+        ? envelope.intentDescription
+        : typeof base.intent_description === "string"
+          ? base.intent_description
+          : null,
   };
 }
 
@@ -152,7 +175,7 @@ function outputShapeForSpecialist(name: SpecialistName): string {
     case "schema":
       return `{"typed":[{"body":"...","memory_type":"semantic","primary_type":"semantic","secondary_type":null,"type_confidence":0.8,"type_rationale":"...","ambiguities":[],"durability":"durable","ttl":null,"proposed_scope":"project","action":"create","target_memory_id":null,"source_refs":[]}]}`;
     case "relevance":
-      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null}],"rejected":[]}`;
+      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null,"staleness_reason":null,"forget_reason":null,"update_reason":null,"conflict_reason":null,"scope_reason":null,"replacement_body":null,"ambiguities":[]}],"rejected":[]}`;
     case "relationship-review":
       return `{"findings":[{"body":"...","relation":"novel","target_memory_id":null,"confidence":0.8,"rationale":"...","source_refs":[],"memory_refs":[{"memory_id":"memory:1","provenance_kind":"fixture"}]}]}`;
   }
@@ -167,9 +190,32 @@ function instructionForSpecialist(name: SpecialistName): string {
     case "schema":
       return "Use project scope for this slice. Set memory_type equal to primary_type. Use canonical action, not mutation_op.";
     case "relevance":
-      return "Emit proposal-shaped records only for durable future-useful candidates. Include rejected[] for filtered candidates.";
+      return "Emit proposal-shaped records only for durable future-useful candidates. Include rejected[] for filtered candidates. Use canonical action enum values only; include intent-specific rationale fields when relevant and null otherwise.";
     case "relationship-review":
       return "Classify each proposal exactly once against active-memory candidates. memory_refs must be objects, never bare strings.";
+  }
+}
+
+function intentInstruction(context: Record<string, unknown>): string {
+  const intent = typeof context.review_intent === "string" ? context.review_intent : "general-review";
+  const request = typeof context.review_request === "string" && context.review_request.trim()
+    ? ` User request: ${context.review_request.trim()}`
+    : "";
+  switch (intent) {
+    case "stale-audit":
+      return `Intent guidance: this is a stale audit. Treat active_memory_hints as primary audit targets, use source_chunks as evidence, and prefer update, archive, supersede, ttl_update, or contradiction_review over create when a memory appears outdated, misleading, or over-broad. If no stale target is supported, reject rather than inventing unrelated new memory.${request}`;
+    case "forget-candidates":
+      return `Intent guidance: identify active memories that may be obsolete, redundant, too noisy, or low-value. Prefer archive, quarantine, merge, demote, or ttl_update proposals with explicit target_memory_id. If evidence is insufficient, reject.${request}`;
+    case "update-candidates":
+      return `Intent guidance: identify active memories that remain useful but need refreshed wording, replacement body, corrected scope, or newer evidence. Prefer update, supersede, retag, or ttl_update and include replacement_body when useful.${request}`;
+    case "conflict-audit":
+      return `Intent guidance: identify contradictions between active memories and source evidence. Prefer contradiction_review, update, or supersede with clear evidence refs and target_memory_id.${request}`;
+    case "scope-audit":
+      return `Intent guidance: identify memories whose scope is too broad, too narrow, or attached to the wrong project/user/org context. Prefer retag, update, demote, or promote with scope_reason.${request}`;
+    case "general-review":
+      return `Intent guidance: perform a general dry-run memory review and emit only evidence-backed proposals.${request}`;
+    default:
+      return `Intent guidance: perform a dry-run memory review for intent ${intent} and emit only evidence-backed proposals.${request}`;
   }
 }
 
@@ -208,6 +254,11 @@ function payloadForSpecialist(args: {
   message: { id: string; senderName: string; mentionNames: string[]; threadId: string };
 }): { payload: Record<string, unknown>; context: Record<string, unknown> } {
   const context = contextFrom(args.envelope);
+  const intentContext = {
+    review_intent: context.review_intent,
+    review_request: context.review_request,
+    intent_description: context.intent_description,
+  };
   const previousOutput = isRecord(args.envelope.output) ? args.envelope.output : {};
   const threadContext = coralThreadContext({ message: args.message, envelope: args.envelope });
   switch (args.specialistName) {
@@ -215,6 +266,7 @@ function payloadForSpecialist(args: {
       return {
         context,
         payload: {
+          ...intentContext,
           source_chunks: Array.isArray(context.source_chunks) ? context.source_chunks : [],
           active_memory_hints: compactMemoryHints(context.active_memory_hints),
           coral_thread_context: threadContext,
@@ -224,6 +276,7 @@ function payloadForSpecialist(args: {
       return {
         context,
         payload: {
+          ...intentContext,
           candidates: arrayFrom(previousOutput, "candidates"),
           coral_thread_context: threadContext,
         },
@@ -232,6 +285,7 @@ function payloadForSpecialist(args: {
       return {
         context,
         payload: {
+          ...intentContext,
           distilled: arrayFrom(previousOutput, "distilled"),
           active_memory_hints: compactMemoryHints(context.active_memory_hints),
           coral_thread_context: threadContext,
@@ -241,6 +295,7 @@ function payloadForSpecialist(args: {
       return {
         context,
         payload: {
+          ...intentContext,
           typed: arrayFrom(previousOutput, "typed"),
           coral_thread_context: threadContext,
         },
@@ -249,6 +304,7 @@ function payloadForSpecialist(args: {
       return {
         context,
         payload: {
+          ...intentContext,
           relevance: previousOutput,
           active_memory_candidates: activeMemoryCandidates(context, previousOutput),
           coral_thread_context: threadContext,
@@ -319,7 +375,7 @@ export async function buildLiveReviewEnvelope(args: {
   const prompt = buildPrompt({
     specialist,
     shape: outputShapeForSpecialist(args.specialistName),
-    instruction: instructionForSpecialist(args.specialistName),
+    instruction: [instructionForSpecialist(args.specialistName), intentInstruction(context)].join(" "),
     payload,
   });
 

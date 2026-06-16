@@ -1,6 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { Agent } from "@mastra/core/agent";
-import type { ModelConfig } from "../../env.ts";
+import { defaultOpenRouterMaxTokens, type ModelConfig } from "../../env.ts";
 import type { LocalSpecialist, ModelCaller } from "../../core/specialists/types.ts";
 import { buildSpecialistInstructions } from "../../core/specialists/prompt.ts";
 
@@ -75,7 +75,7 @@ export async function callOpenRouterChatWithMetadata(request: {
         { role: "user", content: request.user },
       ],
       temperature: 0.1,
-      max_tokens: 3000,
+      max_tokens: request.model.maxTokens ?? defaultOpenRouterMaxTokens,
     }),
   });
   if (!response.ok) {

@@ -66,6 +66,7 @@ export interface MemoryProposal {
   id: string;
   action: MemoryMaintenanceAction;
   lifecycle: MemoryProposalLifecycle;
+  intent?: string;
   memoryType: string;
   scope: string;
   body: string;
@@ -73,6 +74,13 @@ export interface MemoryProposal {
   rationale: string;
   sourceRefs: unknown[];
   targetMemoryId: string | null;
+  stalenessReason?: string | null;
+  forgetReason?: string | null;
+  updateReason?: string | null;
+  conflictReason?: string | null;
+  scopeReason?: string | null;
+  replacementBody?: string | null;
+  ambiguities?: string[];
 }
 
 export interface ApplyProposalInput {

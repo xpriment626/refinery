@@ -77,7 +77,7 @@ test("callOpenRouterChat uses chat completions and returns message content", asy
     assert.equal(request.url, "/api/v1/chat/completions");
     assert.equal(request.body.model, "deepseek/deepseek-v4-pro");
     assert.equal(request.body.messages.length, 2);
-    assert.equal(request.body.max_tokens, 3000);
+    assert.equal(request.body.max_tokens, 8000);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

@@ -15,6 +15,7 @@ import {
   serializeRefineryError,
 } from "./errors.ts";
 import { writeReviewArtifactManifest, type ReviewRunMode } from "./artifacts.ts";
+import { defaultReviewIntent, type ReviewIntent } from "./intents.ts";
 
 const DEFAULT_SINK_TIMEOUT_MS = 10_000;
 const MAX_SINK_RESPONSE_TEXT_CHARS = 4000;
@@ -24,6 +25,8 @@ export interface ReviewRunOptions {
   scope: string;
   runId: string;
   outputDir: string;
+  intent?: ReviewIntent;
+  request?: string | null;
   sink?: ReviewSinkOptions;
 }
 
@@ -89,6 +92,8 @@ export interface ReviewRunMetadata {
   specialistOrder: string[];
   sourceLimit: number | null;
   sourceCharLimit: number | null;
+  intent: ReviewIntent;
+  request: string | null;
   model?: Record<string, unknown>;
 }
 
@@ -107,6 +112,8 @@ export interface ReviewFailureStatus {
   createdAt: string;
   failedAt: string;
   error: Record<string, unknown>;
+  intent?: ReviewIntent;
+  request?: string | null;
 }
 
 function writeJson(filePath: string, value: unknown): void {
@@ -122,6 +129,8 @@ export function writeReviewFailureStatus(args: {
   mode: ReviewRunMode;
   createdAt: string;
   error: RefineryError;
+  intent?: ReviewIntent;
+  request?: string | null;
 }): ReviewFailureStatus {
   const status: ReviewFailureStatus = {
     ok: false,
@@ -138,6 +147,8 @@ export function writeReviewFailureStatus(args: {
     createdAt: args.createdAt,
     failedAt: new Date().toISOString(),
     error: serializeRefineryError(args.error),
+    ...(args.intent ? { intent: args.intent } : {}),
+    ...(args.request !== undefined ? { request: args.request } : {}),
   };
   writeJson(path.join(args.runDir, "status.json"), status);
   writeJson(path.join(args.runDir, "review.json"), status);
@@ -153,6 +164,8 @@ export function writeReviewFailureStatus(args: {
     failedStep: status.failedStep,
     rawOutputPath: status.rawOutputPath,
     error: status.error,
+    intent: args.intent,
+    request: args.request,
   });
   return status;
 }
@@ -275,6 +288,8 @@ export async function deliverReviewSink(
 export async function runReview(options: ReviewRunOptions): Promise<ReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
   const createdAt = new Date().toISOString();
+  const intent = options.intent ?? defaultReviewIntent;
+  const request = options.request ?? null;
   fs.mkdirSync(runDir, { recursive: true });
   try {
     const scopeInput = { scope: options.scope };
@@ -286,6 +301,8 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
   writeJson(path.join(runDir, "input.json"), {
     adapter: options.adapter.name,
     scope: options.scope,
+    intent,
+    request,
     sources,
     activeMemories,
   });
@@ -336,6 +353,7 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
     id: `proposal:${options.runId}:${index + 1}`,
     action: "create",
     lifecycle: "proposed",
+    intent,
     memoryType: item.memory_type,
     scope: item.proposed_scope,
     body: item.body,
@@ -385,6 +403,8 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
       specialistOrder: ["capture", "distillation", "schema", "relevance", "relationship-review"],
       sourceLimit: null,
       sourceCharLimit: null,
+      intent,
+      request,
     },
   };
 
@@ -400,6 +420,8 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
     createdAt,
     counts: result.counts,
     metadata: result.metadata,
+    intent,
+    request,
   });
   if (!options.sink) return result;
 
@@ -417,6 +439,8 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
     createdAt,
     counts: result.counts,
     metadata: result.metadata,
+    intent,
+    request,
   });
   return resultWithSink;
 } catch (error) {
@@ -433,6 +457,8 @@ export async function runReview(options: ReviewRunOptions): Promise<ReviewRunRes
     mode: "deterministic",
     createdAt,
     error: refineryError,
+    intent,
+    request,
   });
   throw refineryError;
 }

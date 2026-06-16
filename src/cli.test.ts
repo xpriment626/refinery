@@ -117,6 +117,61 @@ function seedReferenceSqliteHome(tmp: string): { home: string; project: string }
   return { home, project };
 }
 
+function seedCodexMemoryHome(tmp: string): string {
+  const memoryHome = path.join(tmp, "memories");
+  fs.mkdirSync(path.join(memoryHome, "rollout_summaries"), { recursive: true });
+  fs.mkdirSync(path.join(memoryHome, "extensions/ad_hoc/notes"), { recursive: true });
+  fs.writeFileSync(
+    path.join(memoryHome, "MEMORY.md"),
+    [
+      "# Task Group: Research-Desk / refinery CLI module-ready substrate and release hygiene",
+      "",
+      "scope: Use when working on Refinery CLI contracts.",
+      "applies_to: cwd=/Users/bambozlor/Lab/Research-Desk/refinery",
+      "",
+      "### rollout_summary_files",
+      "",
+      "- rollout_summaries/2026-06-10T13-09-48-UPI5-refinery_cli_module_ready_lifecycle_aware.md (cwd=/Users/bambozlor/Lab/Research-Desk, rollout_path=/Users/bambozlor/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl, updated_at=2026-06-14T14:24:07+00:00, thread_id=019eb1a7-4054-7f51-9cea-484e208390f9, success)",
+      "",
+      "## User preferences",
+      "",
+      "- when the goal required downstream modules to work without undocumented conventions -> prefer machine-readable contracts [Task 1]",
+      "",
+      "## Reusable knowledge",
+      "",
+      "- Every review run writes a canonical `manifest.json` on both success and failure paths [Task 1]",
+    ].join("\n"),
+  );
+  fs.writeFileSync(
+    path.join(memoryHome, "memory_summary.md"),
+    [
+      "v1",
+      "",
+      "## User preferences",
+      "",
+      "- For Refinery contracts, prefer machine-readable outputs without undocumented conventions.",
+    ].join("\n"),
+  );
+  fs.writeFileSync(
+    path.join(memoryHome, "rollout_summaries/2026-06-10T13-09-48-UPI5-refinery_cli_module_ready_lifecycle_aware.md"),
+    [
+      "thread_id: 019eb1a7-4054-7f51-9cea-484e208390f9",
+      "updated_at: 2026-06-14T14:24:07+00:00",
+      "rollout_path: /Users/bambozlor/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl",
+      "cwd: /Users/bambozlor/Lab/Research-Desk",
+      "",
+      "# Refinery was hardened into a module-ready CLI substrate",
+      "",
+      "- The stable machine-facing CLI surfaces are `review`, `trial inspect`, and `module check`.",
+    ].join("\n"),
+  );
+  fs.writeFileSync(
+    path.join(memoryHome, "extensions/ad_hoc/notes/2026-06-10T10-21-01-openstrat-pi-openclaw-intent.md"),
+    "OpenStrat should preserve Pi as the substrate while keeping product boundaries narrow.\n",
+  );
+  return memoryHome;
+}
+
 function makeInvalidSourceAdapter(tmp: string): string {
   const adapterPath = path.join(tmp, "invalid-source-adapter.mjs");
   fs.writeFileSync(
@@ -759,6 +814,91 @@ test("refinery review with --json emits structured errors for invalid mode", () 
   assert.equal(parsed.ok, false);
   assert.equal(parsed.command, "review");
   assert.equal((parsed.error as { code: string }).code, "INVALID_OPTION");
+});
+
+test("refinery adapter check can probe the built-in Codex memory adapter", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-codex-adapter-"));
+  const memoryHome = seedCodexMemoryHome(tmp);
+
+  const result = runCli([
+    "adapter",
+    "check",
+    "--adapter",
+    "codex-memory",
+    "--memory-home",
+    memoryHome,
+    "--probe",
+    "--scope",
+    "project",
+    "--json",
+  ]);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const parsed = parseJsonOutput(result);
+  assert.equal(parsed.ok, true);
+  assert.equal((parsed.adapter as { name: string }).name, "codex-memory");
+  assert.equal(parsed.probed, true);
+  assert.equal((parsed as { sourceCount: number }).sourceCount, 3);
+  assert.equal(((parsed as { activeMemoryCount: number }).activeMemoryCount) >= 3, true);
+});
+
+test("refinery review runs Codex memory source through pointed Coral intake", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-codex-review-"));
+  const project = path.join(tmp, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const memoryHome = seedCodexMemoryHome(tmp);
+  const coral = await startFakeCoralReviewServer();
+  const outputDir = path.join(tmp, "runs");
+  try {
+    const result = await runCliAsync([
+      "review",
+      "--project",
+      project,
+      "--source",
+      "codex-memory",
+      "--target",
+      "codex-memory",
+      "--memory-home",
+      memoryHome,
+      "--intent",
+      "stale-audit",
+      "--request",
+      "Find Codex memories that might be stale after the repo moved to Lab.",
+      "--run-id",
+      "codex-intent-test",
+      "--output-dir",
+      outputDir,
+      "--coral-url",
+      coral.apiUrl,
+      "--coral-no-start",
+      "--json",
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = parseJsonOutput(result);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.source, "codex-memory");
+    assert.equal(parsed.target, "codex-memory");
+    assert.equal((parsed.adapter as { name: string }).name, "codex-memory");
+    assert.equal((parsed.metadata as Record<string, unknown>).intent, "stale-audit");
+    assert.equal((parsed.metadata as Record<string, unknown>).request, "Find Codex memories that might be stale after the repo moved to Lab.");
+
+    const runDir = path.join(outputDir, "codex-intent-test");
+    const intake = JSON.parse(fs.readFileSync(path.join(runDir, "input.json"), "utf8"));
+    assert.equal(intake.source, "codex-memory");
+    assert.equal(intake.target, "codex-memory");
+    assert.equal(intake.intent, "stale-audit");
+    assert.equal(intake.request, "Find Codex memories that might be stale after the repo moved to Lab.");
+    assert.equal(intake.source_chunks[0].path, "MEMORY.md");
+    assert.equal(coral.state.seedPacket?.intent, "stale-audit");
+    assert.equal(coral.state.seedPacket?.request, "Find Codex memories that might be stale after the repo moved to Lab.");
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"));
+    assert.equal(manifest.intent, "stale-audit");
+    assert.equal(manifest.request, "Find Codex memories that might be stale after the repo moved to Lab.");
+  } finally {
+    await coral.close();
+  }
 });
 
 test("refinery review defaults to Coral-managed coordination for Claude Code session sources", async () => {

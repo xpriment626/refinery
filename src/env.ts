@@ -6,7 +6,10 @@ export interface ModelConfig {
   baseUrl: string;
   modelName: string;
   apiKey: string;
+  maxTokens?: number;
 }
+
+export const defaultOpenRouterMaxTokens = 8000;
 
 function parseDotEnv(contents: string): Record<string, string> {
   const values: Record<string, string> = {};
@@ -34,6 +37,15 @@ export function loadLocalEnv(cwd = process.cwd()): Record<string, string> {
   return parseDotEnv(fs.readFileSync(envPath, "utf8"));
 }
 
+export function parseModelMaxTokens(value: string | undefined, fallback = defaultOpenRouterMaxTokens): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("REFINERY_MODEL_MAX_TOKENS or MODEL_MAX_TOKENS must be a positive integer.");
+  }
+  return parsed;
+}
+
 export function loadModelConfig(cwd = process.cwd()): ModelConfig {
   const local = loadLocalEnv(cwd);
   const read = (key: string) => process.env[key] ?? local[key] ?? "";
@@ -42,6 +54,7 @@ export function loadModelConfig(cwd = process.cwd()): ModelConfig {
     baseUrl: read("REFINERY_MODEL_BASE_URL") || "https://openrouter.ai/api/v1",
     modelName: read("REFINERY_MODEL_NAME") || "deepseek/deepseek-v4-pro",
     apiKey: read("OPENROUTER_API_KEY"),
+    maxTokens: parseModelMaxTokens(read("REFINERY_MODEL_MAX_TOKENS") || read("MODEL_MAX_TOKENS") || undefined),
   };
   if (!config.apiKey) {
     throw new Error("OPENROUTER_API_KEY is required in environment or .env");

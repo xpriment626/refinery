@@ -33,6 +33,7 @@ import {
   type ReviewSinkResult,
 } from "./review.ts";
 import { writeReviewArtifactManifest } from "./artifacts.ts";
+import { defaultReviewIntent, describeReviewIntent, type ReviewIntent } from "./intents.ts";
 
 const specialistOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
 
@@ -41,6 +42,8 @@ export interface LiveReviewRunOptions {
   scope: string;
   runId: string;
   outputDir: string;
+  intent?: ReviewIntent;
+  request?: string | null;
   model?: ModelConfig;
   callModel?: ModelCaller;
   sourceLimit?: number;
@@ -97,6 +100,13 @@ export interface RelevanceProposal {
   source_refs: unknown[];
   action: MemoryMaintenanceAction;
   target_memory_id: string | number | null;
+  staleness_reason?: string | null;
+  forget_reason?: string | null;
+  update_reason?: string | null;
+  conflict_reason?: string | null;
+  scope_reason?: string | null;
+  replacement_body?: string | null;
+  ambiguities?: string[];
 }
 
 export interface RejectedCandidate {
@@ -151,6 +161,7 @@ export function redactModel(config: ModelConfig): Omit<ModelConfig, "apiKey"> & 
     provider: config.provider,
     baseUrl: config.baseUrl,
     modelName: config.modelName,
+    ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
     apiKeyPresent: Boolean(config.apiKey),
   };
 }
@@ -177,6 +188,23 @@ function parseAction(value: unknown, legacyValue: unknown, label: string): Memor
     throw new Error(`${label} has invalid action.`);
   }
   return action as MemoryMaintenanceAction;
+}
+
+function optionalString(record: Record<string, unknown>, field: string): string | null | undefined {
+  if (!(field in record)) return undefined;
+  const value = record[field];
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error(`${field} must be string or null when present.`);
+  return value;
+}
+
+function optionalStringArray(record: Record<string, unknown>, field: string): string[] | undefined {
+  if (!(field in record)) return undefined;
+  const value = record[field];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error(`${field} must be an array of strings when present.`);
+  }
+  return value;
 }
 
 export function parseCapture(raw: string): CaptureOutput {
@@ -287,6 +315,7 @@ export function parseRelevance(raw: string): RelevanceOutput {
       if (p.target_memory_id !== null && typeof p.target_memory_id !== "string" && typeof p.target_memory_id !== "number") {
         throw new Error(`Proposal ${index} target_memory_id must be string, number, or null.`);
       }
+      const record = item as Record<string, unknown>;
       return {
         memory_type: p.memory_type,
         proposed_scope: p.proposed_scope,
@@ -296,6 +325,13 @@ export function parseRelevance(raw: string): RelevanceOutput {
         source_refs: p.source_refs,
         action,
         target_memory_id: p.target_memory_id,
+        ...(optionalString(record, "staleness_reason") !== undefined ? { staleness_reason: optionalString(record, "staleness_reason") } : {}),
+        ...(optionalString(record, "forget_reason") !== undefined ? { forget_reason: optionalString(record, "forget_reason") } : {}),
+        ...(optionalString(record, "update_reason") !== undefined ? { update_reason: optionalString(record, "update_reason") } : {}),
+        ...(optionalString(record, "conflict_reason") !== undefined ? { conflict_reason: optionalString(record, "conflict_reason") } : {}),
+        ...(optionalString(record, "scope_reason") !== undefined ? { scope_reason: optionalString(record, "scope_reason") } : {}),
+        ...(optionalString(record, "replacement_body") !== undefined ? { replacement_body: optionalString(record, "replacement_body") } : {}),
+        ...(optionalStringArray(record, "ambiguities") !== undefined ? { ambiguities: optionalStringArray(record, "ambiguities") } : {}),
       };
     }),
     rejected: parsed.rejected.map((item, index) => {
@@ -462,12 +498,13 @@ function activeMemoryCandidates(memories: ActiveMemory[], relevance: RelevanceOu
   }));
 }
 
-function toMemoryProposal(runId: string, proposal: RelevanceProposal, index: number): MemoryProposal {
+function toMemoryProposal(runId: string, proposal: RelevanceProposal, index: number, intent: ReviewIntent): MemoryProposal {
   return {
     schemaVersion: refineryReviewSchemaVersion,
     id: `proposal:${runId}:${index + 1}`,
     action: proposal.action,
     lifecycle: "proposed",
+    intent,
     memoryType: proposal.memory_type,
     scope: proposal.proposed_scope,
     body: proposal.body,
@@ -475,12 +512,25 @@ function toMemoryProposal(runId: string, proposal: RelevanceProposal, index: num
     rationale: proposal.rationale,
     sourceRefs: proposal.source_refs,
     targetMemoryId: normalizeId(proposal.target_memory_id),
+    ...(proposal.staleness_reason !== undefined ? { stalenessReason: proposal.staleness_reason } : {}),
+    ...(proposal.forget_reason !== undefined ? { forgetReason: proposal.forget_reason } : {}),
+    ...(proposal.update_reason !== undefined ? { updateReason: proposal.update_reason } : {}),
+    ...(proposal.conflict_reason !== undefined ? { conflictReason: proposal.conflict_reason } : {}),
+    ...(proposal.scope_reason !== undefined ? { scopeReason: proposal.scope_reason } : {}),
+    ...(proposal.replacement_body !== undefined ? { replacementBody: proposal.replacement_body } : {}),
+    ...(proposal.ambiguities !== undefined ? { ambiguities: proposal.ambiguities } : {}),
   };
 }
 
 export async function runLiveReview(options: LiveReviewRunOptions): Promise<LiveReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
   const createdAt = new Date().toISOString();
+  const intent = options.intent ?? defaultReviewIntent;
+  const request = options.request ?? null;
+  const intentInstruction = [
+    `Review intent: ${intent}. ${describeReviewIntent(intent)}`,
+    request ? `User request: ${request}` : "No additional user request.",
+  ].join(" ");
   const model = options.model ?? loadModelConfig();
   const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? 3, 10));
   const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? 6000, 24000));
@@ -497,13 +547,15 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     adapter: options.adapter.name,
     scope: options.scope,
     mode: "live",
+    intent,
+    request,
     sourceLimit,
     sourceCharLimit,
     sources,
     activeMemories,
   });
 
-  const capturePayload = { source_chunks: sourceChunks, active_memory_hints: activeMemoryHints };
+  const capturePayload = { review_intent: intent, review_request: request, source_chunks: sourceChunks, active_memory_hints: activeMemoryHints };
   const capture = await runStep({
     runDir,
     stepName: "capture",
@@ -513,14 +565,14 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     prompt: buildPrompt({
       specialist: captureSpecialist,
       shape: `{"candidates":[{"claim":"...","source_refs":[],"why_future_useful":"..."}]}`,
-      instruction: "Return exactly one durable candidate for this smoke run. Keep the claim concise and evidence-bound.",
+      instruction: `${intentInstruction} Return exactly one durable candidate for this smoke run. Keep the claim concise and evidence-bound.`,
       payload: capturePayload,
     }),
     parse: parseCapture,
     callModel: options.callModel,
   });
 
-  const distillationPayload = { candidates: capture.candidates };
+  const distillationPayload = { review_intent: intent, review_request: request, candidates: capture.candidates };
   const distillation = await runStep({
     runDir,
     stepName: "distillation",
@@ -530,7 +582,7 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     prompt: buildPrompt({
       specialist: distillationSpecialist,
       shape: `{"distilled":[{"body":"...","source_refs":[],"rationale":"..."}]}`,
-      instruction: "Rewrite each candidate into an atomic, self-contained memory body.",
+      instruction: `${intentInstruction} Rewrite each candidate into an atomic, self-contained memory body.`,
       payload: distillationPayload,
     }),
     parse: parseDistillation,
@@ -538,6 +590,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
   });
 
   const schemaPayload = {
+    review_intent: intent,
+    review_request: request,
     distilled: distillation.distilled,
     active_memory_hints: activeMemoryHints,
   };
@@ -550,14 +604,14 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     prompt: buildPrompt({
       specialist: schemaSpecialist,
       shape: `{"typed":[{"body":"...","memory_type":"procedural","primary_type":"procedural","secondary_type":null,"type_confidence":0.8,"type_rationale":"...","ambiguities":[],"durability":"durable","ttl":null,"proposed_scope":"project","action":"create","target_memory_id":null,"source_refs":[]}]}`,
-      instruction: "Use project scope for this slice. Set memory_type equal to primary_type.",
+      instruction: `${intentInstruction} Use project scope for this slice. Set memory_type equal to primary_type.`,
       payload: schemaPayload,
     }),
     parse: parseSchema,
     callModel: options.callModel,
   });
 
-  const relevancePayload = { typed: schema.typed };
+  const relevancePayload = { review_intent: intent, review_request: request, typed: schema.typed };
   const relevance = await runStep({
     runDir,
     stepName: "relevance",
@@ -566,8 +620,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     inputPayload: relevancePayload,
     prompt: buildPrompt({
       specialist: relevanceSpecialist,
-      shape: `{"proposals":[{"memory_type":"procedural","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null}],"rejected":[]}`,
-      instruction: "Emit proposal-shaped records only for durable future-useful candidates.",
+      shape: `{"proposals":[{"memory_type":"procedural","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null,"staleness_reason":null,"forget_reason":null,"update_reason":null,"conflict_reason":null,"scope_reason":null,"replacement_body":null,"ambiguities":[]}],"rejected":[]}`,
+      instruction: `${intentInstruction} Emit proposal-shaped records only for durable future-useful candidates. Use canonical action enum values only.`,
       payload: relevancePayload,
     }),
     parse: parseRelevance,
@@ -575,6 +629,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
   });
 
   const relationshipPayload = {
+    review_intent: intent,
+    review_request: request,
     relevance,
     active_memory_candidates: activeMemoryCandidates(activeMemories, relevance),
   };
@@ -587,14 +643,14 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     prompt: buildPrompt({
       specialist: relationshipReviewSpecialist,
       shape: `{"findings":[{"body":"...","relation":"novel","target_memory_id":null,"confidence":0.8,"rationale":"...","source_refs":[],"memory_refs":[{"memory_id":"memory:1","provenance_kind":"fixture"}]}]}`,
-      instruction: "Classify each proposal exactly once against active-memory candidates. memory_refs must be objects, never bare strings.",
+      instruction: `${intentInstruction} Classify each proposal exactly once against active-memory candidates. memory_refs must be objects, never bare strings.`,
       payload: relationshipPayload,
     }),
     parse: parseRelationshipReview,
     callModel: options.callModel,
   });
 
-  const proposals = relevance.proposals.map((proposal, index) => toMemoryProposal(options.runId, proposal, index));
+  const proposals = relevance.proposals.map((proposal, index) => toMemoryProposal(options.runId, proposal, index, intent));
   const rejected: ReviewRejected[] = relevance.rejected.map((item, index) => ({
     sourceId: `rejected:${options.runId}:${index + 1}`,
     reason: item.reason,
@@ -637,6 +693,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
       specialistOrder,
       sourceLimit,
       sourceCharLimit,
+      intent,
+      request,
     },
   };
 
@@ -652,6 +710,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     createdAt,
     counts: result.counts,
     metadata: result.metadata,
+    intent,
+    request,
   });
 
   if (!options.sink) return result;
@@ -669,6 +729,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     createdAt,
     counts: result.counts,
     metadata: result.metadata,
+    intent,
+    request,
   });
   return resultWithSink;
 } catch (error) {
@@ -685,6 +747,8 @@ export async function runLiveReview(options: LiveReviewRunOptions): Promise<Live
     mode: "live",
     createdAt,
     error: refineryError,
+    intent,
+    request,
   });
   throw refineryError;
 }

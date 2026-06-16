@@ -35,7 +35,7 @@ import {
   type MemoryStoreAdapter,
   type SourceEvidence,
 } from "../core/adapter.ts";
-import { loadLocalEnv } from "../env.ts";
+import { loadLocalEnv, parseModelMaxTokens } from "../env.ts";
 import {
   applyErrorContext,
   asRefineryError,
@@ -51,6 +51,7 @@ import {
   type ReviewSinkOptions,
   type ReviewSinkResult,
 } from "../core/review.ts";
+import { defaultReviewIntent, describeReviewIntent, type ReviewIntent } from "../core/intents.ts";
 
 const DEFAULT_SOURCE_LIMIT = 3;
 const DEFAULT_SOURCE_CHAR_LIMIT = 6000;
@@ -81,11 +82,13 @@ export interface CoralReviewRuntimeOptions {
 export interface CoralReviewRunOptions {
   adapter: MemoryStoreAdapter;
   project: string;
-  source: "claude-code-sessions";
+  source: "claude-code-sessions" | "codex-memory";
   target: "codex-memory";
   scope: string;
   runId: string;
   outputDir: string;
+  intent?: ReviewIntent;
+  request?: string | null;
   sink?: ReviewSinkOptions;
   sourceLimit?: number;
   sourceCharLimit?: number;
@@ -94,7 +97,7 @@ export interface CoralReviewRunOptions {
 
 export interface CoralReviewRunResult extends ReviewRunResult {
   mode: "coral";
-  source: "claude-code-sessions";
+  source: "claude-code-sessions" | "codex-memory";
   target: "codex-memory";
   project: string;
   relationshipReview: unknown;
@@ -289,6 +292,23 @@ function requiredNumber(record: Record<string, unknown>, field: string): number 
   return value;
 }
 
+function optionalString(record: Record<string, unknown>, field: string): string | null | undefined {
+  if (!(field in record)) return undefined;
+  const value = record[field];
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error(`${field} must be string or null when present.`);
+  return value;
+}
+
+function optionalStringArray(record: Record<string, unknown>, field: string): string[] | undefined {
+  if (!(field in record)) return undefined;
+  const value = record[field];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error(`${field} must be an array of strings when present.`);
+  }
+  return value;
+}
+
 function parseRelevanceOutput(runId: string, output: Record<string, unknown>): {
   proposals: MemoryProposal[];
   rejected: ReviewRejected[];
@@ -301,6 +321,7 @@ function parseRelevanceOutput(runId: string, output: Record<string, unknown>): {
       id: `proposal:${runId}:${index + 1}`,
       action: parseAction(row.action),
       lifecycle: "proposed",
+      intent: typeof row.intent === "string" ? row.intent : undefined,
       memoryType: requiredString(row, "memory_type"),
       scope: requiredString(row, "proposed_scope"),
       body: requiredString(row, "body"),
@@ -308,6 +329,13 @@ function parseRelevanceOutput(runId: string, output: Record<string, unknown>): {
       rationale: requiredString(row, "rationale"),
       sourceRefs: Array.isArray(row.source_refs) ? row.source_refs : [],
       targetMemoryId: normalizeId(row.target_memory_id),
+      ...(optionalString(row, "staleness_reason") !== undefined ? { stalenessReason: optionalString(row, "staleness_reason") } : {}),
+      ...(optionalString(row, "forget_reason") !== undefined ? { forgetReason: optionalString(row, "forget_reason") } : {}),
+      ...(optionalString(row, "update_reason") !== undefined ? { updateReason: optionalString(row, "update_reason") } : {}),
+      ...(optionalString(row, "conflict_reason") !== undefined ? { conflictReason: optionalString(row, "conflict_reason") } : {}),
+      ...(optionalString(row, "scope_reason") !== undefined ? { scopeReason: optionalString(row, "scope_reason") } : {}),
+      ...(optionalString(row, "replacement_body") !== undefined ? { replacementBody: optionalString(row, "replacement_body") } : {}),
+      ...(optionalStringArray(row, "ambiguities") !== undefined ? { ambiguities: optionalStringArray(row, "ambiguities") } : {}),
     })),
     rejected: rejectedRows.map((row, index) => ({
       sourceId: typeof row.source_id === "string" ? row.source_id : `rejected:${runId}:${index + 1}`,
@@ -502,6 +530,8 @@ function failedSpecialistError(args: {
 export async function runCoralReview(options: CoralReviewRunOptions): Promise<CoralReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
   const createdAt = new Date().toISOString();
+  const intent = options.intent ?? defaultReviewIntent;
+  const request = options.request ?? null;
   const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? DEFAULT_SOURCE_LIMIT, 10));
   const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? DEFAULT_SOURCE_CHAR_LIMIT, 24_000));
   const coral = options.coral ?? {};
@@ -519,6 +549,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
     modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
     reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,
+    maxTokens: parseModelMaxTokens(readConfig("MODEL_MAX_TOKENS") ?? readConfig("REFINERY_MODEL_MAX_TOKENS")),
   };
   const logs: string[] = [];
   const readinessSnapshots: ReadinessSnapshot[] = [];
@@ -547,6 +578,9 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       target: options.target,
       adapter: options.adapter.name,
       scope: options.scope,
+      intent,
+      request,
+      intentDescription: describeReviewIntent(intent),
       noApply: true,
       dryRun: true,
       sourceLimit,
@@ -558,9 +592,22 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
         lifecycle: "proposed",
         writesAttempted: false,
         actions: memoryMaintenanceActions,
+        intentFields: [
+          "staleness_reason",
+          "forget_reason",
+          "update_reason",
+          "conflict_reason",
+          "scope_reason",
+          "replacement_body",
+          "ambiguities",
+        ],
       },
-      instruction:
-        "Coordinate over this intake and emit proposal-shaped outputs only. Do not activate, approve, or write memory.",
+      instruction: [
+        "Coordinate over this intake and emit proposal-shaped outputs only.",
+        `Review intent: ${intent}. ${describeReviewIntent(intent)}`,
+        request ? `User request: ${request}` : "No additional user request.",
+        "Do not activate, approve, or write memory.",
+      ].join(" "),
     };
     writeJson(path.join(runDir, "input.json"), intake);
 
@@ -683,6 +730,10 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     const relevance = byStep.get("relevance");
     if (!relevance) throw new Error("Missing relevance output.");
     const parsedRelevance = parseRelevanceOutput(options.runId, relevance.output ?? {});
+    parsedRelevance.proposals = parsedRelevance.proposals.map((proposal) => ({
+      ...proposal,
+      intent,
+    }));
     const relationshipReview = byStep.get("relationship-review")?.output ?? { findings: [] };
     writeJson(path.join(runDir, "proposals.json"), parsedRelevance.proposals);
     writeJson(path.join(runDir, "rejected.json"), parsedRelevance.rejected);
@@ -740,6 +791,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       specialistOrder: reviewStepOrder,
       sourceLimit,
       sourceCharLimit,
+      intent,
+      request,
     };
     const result: CoralReviewRunResult = {
       ok: true,
@@ -783,6 +836,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       createdAt,
       counts: result.counts,
       metadata,
+      intent,
+      request,
     });
 
     if (!options.sink) return result;
@@ -800,6 +855,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       createdAt,
       counts: result.counts,
       metadata,
+      intent,
+      request,
     });
     return resultWithSink;
   } catch (error) {
@@ -819,6 +876,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       threadId,
       agents: refineryCoralAgentNames,
       model: configuredModel,
+      intent,
+      request,
       readinessSnapshots,
       specialistMessages,
       transcriptExcerpts: threadId ? transcriptFromSnapshot(finalSnapshot, threadId) : [],
@@ -837,6 +896,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       mode: "coral",
       createdAt,
       error: refineryError,
+      intent,
+      request,
     });
     throw refineryError;
   } finally {

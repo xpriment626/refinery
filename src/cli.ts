@@ -15,18 +15,20 @@ import {
 } from "./core/errors.ts";
 import { inspectReviewRun } from "./core/artifacts.ts";
 import { initializeRefineryInstance, resolveRefineryPaths } from "./core/instance.ts";
+import { parseReviewIntent } from "./core/intents.ts";
 import { runLiveReview } from "./core/live-review.ts";
 import { validateRefineryModuleDescriptor } from "./core/modules.ts";
 import { runReview, type ReviewSinkOptions } from "./core/review.ts";
 import type { ModelCaller } from "./core/specialists/types.ts";
+import { createCodexMemoryAdapter } from "./adapters/codex-memory.ts";
 import { runCoralReview } from "./coral/review-conductor.ts";
 
 const HELP = `refinery — agent-callable memory review CLI
 
 USAGE
   refinery instance init [--home <dir>] [--from <dir>] [--reset] [--json]
-  refinery adapter check --adapter <path|reference-sqlite> [--probe] [--scope <scope>] [--json]
-  refinery review [--project <dir>] [--source claude-code-sessions] [--target codex-memory] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
+  refinery adapter check --adapter <path|reference-sqlite|codex-memory> [--memory-home <dir>] [--probe] [--scope <scope>] [--json]
+  refinery review [--project <dir>] [--source codex-memory] [--target codex-memory] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
   refinery trial inspect --run-dir <dir> [--json]
   refinery module check --descriptor <path> [--json]
 
@@ -42,8 +44,11 @@ function defaultRunId(): string {
   return `review-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 }
 
-async function loadAdapter(spec: string): Promise<MemoryStoreAdapter> {
+async function loadAdapter(spec: string, options: { memoryHome?: string } = {}): Promise<MemoryStoreAdapter> {
   try {
+    if (spec === "codex-memory") {
+      return createCodexMemoryAdapter({ memoryHome: options.memoryHome });
+    }
     if (spec === "reference-sqlite") {
       const mod = await import("../examples/reference-sqlite/adapter.ts");
       return mod.adapter as MemoryStoreAdapter;
@@ -110,10 +115,14 @@ async function loadModelCaller(spec: string): Promise<ModelCaller> {
 async function loadSourceAdapter(args: {
   source: string;
   home?: string;
+  memoryHome?: string;
   project: string;
 }): Promise<MemoryStoreAdapter> {
+  if (args.source === "codex-memory") {
+    return createCodexMemoryAdapter({ memoryHome: args.memoryHome });
+  }
   if (args.source !== "claude-code-sessions") {
-    throw new RefineryError("INVALID_OPTION", "--source must be claude-code-sessions", { phase: "args" });
+    throw new RefineryError("INVALID_OPTION", "--source must be codex-memory or claude-code-sessions", { phase: "args" });
   }
   try {
     const [adapterMod, configMod] = await Promise.all([
@@ -222,6 +231,7 @@ async function cmdAdapter(rest: string[]): Promise<number> {
   if (sub !== "check") throw new Error("Unknown adapter command. Use: refinery adapter check");
   const values = parseOptionArgs(rest.slice(1), {
     adapter: { type: "string" },
+    "memory-home": { type: "string" },
     probe: { type: "boolean", default: false },
     scope: { type: "string", default: "project" },
     json: { type: "boolean", default: false },
@@ -229,7 +239,9 @@ async function cmdAdapter(rest: string[]): Promise<number> {
   if (!values.adapter || typeof values.adapter !== "string") {
     throw new Error("adapter check requires --adapter <path|reference-sqlite>");
   }
-  const adapter = await loadAdapter(values.adapter);
+  const adapter = await loadAdapter(values.adapter, {
+    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+  });
   const validation = validateMemoryStoreAdapter(adapter);
   const output = {
     ok: validation.valid,
@@ -376,10 +388,13 @@ async function cmdReview(rest: string[]): Promise<number> {
     project: { type: "string" },
     source: { type: "string" },
     target: { type: "string" },
+    intent: { type: "string" },
+    request: { type: "string" },
     runtime: { type: "string" },
     scope: { type: "string", default: "project" },
     mode: { type: "string", default: "deterministic" },
     home: { type: "string" },
+    "memory-home": { type: "string" },
     "run-id": { type: "string" },
     "output-dir": { type: "string" },
     sink: { type: "string" },
@@ -405,6 +420,8 @@ async function cmdReview(rest: string[]): Promise<number> {
     throw new RefineryError("INVALID_OPTION", "review --runtime must be coral or sequential", { phase: "args" });
   }
   const runId = validateRunId(typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId());
+  const intent = parseReviewIntent(values.intent);
+  const request = typeof values.request === "string" && values.request.trim() ? values.request.trim() : null;
   const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
   const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
   const sinkTimeoutMs = parsePositiveIntegerOption(values["sink-timeout-ms"], "--sink-timeout-ms");
@@ -436,7 +453,7 @@ async function cmdReview(rest: string[]): Promise<number> {
         { phase: "args" },
       );
     }
-    const source = typeof values.source === "string" ? values.source : "claude-code-sessions";
+    const source = typeof values.source === "string" ? values.source : "codex-memory";
     const target = typeof values.target === "string" ? values.target : "codex-memory";
     if (target !== "codex-memory") {
       throw new RefineryError("INVALID_OPTION", "--target must be codex-memory", { phase: "args" });
@@ -447,6 +464,7 @@ async function cmdReview(rest: string[]): Promise<number> {
     const adapter = await loadSourceAdapter({
       source,
       home: typeof values.home === "string" ? values.home : undefined,
+      memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
       project,
     });
     const validation = validateMemoryStoreAdapter(adapter);
@@ -460,11 +478,13 @@ async function cmdReview(rest: string[]): Promise<number> {
     const result = await runCoralReview({
       adapter,
       project,
-      source: "claude-code-sessions",
+      source,
       target: "codex-memory",
       scope: String(values.scope ?? "project"),
       runId,
       outputDir,
+      intent,
+      request,
       sink,
       sourceLimit,
       sourceCharLimit,
@@ -492,7 +512,9 @@ async function cmdReview(rest: string[]): Promise<number> {
   if (mode !== "deterministic" && mode !== "live") {
     throw new RefineryError("INVALID_OPTION", "review --mode must be deterministic or live", { phase: "args" });
   }
-  const adapter = await loadAdapter(values.adapter);
+  const adapter = await loadAdapter(values.adapter, {
+    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+  });
   const validation = validateMemoryStoreAdapter(adapter);
   if (!validation.valid) {
     throw new RefineryError(
@@ -508,6 +530,8 @@ async function cmdReview(rest: string[]): Promise<number> {
       scope: String(values.scope ?? "project"),
       runId,
       outputDir,
+      intent,
+      request,
       sink,
       callModel: typeof values["model-caller"] === "string" ? await loadModelCaller(values["model-caller"]) : undefined,
       sourceLimit,
@@ -522,6 +546,8 @@ async function cmdReview(rest: string[]): Promise<number> {
     scope: String(values.scope ?? "project"),
     runId,
     outputDir,
+    intent,
+    request,
     sink,
   });
   process.stdout.write(stableJson(result));
