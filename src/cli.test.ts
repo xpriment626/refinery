@@ -323,7 +323,14 @@ function startHangingSink(): Promise<{
   });
 }
 
-function startFakeCoralReviewServer(): Promise<{
+function startFakeCoralReviewServer(options: {
+  failure?: {
+    step: "capture";
+    code: string;
+    message: string;
+    rawOutput: string;
+  };
+} = {}): Promise<{
   apiUrl: string;
   state: {
     sessionRequest: Record<string, unknown> | null;
@@ -338,6 +345,8 @@ function startFakeCoralReviewServer(): Promise<{
     sessionRequest: Record<string, unknown> | null;
     seedPacket: Record<string, unknown> | null;
     deleteCount: number;
+    sessionCreateCount: number;
+    threadCreateCount: number;
   } = {
     sessionRequest: null,
     seedPacket: null,
@@ -376,6 +385,49 @@ function startFakeCoralReviewServer(): Promise<{
     const refs = Array.isArray(sourceChunks[0]?.refs) ? sourceChunks[0].refs : [{ source_id: "source:1" }];
     const body =
       "Refinery review should run through Coral coordination by default while emitting proposals only.";
+    if (options.failure?.step === "capture") {
+      messages = [
+        {
+          id: "seed-message",
+          threadId,
+          senderName: "refinery-capture",
+          mentionNames: ["refinery-capture"],
+          text: JSON.stringify(seed),
+        },
+        {
+          id: "capture-message",
+          threadId,
+          senderName: "refinery-capture",
+          mentionNames: [],
+          text: JSON.stringify({
+            type: "refinery-review-output",
+            status: "failed",
+            runId: seed.runId,
+            step: "capture",
+            agent: "refinery-capture",
+            promptVersion: "refinery.coral-specialist-prompt.v1",
+            model: {
+              provider: "openrouter",
+              baseUrl: "https://openrouter.invalid/api/v1",
+              modelName: "deepseek/deepseek-v4-pro",
+              apiKeyPresent: true,
+            },
+            providerMetadata: {
+              provider: "openrouter",
+              status: 200,
+              responseId: "or-invalid-capture",
+              finishReason: "stop",
+            },
+            rawOutput: options.failure.rawOutput,
+            error: {
+              code: options.failure.code,
+              message: options.failure.message,
+            },
+          }),
+        },
+      ];
+      return;
+    }
     messages = [
       {
         id: "seed-message",
@@ -784,6 +836,62 @@ test("refinery review defaults to Coral-managed coordination for Claude Code ses
     assert.equal(coralArtifact.session.sessionId, "session-1");
     assert.equal(coralArtifact.threadId, "thread-1");
     assert.equal(coralArtifact.specialistMessages.length, 5);
+  } finally {
+    await coral.close();
+  }
+});
+
+test("refinery review records failed Coral specialist raw output and error artifacts", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-coral-failed-specialist-"));
+  const fixture = seedReferenceSqliteHome(tmp);
+  const coral = await startFakeCoralReviewServer({
+    failure: {
+      step: "capture",
+      code: "MODEL_OUTPUT_INVALID",
+      message: "Capture output must contain candidates array.",
+      rawOutput: "not json",
+    },
+  });
+  const outputDir = path.join(tmp, "runs");
+  try {
+    const result = await runCliAsync([
+      "review",
+      "--project",
+      fixture.project,
+      "--source",
+      "claude-code-sessions",
+      "--target",
+      "codex-memory",
+      "--home",
+      fixture.home,
+      "--run-id",
+      "coral-failure-test",
+      "--output-dir",
+      outputDir,
+      "--coral-url",
+      coral.apiUrl,
+      "--coral-no-start",
+      "--json",
+    ]);
+
+    assert.equal(result.status, 1);
+    const parsed = parseJsonOutput(result);
+    assert.equal(parsed.ok, false);
+    assert.equal((parsed.error as { code: string }).code, "MODEL_OUTPUT_INVALID");
+    assert.equal((parsed.error as { failedStep: string }).failedStep, "capture");
+    assert.match((parsed.error as { rawOutputPath: string }).rawOutputPath, /steps\/capture\/output\.raw\.md$/);
+
+    const runDir = path.join(outputDir, "coral-failure-test");
+    assert.equal(fs.readFileSync(path.join(runDir, "steps", "capture", "output.raw.md"), "utf8").trim(), "not json");
+    const stepError = JSON.parse(fs.readFileSync(path.join(runDir, "steps", "capture", "error.json"), "utf8"));
+    assert.equal(stepError.code, "MODEL_OUTPUT_INVALID");
+    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"));
+    assert.equal(manifest.ok, false);
+    assert.equal(manifest.failedStep, "capture");
+    assert.equal(manifest.artifacts.steps.capture.outputRaw, "steps/capture/output.raw.md");
+    const coralArtifact = JSON.parse(fs.readFileSync(path.join(runDir, "coral.json"), "utf8"));
+    assert.equal(coralArtifact.status, "failed");
+    assert.equal(coralArtifact.specialistMessages[0].status, "failed");
   } finally {
     await coral.close();
   }

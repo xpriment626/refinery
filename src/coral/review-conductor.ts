@@ -35,6 +35,7 @@ import {
   type MemoryStoreAdapter,
   type SourceEvidence,
 } from "../core/adapter.ts";
+import { loadLocalEnv } from "../env.ts";
 import {
   applyErrorContext,
   asRefineryError,
@@ -110,17 +111,31 @@ interface ReviewOutputEnvelope {
   type: "refinery-review-output";
   runId: string;
   step: string;
-  output: Record<string, unknown>;
+  status: "succeeded" | "failed";
+  output?: Record<string, unknown>;
+  rawOutput?: string;
+  model?: Record<string, unknown>;
+  providerMetadata?: unknown;
+  promptVersion?: string;
+  prompt?: unknown;
+  error?: Record<string, unknown>;
 }
 
 interface SpecialistMessage {
   step: string;
   agent: string;
+  status: "succeeded" | "failed";
   messageId: string;
   threadId: string;
   mentionNames: string[];
   textExcerpt: string;
-  output: Record<string, unknown>;
+  rawOutput: string | null;
+  output: Record<string, unknown> | null;
+  model: Record<string, unknown> | null;
+  providerMetadata: unknown;
+  promptVersion: string | null;
+  prompt: unknown;
+  error: Record<string, unknown> | null;
 }
 
 interface ReadinessSnapshot {
@@ -174,18 +189,23 @@ function memoryHints(memories: ActiveMemory[], limit = 12): unknown[] {
 function parseReviewOutput(text: string): ReviewOutputEnvelope | null {
   try {
     const parsed = JSON.parse(text) as Partial<ReviewOutputEnvelope>;
+    const status = parsed?.status === "failed" ? "failed" : "succeeded";
     if (
       parsed?.type !== "refinery-review-output" ||
       typeof parsed.runId !== "string" ||
       typeof parsed.step !== "string" ||
       !reviewStepOrder.includes(parsed.step) ||
-      !parsed.output ||
-      typeof parsed.output !== "object" ||
-      Array.isArray(parsed.output)
+      (status === "succeeded" &&
+        (!parsed.output || typeof parsed.output !== "object" || Array.isArray(parsed.output))) ||
+      (status === "failed" &&
+        (!parsed.error || typeof parsed.error !== "object" || Array.isArray(parsed.error)))
     ) {
       return null;
     }
-    return parsed as ReviewOutputEnvelope;
+    return {
+      ...parsed,
+      status,
+    } as ReviewOutputEnvelope;
   } catch {
     return null;
   }
@@ -201,11 +221,22 @@ function collectSpecialistMessages(messages: CoralMessage[], threadId: string, r
     .map(({ message, envelope }) => ({
       step: envelope.step,
       agent: message.senderName,
+      status: envelope.status,
       messageId: message.id,
       threadId: message.threadId,
       mentionNames: message.mentionNames ?? [],
       textExcerpt: compactText(message.text),
-      output: envelope.output,
+      rawOutput: typeof envelope.rawOutput === "string" ? envelope.rawOutput : null,
+      output: envelope.output ?? null,
+      model: envelope.model && typeof envelope.model === "object" && !Array.isArray(envelope.model)
+        ? envelope.model
+        : null,
+      providerMetadata: envelope.providerMetadata ?? null,
+      promptVersion: typeof envelope.promptVersion === "string" ? envelope.promptVersion : null,
+      prompt: envelope.prompt ?? null,
+      error: envelope.error && typeof envelope.error === "object" && !Array.isArray(envelope.error)
+        ? envelope.error
+        : null,
     }))
     .sort((left, right) => reviewStepOrder.indexOf(left.step) - reviewStepOrder.indexOf(right.step));
 }
@@ -213,7 +244,9 @@ function collectSpecialistMessages(messages: CoralMessage[], threadId: string, r
 function outputMap(messages: SpecialistMessage[]): Map<string, SpecialistMessage> {
   const byStep = new Map<string, SpecialistMessage>();
   for (const message of messages) {
-    if (!byStep.has(message.step)) byStep.set(message.step, message);
+    if (message.status === "succeeded" && message.output && !byStep.has(message.step)) {
+      byStep.set(message.step, message);
+    }
   }
   return byStep;
 }
@@ -394,6 +427,9 @@ async function pollReviewOutputs(args: {
     lastSnapshot = snapshot;
     recordReadinessSnapshot(args.readinessSnapshots, snapshot);
     lastMessages = collectSpecialistMessages(allMessages(snapshot), args.threadId, args.runId);
+    if (lastMessages.some((message) => message.status === "failed")) {
+      return { snapshot, specialistMessages: lastMessages };
+    }
     const byStep = outputMap(lastMessages);
     if (reviewStepOrder.every((step) => byStep.has(step))) {
       return { snapshot, specialistMessages: lastMessages };
@@ -421,6 +457,48 @@ function transcriptFromSnapshot(snapshot: ExtendedState | null, threadId: string
     }));
 }
 
+function writeSpecialistStepArtifacts(runDir: string, messages: SpecialistMessage[]): void {
+  for (const message of messages) {
+    const stepDir = path.join(runDir, "steps", message.step);
+    writeJson(path.join(stepDir, "input.json"), {
+      step: message.step,
+      agent: message.agent,
+      status: message.status,
+      messageId: message.messageId,
+      threadId: message.threadId,
+      mentions: message.mentionNames,
+      promptVersion: message.promptVersion,
+      model: message.model,
+      providerMetadata: message.providerMetadata,
+      prompt: message.prompt,
+    });
+    fs.writeFileSync(path.join(stepDir, "output.raw.md"), `${message.rawOutput ?? message.textExcerpt}\n`);
+    if (message.output) writeJson(path.join(stepDir, "output.parsed.json"), message.output);
+    if (message.error) writeJson(path.join(stepDir, "error.json"), message.error);
+  }
+}
+
+function failedSpecialistError(args: {
+  runDir: string;
+  runId: string;
+  message: SpecialistMessage;
+}): RefineryError {
+  const code = typeof args.message.error?.code === "string" ? args.message.error.code : "CORAL_SPECIALIST_FAILED";
+  const message = typeof args.message.error?.message === "string" ? args.message.error.message : "Specialist returned a failed review envelope.";
+  return new RefineryError(
+    code,
+    `Coral specialist ${args.message.step} failed: ${message}`,
+    {
+      phase: "coral",
+      runId: args.runId,
+      runDir: args.runDir,
+      failedStep: args.message.step,
+      rawOutputPath: path.join(args.runDir, "steps", args.message.step, "output.raw.md"),
+      details: args.message.error ?? null,
+    },
+  );
+}
+
 export async function runCoralReview(options: CoralReviewRunOptions): Promise<CoralReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
   const createdAt = new Date().toISOString();
@@ -434,6 +512,14 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
   const serverMode = startServer ? "managed" : "attached";
   const namespace = coral.namespace ?? `refinery-${options.runId}`;
   const timeoutMs = coral.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  const localEnv = loadLocalEnv(repoRoot);
+  const readConfig = (name: string): string | undefined => process.env[name] ?? localEnv[name];
+  const configuredModel = {
+    provider: readConfig("MODEL_PROVIDER") ?? readConfig("REFINERY_MODEL_PROVIDER") ?? "openrouter",
+    baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
+    modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
+    reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,
+  };
   const logs: string[] = [];
   const readinessSnapshots: ReadinessSnapshot[] = [];
   let child: ChildProcessWithoutNullStreams | null = null;
@@ -516,9 +602,9 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
         buildCoralSessionRequest({
           namespace,
           runId: options.runId,
-          modelName: coral.modelName ?? process.env.MODEL_NAME ?? process.env.REFINERY_MODEL_NAME ?? refineryCoralModelDefaults.modelName,
-          modelBaseUrl: coral.modelBaseUrl ?? process.env.MODEL_BASE_URL ?? process.env.REFINERY_MODEL_BASE_URL ?? refineryCoralModelDefaults.baseUrl,
-          reasoningEffort: coral.reasoningEffort ?? process.env.REASONING_EFFORT ?? refineryCoralModelDefaults.reasoningEffort,
+          modelName: configuredModel.modelName,
+          modelBaseUrl: configuredModel.baseUrl,
+          reasoningEffort: configuredModel.reasoningEffort,
           maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? "2",
         }),
       );
@@ -577,6 +663,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     });
     finalSnapshot = polled.snapshot;
     specialistMessages = polled.specialistMessages;
+    writeSpecialistStepArtifacts(runDir, specialistMessages);
+    const failedMessage = specialistMessages.find((message) => message.status === "failed");
+    if (failedMessage) {
+      throw failedSpecialistError({ runDir, runId: options.runId, message: failedMessage });
+    }
     const byStep = outputMap(specialistMessages);
     const missingSteps = reviewStepOrder.filter((step) => !byStep.has(step));
     if (missingSteps.length > 0) {
@@ -587,22 +678,9 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       );
     }
 
-    for (const message of specialistMessages) {
-      const stepDir = path.join(runDir, "steps", message.step);
-      writeJson(path.join(stepDir, "input.json"), {
-        step: message.step,
-        agent: message.agent,
-        messageId: message.messageId,
-        threadId: message.threadId,
-        mentions: message.mentionNames,
-      });
-      fs.writeFileSync(path.join(stepDir, "output.raw.md"), `${message.textExcerpt}\n`);
-      writeJson(path.join(stepDir, "output.parsed.json"), message.output);
-    }
-
     const relevance = byStep.get("relevance");
     if (!relevance) throw new Error("Missing relevance output.");
-    const parsedRelevance = parseRelevanceOutput(options.runId, relevance.output);
+    const parsedRelevance = parseRelevanceOutput(options.runId, relevance.output ?? {});
     const relationshipReview = byStep.get("relationship-review")?.output ?? { findings: [] };
     writeJson(path.join(runDir, "proposals.json"), parsedRelevance.proposals);
     writeJson(path.join(runDir, "rejected.json"), parsedRelevance.rejected);
@@ -622,6 +700,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       sessionCreated,
       threadCreated,
       noTeardown: Boolean(coral.noTeardown),
+      model: configuredModel,
     };
     const coralArtifact = {
       schemaVersion: "refinery.coral-review.v1",
@@ -635,6 +714,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       agents: refineryCoralAgentNames,
       sessionCreated,
       threadCreated,
+      model: configuredModel,
       readinessSnapshots,
       specialistMessages,
       transcriptExcerpts: transcript,
@@ -654,6 +734,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       writesAttempted: false,
       sinkUrl: options.sink?.url ?? null,
       runtime,
+      model: configuredModel,
       specialistOrder: reviewStepOrder,
       sourceLimit,
       sourceCharLimit,
@@ -735,6 +816,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       session,
       threadId,
       agents: refineryCoralAgentNames,
+      model: configuredModel,
       readinessSnapshots,
       specialistMessages,
       transcriptExcerpts: threadId ? transcriptFromSnapshot(finalSnapshot, threadId) : [],

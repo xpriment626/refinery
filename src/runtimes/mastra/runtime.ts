@@ -12,6 +12,17 @@ export interface MastraRuntimeMetadata {
   forbiddenTools: string[];
 }
 
+export interface OpenRouterCallMetadata {
+  provider: "openrouter";
+  baseUrl: string;
+  modelName: string;
+  status: number;
+  responseId: string | null;
+  responseModel: string | null;
+  finishReason: string | null;
+  usage: unknown;
+}
+
 export function mastraRuntimeMetadata(specialist: LocalSpecialist): MastraRuntimeMetadata {
   return {
     framework: "mastra",
@@ -43,11 +54,11 @@ export function createMastraSpecialistAgent(specialist: LocalSpecialist, model: 
   });
 }
 
-export async function callOpenRouterChat(request: {
+export async function callOpenRouterChatWithMetadata(request: {
   model: ModelConfig;
   system: string;
   user: string;
-}): Promise<string> {
+}): Promise<{ content: string; metadata: OpenRouterCallMetadata }> {
   if (request.model.provider !== "openrouter") {
     throw new Error(`Unsupported model provider: ${request.model.provider}`);
   }
@@ -72,13 +83,37 @@ export async function callOpenRouterChat(request: {
     throw new Error(`OpenRouter request failed (${response.status}): ${body.slice(0, 500)}`);
   }
   const json = (await response.json()) as {
-    choices?: { message?: { content?: string } }[];
+    id?: string;
+    model?: string;
+    usage?: unknown;
+    choices?: { message?: { content?: string }; finish_reason?: string }[];
   };
   const content = json.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("OpenRouter response did not include message content.");
   }
-  return content;
+  return {
+    content,
+    metadata: {
+      provider: "openrouter",
+      baseUrl: request.model.baseUrl,
+      modelName: request.model.modelName,
+      status: response.status,
+      responseId: typeof json.id === "string" ? json.id : null,
+      responseModel: typeof json.model === "string" ? json.model : null,
+      finishReason: typeof json.choices?.[0]?.finish_reason === "string" ? json.choices[0].finish_reason : null,
+      usage: json.usage ?? null,
+    },
+  };
+}
+
+export async function callOpenRouterChat(request: {
+  model: ModelConfig;
+  system: string;
+  user: string;
+}): Promise<string> {
+  const result = await callOpenRouterChatWithMetadata(request);
+  return result.content;
 }
 
 export function createMastraModelCaller(specialist: LocalSpecialist): ModelCaller {

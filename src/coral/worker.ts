@@ -1,4 +1,24 @@
 import { loadLocalEnv } from "../env.ts";
+import type { ModelConfig } from "../env.ts";
+import {
+  parseCapture,
+  parseDistillation,
+  parseRelationshipReview,
+  parseRelevance,
+  parseSchema,
+  buildPrompt,
+  redactModel,
+} from "../core/live-review.ts";
+import { refineryReviewSchemaVersion } from "../core/adapter.ts";
+import {
+  captureSpecialist,
+  distillationSpecialist,
+  relationshipReviewSpecialist,
+  relevanceSpecialist,
+  schemaSpecialist,
+} from "../core/specialists/index.ts";
+import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
+import { callOpenRouterChatWithMetadata, type OpenRouterCallMetadata } from "../runtimes/mastra/runtime.ts";
 import {
   getCoralAgentBySpecialistName,
   getSpecialistNameArg,
@@ -7,12 +27,20 @@ import {
 } from "./definitions.ts";
 import { connectCoralMcp, parseWaitForMentionResult, readCoralState } from "./mcp.ts";
 
-interface WorkerModelConfig {
+const coralSpecialistPromptVersion = "refinery.coral-specialist-prompt.v1";
+
+interface WorkerModelConfig extends ModelConfig {
   modelName: string;
   baseUrl: string;
   reasoningEffort: string;
-  hasApiKey: boolean;
+  apiKeyPresent: boolean;
 }
+
+type WorkerModelCaller = (request: {
+  model: ModelConfig;
+  system: string;
+  user: string;
+}) => Promise<{ content: string; metadata?: OpenRouterCallMetadata }>;
 
 function readEnv(name: string, localEnv: Record<string, string>): string | undefined {
   return process.env[name] ?? localEnv[name];
@@ -22,10 +50,12 @@ export function loadWorkerModelConfig(cwd = process.cwd()): WorkerModelConfig {
   const localEnv = loadLocalEnv(cwd);
   const apiKey = readEnv("MODEL_API_KEY", localEnv) ?? readEnv("OPENROUTER_API_KEY", localEnv);
   return {
+    provider: readEnv("MODEL_PROVIDER", localEnv) ?? readEnv("REFINERY_MODEL_PROVIDER", localEnv) ?? "openrouter",
     modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
     baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
+    apiKey: apiKey ?? "",
     reasoningEffort: readEnv("REASONING_EFFORT", localEnv) ?? refineryCoralModelDefaults.reasoningEffort,
-    hasApiKey: Boolean(apiKey),
+    apiKeyPresent: Boolean(apiKey),
   };
 }
 
@@ -41,12 +71,6 @@ function parseMaxTurns(): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function compactText(text: string, max = 420): string {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (compact.length <= max) return compact;
-  return compact.slice(0, max - 3).trimEnd() + "...";
 }
 
 function parseMessageEnvelope(text: string): { runId: string; sequence: string[]; index: number; nextAgent: string | null } | null {
@@ -94,116 +118,278 @@ function arrayFrom(record: Record<string, unknown>, field: string): Record<strin
   return value.filter((item): item is Record<string, unknown> => isRecord(item));
 }
 
-function sourceRefsFrom(value: unknown): unknown[] {
-  if (!isRecord(value)) return [];
-  return Array.isArray(value.refs)
-    ? value.refs
-    : Array.isArray(value.source_refs)
-      ? value.source_refs
-      : [];
-}
-
 function nextReviewAgent(agentName: string): string | null {
   const index = refineryCoralAgentNames.indexOf(agentName);
   return index >= 0 ? refineryCoralAgentNames[index + 1] ?? null : null;
 }
 
-function buildReviewOutput(specialistName: string, envelope: Record<string, unknown>): {
-  output: Record<string, unknown>;
-  context: Record<string, unknown>;
-} {
-  const context = contextFrom(envelope);
-  const previousOutput = isRecord(envelope.output) ? envelope.output : {};
-  if (specialistName === "capture") {
-    const chunks = arrayFrom(context, "source_chunks");
-    const first = chunks[0];
-    const text = typeof first?.text === "string" ? first.text : "No source text was provided.";
-    return {
-      context,
-      output: {
-        candidates: [
-          {
-            claim: compactText(text),
-            source_refs: sourceRefsFrom(first),
-            why_future_useful: "Candidate came from Coral-coordinated Refinery review intake.",
-          },
-        ],
-      },
-    };
+function specialistForName(name: SpecialistName): LocalSpecialist {
+  switch (name) {
+    case "capture":
+      return captureSpecialist;
+    case "distillation":
+      return distillationSpecialist;
+    case "schema":
+      return schemaSpecialist;
+    case "relevance":
+      return relevanceSpecialist;
+    case "relationship-review":
+      return relationshipReviewSpecialist;
   }
+}
 
-  if (specialistName === "distillation") {
-    const candidates = arrayFrom(previousOutput, "candidates");
-    return {
-      context,
-      output: {
-        distilled: candidates.map((candidate, index) => ({
-          body: compactText(typeof candidate.claim === "string" ? candidate.claim : `Candidate ${index + 1}`),
-          source_refs: sourceRefsFrom(candidate),
-          rationale: "Distilled from the capture specialist candidate.",
-        })),
-      },
-    };
+function outputShapeForSpecialist(name: SpecialistName): string {
+  switch (name) {
+    case "capture":
+      return `{"candidates":[{"claim":"...","source_refs":[],"why_future_useful":"..."}]}`;
+    case "distillation":
+      return `{"distilled":[{"body":"...","source_refs":[],"rationale":"..."}]}`;
+    case "schema":
+      return `{"typed":[{"body":"...","memory_type":"semantic","primary_type":"semantic","secondary_type":null,"type_confidence":0.8,"type_rationale":"...","ambiguities":[],"durability":"durable","ttl":null,"proposed_scope":"project","action":"create","target_memory_id":null,"source_refs":[]}]}`;
+    case "relevance":
+      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null}],"rejected":[]}`;
+    case "relationship-review":
+      return `{"findings":[{"body":"...","relation":"novel","target_memory_id":null,"confidence":0.8,"rationale":"...","source_refs":[],"memory_refs":[{"memory_id":"memory:1","provenance_kind":"fixture"}]}]}`;
   }
+}
 
-  if (specialistName === "schema") {
-    const distilled = arrayFrom(previousOutput, "distilled");
-    return {
-      context,
-      output: {
-        typed: distilled.map((item) => ({
-          body: compactText(typeof item.body === "string" ? item.body : "Distilled memory candidate."),
-          memory_type: "semantic",
-          primary_type: "semantic",
-          secondary_type: null,
-          type_confidence: 0.62,
-          type_rationale: "Executable worker scaffold uses a conservative semantic classification.",
-          ambiguities: ["coral_worker_scaffold"],
-          durability: "durable",
-          ttl: null,
-          proposed_scope: "project",
-          action: "create",
-          target_memory_id: null,
-          source_refs: sourceRefsFrom(item),
-        })),
-      },
-    };
+function instructionForSpecialist(name: SpecialistName): string {
+  switch (name) {
+    case "capture":
+      return "Emit at most three durable, evidence-bound candidate memories. Prefer fewer high-signal candidates over broad extraction.";
+    case "distillation":
+      return "Rewrite each candidate into an atomic, self-contained memory body while preserving source_refs.";
+    case "schema":
+      return "Use project scope for this slice. Set memory_type equal to primary_type. Use canonical action, not mutation_op.";
+    case "relevance":
+      return "Emit proposal-shaped records only for durable future-useful candidates. Include rejected[] for filtered candidates.";
+    case "relationship-review":
+      return "Classify each proposal exactly once against active-memory candidates. memory_refs must be objects, never bare strings.";
   }
+}
 
-  if (specialistName === "relevance") {
-    const typed = arrayFrom(previousOutput, "typed");
-    return {
-      context,
-      output: {
-        proposals: typed.map((item) => ({
-          memory_type: typeof item.memory_type === "string" ? item.memory_type : "semantic",
-          proposed_scope: typeof item.proposed_scope === "string" ? item.proposed_scope : "project",
-          body: compactText(typeof item.body === "string" ? item.body : "Typed memory candidate."),
-          confidence: 0.62,
-          rationale: "Proposal emitted by bounded Coral worker scaffold from real review intake.",
-          source_refs: sourceRefsFrom(item),
-          action: "create",
-          target_memory_id: null,
-        })),
-        rejected: [],
-      },
-    };
-  }
+function compactMemoryHints(value: unknown, limit = 10): unknown[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, limit);
+}
 
-  const proposals = arrayFrom(previousOutput, "proposals");
+function activeMemoryCandidates(context: Record<string, unknown>, relevanceOutput: Record<string, unknown>): unknown[] {
+  const proposals = arrayFrom(relevanceOutput, "proposals");
+  const memories = compactMemoryHints(context.active_memory_hints, 8);
+  return proposals.map((proposal, proposalIndex) => ({
+    proposal_index: proposalIndex,
+    proposal_body: typeof proposal.body === "string" ? proposal.body : null,
+    memories,
+  }));
+}
+
+function coralThreadContext(args: {
+  message: { id: string; senderName: string; mentionNames: string[]; threadId: string };
+  envelope: Record<string, unknown>;
+}): Record<string, unknown> {
   return {
-    context,
-    output: {
-      findings: proposals.map((proposal) => ({
-        body: compactText(typeof proposal.body === "string" ? proposal.body : "Proposal body unavailable."),
-        relation: "novel",
-        target_memory_id: null,
-        confidence: 0.6,
-        rationale: "No deterministic duplicate match was asserted by the worker scaffold.",
-        source_refs: sourceRefsFrom(proposal),
-        memory_refs: [],
-      })),
+    threadId: args.message.threadId,
+    receivedMessageId: args.message.id,
+    senderName: args.message.senderName,
+    mentionNames: args.message.mentionNames,
+    previousAgent: typeof args.envelope.agent === "string" ? args.envelope.agent : args.message.senderName,
+    previousStep: typeof args.envelope.step === "string" ? args.envelope.step : null,
+  };
+}
+
+function payloadForSpecialist(args: {
+  specialistName: SpecialistName;
+  envelope: Record<string, unknown>;
+  message: { id: string; senderName: string; mentionNames: string[]; threadId: string };
+}): { payload: Record<string, unknown>; context: Record<string, unknown> } {
+  const context = contextFrom(args.envelope);
+  const previousOutput = isRecord(args.envelope.output) ? args.envelope.output : {};
+  const threadContext = coralThreadContext({ message: args.message, envelope: args.envelope });
+  switch (args.specialistName) {
+    case "capture":
+      return {
+        context,
+        payload: {
+          source_chunks: Array.isArray(context.source_chunks) ? context.source_chunks : [],
+          active_memory_hints: compactMemoryHints(context.active_memory_hints),
+          coral_thread_context: threadContext,
+        },
+      };
+    case "distillation":
+      return {
+        context,
+        payload: {
+          candidates: arrayFrom(previousOutput, "candidates"),
+          coral_thread_context: threadContext,
+        },
+      };
+    case "schema":
+      return {
+        context,
+        payload: {
+          distilled: arrayFrom(previousOutput, "distilled"),
+          active_memory_hints: compactMemoryHints(context.active_memory_hints),
+          coral_thread_context: threadContext,
+        },
+      };
+    case "relevance":
+      return {
+        context,
+        payload: {
+          typed: arrayFrom(previousOutput, "typed"),
+          coral_thread_context: threadContext,
+        },
+      };
+    case "relationship-review":
+      return {
+        context,
+        payload: {
+          relevance: previousOutput,
+          active_memory_candidates: activeMemoryCandidates(context, previousOutput),
+          coral_thread_context: threadContext,
+        },
+      };
+  }
+}
+
+function parseSpecialistOutput(name: SpecialistName, raw: string): Record<string, unknown> {
+  switch (name) {
+    case "capture":
+      return parseCapture(raw) as unknown as Record<string, unknown>;
+    case "distillation":
+      return parseDistillation(raw) as unknown as Record<string, unknown>;
+    case "schema":
+      return parseSchema(raw) as unknown as Record<string, unknown>;
+    case "relevance":
+      return parseRelevance(raw) as unknown as Record<string, unknown>;
+    case "relationship-review":
+      return parseRelationshipReview(raw) as unknown as Record<string, unknown>;
+  }
+}
+
+function failureEnvelope(args: {
+  runId: string;
+  step: SpecialistName;
+  agentName: string;
+  receivedMessageId: string;
+  code: string;
+  message: string;
+  rawOutput?: string;
+  model: WorkerModelConfig;
+  providerMetadata?: OpenRouterCallMetadata;
+  prompt?: { system: string; user: string };
+}): Record<string, unknown> {
+  return {
+    schemaVersion: refineryReviewSchemaVersion,
+    type: "refinery-review-output",
+    status: "failed",
+    runId: args.runId,
+    step: args.step,
+    agent: args.agentName,
+    specialist: args.step,
+    receivedMessageId: args.receivedMessageId,
+    promptVersion: coralSpecialistPromptVersion,
+    model: redactModel(args.model),
+    providerMetadata: args.providerMetadata ?? null,
+    prompt: args.prompt ?? null,
+    rawOutput: args.rawOutput ?? "",
+    error: {
+      code: args.code,
+      message: args.message,
     },
+  };
+}
+
+export async function buildLiveReviewEnvelope(args: {
+  specialistName: SpecialistName;
+  agentName: string;
+  envelope: Record<string, unknown>;
+  message: { id: string; senderName: string; mentionNames: string[]; threadId: string };
+  model: WorkerModelConfig;
+  callModel?: WorkerModelCaller;
+}): Promise<Record<string, unknown>> {
+  const runId = String(args.envelope.runId);
+  const specialist = specialistForName(args.specialistName);
+  const { payload, context } = payloadForSpecialist(args);
+  const prompt = buildPrompt({
+    specialist,
+    shape: outputShapeForSpecialist(args.specialistName),
+    instruction: instructionForSpecialist(args.specialistName),
+    payload,
+  });
+
+  if (!args.model.apiKey) {
+    return failureEnvelope({
+      runId,
+      step: args.specialistName,
+      agentName: args.agentName,
+      receivedMessageId: args.message.id,
+      code: "MODEL_CONFIG_MISSING",
+      message: "OPENROUTER_API_KEY or MODEL_API_KEY is required for live Coral specialist execution.",
+      model: args.model,
+      prompt,
+    });
+  }
+
+  let rawOutput = "";
+  let providerMetadata: OpenRouterCallMetadata | undefined;
+  try {
+    const callModel = args.callModel ?? callOpenRouterChatWithMetadata;
+    const response = await callModel({
+      model: args.model,
+      system: prompt.system,
+      user: prompt.user,
+    });
+    rawOutput = response.content;
+    providerMetadata = response.metadata;
+  } catch (error) {
+    return failureEnvelope({
+      runId,
+      step: args.specialistName,
+      agentName: args.agentName,
+      receivedMessageId: args.message.id,
+      code: "MODEL_CALL_FAILED",
+      message: error instanceof Error ? error.message : String(error),
+      model: args.model,
+      providerMetadata,
+      prompt,
+    });
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parseSpecialistOutput(args.specialistName, rawOutput);
+  } catch (error) {
+    return failureEnvelope({
+      runId,
+      step: args.specialistName,
+      agentName: args.agentName,
+      receivedMessageId: args.message.id,
+      code: "MODEL_OUTPUT_INVALID",
+      message: error instanceof Error ? error.message : String(error),
+      rawOutput,
+      model: args.model,
+      providerMetadata,
+      prompt,
+    });
+  }
+
+  return {
+    schemaVersion: refineryReviewSchemaVersion,
+    type: "refinery-review-output",
+    status: "succeeded",
+    runId,
+    step: args.specialistName,
+    agent: args.agentName,
+    specialist: args.specialistName,
+    receivedMessageId: args.message.id,
+    promptVersion: coralSpecialistPromptVersion,
+    model: redactModel(args.model),
+    providerMetadata: providerMetadata ?? null,
+    prompt,
+    rawOutput,
+    output: parsed,
+    context,
   };
 }
 
@@ -217,7 +403,7 @@ async function main(): Promise<void> {
   log(definition.agentName, `booted specialist=${definition.specialistName} session=${process.env.CORAL_SESSION_ID ?? "unknown"}`);
   log(
     definition.agentName,
-    `model=${model.modelName} baseUrl=${model.baseUrl} reasoning=${model.reasoningEffort} apiKey=${model.hasApiKey ? "present" : "missing"}`,
+    `model=${model.modelName} baseUrl=${model.baseUrl} reasoning=${model.reasoningEffort} apiKey=${model.apiKeyPresent ? "present" : "missing"}`,
   );
 
   const connection = await connectCoralMcp(coralConnectionUrl, `refinery-${definition.specialistName}-worker`);
@@ -264,18 +450,15 @@ async function main(): Promise<void> {
         continue;
       }
       handled += 1;
-      const built = buildReviewOutput(definition.specialistName, reviewEnvelope);
-      const next = nextReviewAgent(definition.agentName);
-      const content = JSON.stringify({
-        type: "refinery-review-output",
-        runId: reviewEnvelope.runId,
-        step: definition.specialistName,
-        agent: definition.agentName,
-        specialist: definition.specialistName,
-        receivedMessageId: message.id,
-        output: built.output,
-        context: built.context,
+      const outputEnvelope = await buildLiveReviewEnvelope({
+        specialistName: definition.specialistName,
+        agentName: definition.agentName,
+        envelope: reviewEnvelope,
+        message,
+        model,
       });
+      const next = outputEnvelope.status === "succeeded" ? nextReviewAgent(definition.agentName) : null;
+      const content = JSON.stringify(outputEnvelope);
       await connection.client.callTool({
         name: connection.sendMessageToolName,
         arguments: {
@@ -284,7 +467,10 @@ async function main(): Promise<void> {
           mentions: next ? [next] : [],
         },
       });
-      log(definition.agentName, `review output sent in thread=${message.threadId} next=${next ?? "none"}`);
+      log(
+        definition.agentName,
+        `review output sent status=${String(outputEnvelope.status)} thread=${message.threadId} next=${next ?? "none"}`,
+      );
       continue;
     }
 
@@ -333,9 +519,11 @@ async function main(): Promise<void> {
   await connection.client.close();
 }
 
-main().catch((error) => {
-  const label = process.env.CORAL_AGENT_ID ?? "refinery-worker";
-  console.error(`[${new Date().toISOString()}] [${label}] FATAL: ${(error as Error).message}`);
-  console.error(error);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    const label = process.env.CORAL_AGENT_ID ?? "refinery-worker";
+    console.error(`[${new Date().toISOString()}] [${label}] FATAL: ${(error as Error).message}`);
+    console.error(error);
+    process.exit(1);
+  });
+}

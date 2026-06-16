@@ -51,7 +51,7 @@ refinery adapter check --adapter ./my-memory-adapter.mjs --json
 # Probe adapter reads and validate returned record shapes.
 refinery adapter check --adapter ./my-memory-adapter.mjs --probe --scope project --json
 
-# Run the default Coral-coordinated dry-run review over local Claude Code sessions.
+# Run the default live Coral-coordinated dry-run review over local Claude Code sessions.
 refinery review --project . --source claude-code-sessions --target codex-memory --json
 
 # Advanced local debugging: run the old sequential adapter-backed scaffold.
@@ -104,7 +104,7 @@ own data sources.
 ## Agent-Callable CLI
 
 The promoted integration surface is CLI-first. Agents and automations should be
-able to call Refinery, receive stable JSON, inspect deterministic run artifacts,
+able to call Refinery, receive stable JSON, inspect run artifacts,
 and hand proposal bundles to their own approval/apply path.
 
 The CLI currently exposes:
@@ -117,9 +117,9 @@ The CLI currently exposes:
 
 `review` is dry-run only. By default it starts or targets Coral, creates a
 bounded session/thread, waits for the five Refinery specialists, seeds a review
-intake, collects outputs through Coral extended state, writes a run directory,
-and emits proposal-shaped JSON. It does not approve proposals, mutate memory,
-or write to the backing store.
+intake, collects live LLM-backed specialist outputs through Coral extended
+state, writes a run directory, and emits proposal-shaped JSON. It does not
+approve proposals, mutate memory, or write to the backing store.
 
 Advanced attachment flags let a caller provide an existing Coral URL,
 namespace, session id, and thread id. Refinery only tears down the session and
@@ -135,7 +135,7 @@ available. Non-JSON terminal usage still reports failures on stderr.
 Review metadata records reproducibility inputs: mode, adapter, scope, creation
 time, sink URL, source limits, specialist order, runtime adapter, Coral
 namespace/session/thread refs, and redacted model provider/base URL/model name
-for live sequential runs. API keys are never emitted.
+for live runs. API keys are never emitted.
 
 Modes:
 
@@ -204,12 +204,19 @@ steps/
   relationship-review/{input.json,output.raw.md,output.parsed.json}
 ```
 
+For live Coral runs, each step `input.json` also records the specialist agent,
+prompt version, redacted model identity, provider metadata, and prompt used for
+that specialist call. `output.raw.md` is the raw model response and
+`output.parsed.json` is written only after schema validation succeeds. Failed
+specialist calls write `steps/<step>/error.json` plus a failed run manifest.
+
 Failed reviews that reach a run directory write `status.json` and a failed
 `review.json` containing `status: "failed"`, the error payload, failed step
 when known, and a raw-output path when a live specialist returned invalid JSON.
-Coral failures also write `coral.json` with session/thread/runtime evidence
-available up to the failure point. Step directories preserve `input.json` and
-`output.raw.md` when available so another agent can inspect the failed run.
+Coral failures also write `coral.json` with session/thread/runtime/model
+evidence available up to the failure point. Step directories preserve
+`input.json`, `output.raw.md`, and `error.json` when available so another agent
+can inspect the failed run.
 
 Proposals use two separate vocabularies:
 

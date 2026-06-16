@@ -135,7 +135,7 @@ function writeJson(filePath: string, value: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
-function extractJson(raw: string): unknown {
+export function extractJson(raw: string): unknown {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced ? fenced[1] : raw;
   const first = candidate.indexOf("{");
@@ -144,7 +144,7 @@ function extractJson(raw: string): unknown {
   return JSON.parse(candidate.slice(first, last + 1)) as unknown;
 }
 
-function redactModel(config: ModelConfig): Omit<ModelConfig, "apiKey"> & {
+export function redactModel(config: ModelConfig): Omit<ModelConfig, "apiKey"> & {
   apiKeyPresent: boolean;
 } {
   return {
@@ -179,7 +179,7 @@ function parseAction(value: unknown, legacyValue: unknown, label: string): Memor
   return action as MemoryMaintenanceAction;
 }
 
-function parseCapture(raw: string): CaptureOutput {
+export function parseCapture(raw: string): CaptureOutput {
   const parsed = extractJson(raw) as { candidates?: unknown[] };
   if (!Array.isArray(parsed.candidates)) throw new Error("Capture output must contain candidates array.");
   return {
@@ -196,7 +196,7 @@ function parseCapture(raw: string): CaptureOutput {
   };
 }
 
-function parseDistillation(raw: string): DistillationOutput {
+export function parseDistillation(raw: string): DistillationOutput {
   const parsed = extractJson(raw) as { distilled?: unknown[] };
   if (!Array.isArray(parsed.distilled)) throw new Error("Distillation output must contain distilled array.");
   return {
@@ -213,7 +213,7 @@ function parseDistillation(raw: string): DistillationOutput {
   };
 }
 
-function parseSchema(raw: string): SchemaOutput {
+export function parseSchema(raw: string): SchemaOutput {
   const parsed = extractJson(raw) as { typed?: unknown[] };
   if (!Array.isArray(parsed.typed)) throw new Error("Schema output must contain typed array.");
   return {
@@ -264,7 +264,7 @@ function parseSchema(raw: string): SchemaOutput {
   };
 }
 
-function parseRelevance(raw: string): RelevanceOutput {
+export function parseRelevance(raw: string): RelevanceOutput {
   const parsed = extractJson(raw) as { proposals?: unknown[]; rejected?: unknown[] };
   if (!Array.isArray(parsed.proposals) || !Array.isArray(parsed.rejected)) {
     throw new Error("Relevance output must contain proposals and rejected arrays.");
@@ -307,7 +307,7 @@ function parseRelevance(raw: string): RelevanceOutput {
   };
 }
 
-function parseRelationshipReview(raw: string): RelationshipReviewOutput {
+export function parseRelationshipReview(raw: string): RelationshipReviewOutput {
   const parsed = extractJson(raw) as { findings?: unknown[] };
   if (!Array.isArray(parsed.findings)) throw new Error("Relationship Review output must contain findings array.");
   return {
@@ -348,7 +348,7 @@ function parseRelationshipReview(raw: string): RelationshipReviewOutput {
   };
 }
 
-function buildPrompt(args: {
+export function buildPrompt(args: {
   specialist: LocalSpecialist;
   shape: string;
   instruction: string;

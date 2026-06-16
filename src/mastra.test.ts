@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildMastraInstructions, callOpenRouterChat, createMastraSpecialistAgent, mastraRuntimeMetadata } from "./runtimes/mastra/runtime.ts";
+import {
+  buildMastraInstructions,
+  callOpenRouterChat,
+  callOpenRouterChatWithMetadata,
+  createMastraSpecialistAgent,
+  mastraRuntimeMetadata,
+} from "./runtimes/mastra/runtime.ts";
 import { captureSpecialist } from "./core/specialists/capture.ts";
 
 const model = {
@@ -72,6 +78,43 @@ test("callOpenRouterChat uses chat completions and returns message content", asy
     assert.equal(request.body.model, "deepseek/deepseek-v4-pro");
     assert.equal(request.body.messages.length, 2);
     assert.equal(request.body.max_tokens, 3000);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("callOpenRouterChatWithMetadata returns redacted provider metadata", async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        id: "or-call-1",
+        model: "deepseek/deepseek-v4-pro",
+        choices: [{ finish_reason: "stop", message: { content: "{\"ok\":true}" } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      }));
+    });
+  });
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const result = await callOpenRouterChatWithMetadata({
+      model: {
+        ...model,
+        baseUrl: `http://127.0.0.1:${address.port}/api/v1`,
+      },
+      system: "system",
+      user: "user",
+    });
+
+    assert.equal(result.content, "{\"ok\":true}");
+    assert.equal(result.metadata.provider, "openrouter");
+    assert.equal(result.metadata.responseId, "or-call-1");
+    assert.equal(result.metadata.finishReason, "stop");
+    assert.equal("apiKey" in result.metadata, false);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

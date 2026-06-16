@@ -17,6 +17,7 @@ import {
   refineryCoralAgentGlobForRepo,
   getCoralAgentBySpecialistName,
 } from "./coral/definitions.ts";
+import { buildLiveReviewEnvelope } from "./coral/worker.ts";
 
 const repoRoot = process.cwd();
 
@@ -84,6 +85,119 @@ test("Coral session request contains executable specialists in a single group", 
     assert.equal(agent.options.MODEL_NAME.value, refineryCoralModelDefaults.modelName);
     assert.equal(agent.options.MODEL_BASE_URL.value, refineryCoralModelDefaults.baseUrl);
   }
+});
+
+test("Coral worker live envelope uses injected model output and redacts secrets", async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const envelope = await buildLiveReviewEnvelope({
+    specialistName: "capture",
+    agentName: "refinery-capture",
+    envelope: {
+      type: "refinery-review-intake",
+      runId: "run-live-worker",
+      source_chunks: [
+        {
+          id: "source:1",
+          text: "Refinery specialists should call a real model during Coral review.",
+          refs: [{ source_id: "source:1" }],
+        },
+      ],
+      active_memory_hints: [],
+    },
+    message: {
+      id: "message-1",
+      senderName: "refinery-relationship-review",
+      mentionNames: ["refinery-capture"],
+      threadId: "thread-1",
+    },
+    model: {
+      provider: "openrouter",
+      baseUrl: "https://openrouter.invalid/api/v1",
+      modelName: "deepseek/deepseek-v4-pro",
+      apiKey: "secret-key",
+      reasoningEffort: "low",
+      apiKeyPresent: true,
+    },
+    callModel: async ({ system, user }) => {
+      calls.push({ system, user });
+      return {
+        content: JSON.stringify({
+          candidates: [
+            {
+              claim: "Refinery specialists call a real model during Coral review.",
+              source_refs: [{ source_id: "source:1" }],
+              why_future_useful: "Distinguishes live coordinated runs from scaffold smokes.",
+            },
+          ],
+        }),
+        metadata: {
+          provider: "openrouter",
+          baseUrl: "https://openrouter.invalid/api/v1",
+          modelName: "deepseek/deepseek-v4-pro",
+          status: 200,
+          responseId: "or-worker-1",
+          responseModel: "deepseek/deepseek-v4-pro",
+          finishReason: "stop",
+          usage: { prompt_tokens: 20, completion_tokens: 10 },
+        },
+      };
+    },
+  });
+
+  assert.equal(envelope.status, "succeeded");
+  assert.equal(envelope.type, "refinery-review-output");
+  assert.equal(envelope.step, "capture");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].system, /Return only JSON/);
+  assert.match(calls[0].user, /source_chunks/);
+  assert.equal((envelope.output as { candidates: unknown[] }).candidates.length, 1);
+  assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "or-worker-1");
+  assert.equal("apiKey" in (envelope.model as Record<string, unknown>), false);
+});
+
+test("Coral worker live envelope reports invalid model JSON without fallback", async () => {
+  const envelope = await buildLiveReviewEnvelope({
+    specialistName: "capture",
+    agentName: "refinery-capture",
+    envelope: {
+      type: "refinery-review-intake",
+      runId: "run-live-worker-invalid",
+      source_chunks: [{ id: "source:1", text: "source", refs: [] }],
+      active_memory_hints: [],
+    },
+    message: {
+      id: "message-1",
+      senderName: "refinery-relationship-review",
+      mentionNames: ["refinery-capture"],
+      threadId: "thread-1",
+    },
+    model: {
+      provider: "openrouter",
+      baseUrl: "https://openrouter.invalid/api/v1",
+      modelName: "deepseek/deepseek-v4-pro",
+      apiKey: "secret-key",
+      reasoningEffort: "low",
+      apiKeyPresent: true,
+    },
+    callModel: async () => ({
+      content: "not json",
+      metadata: {
+        provider: "openrouter",
+        baseUrl: "https://openrouter.invalid/api/v1",
+        modelName: "deepseek/deepseek-v4-pro",
+        status: 200,
+        responseId: "or-worker-bad-json",
+        responseModel: "deepseek/deepseek-v4-pro",
+        finishReason: "stop",
+        usage: null,
+      },
+    }),
+  });
+
+  assert.equal(envelope.status, "failed");
+  assert.equal((envelope.error as { code: string }).code, "MODEL_OUTPUT_INVALID");
+  assert.equal(envelope.rawOutput, "not json");
+  assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "or-worker-bad-json");
 });
 
 test("ping-pong evaluator requires each expected specialist to be mentioned and respond", () => {
