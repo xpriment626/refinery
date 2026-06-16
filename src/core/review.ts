@@ -14,7 +14,7 @@ import {
   RefineryError,
   serializeRefineryError,
 } from "./errors.ts";
-import { writeReviewArtifactManifest } from "./artifacts.ts";
+import { writeReviewArtifactManifest, type ReviewRunMode } from "./artifacts.ts";
 
 const DEFAULT_SINK_TIMEOUT_MS = 10_000;
 const MAX_SINK_RESPONSE_TEXT_CHARS = 4000;
@@ -81,13 +81,11 @@ export interface ReviewRunMetadata {
   adapter: string;
   scope: string;
   dryRun: true;
-  mode: "deterministic" | "live";
+  mode: ReviewRunMode;
   createdAt: string;
   writesAttempted: false;
   sinkUrl: string | null;
-  runtime: {
-    adapter: string;
-  };
+  runtime: Record<string, unknown>;
   specialistOrder: string[];
   sourceLimit: number | null;
   sourceCharLimit: number | null;
@@ -103,7 +101,7 @@ export interface ReviewFailureStatus {
   runDir: string;
   adapter: string | null;
   scope: string;
-  mode: "deterministic" | "live";
+  mode: ReviewRunMode;
   failedStep: string | null;
   rawOutputPath: string | null;
   createdAt: string;
@@ -121,7 +119,7 @@ export function writeReviewFailureStatus(args: {
   runId: string;
   adapterName?: string | null;
   scope: string;
-  mode: "deterministic" | "live";
+  mode: ReviewRunMode;
   createdAt: string;
   error: RefineryError;
 }): ReviewFailureStatus {

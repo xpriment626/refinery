@@ -19,17 +19,19 @@ import { runLiveReview } from "./core/live-review.ts";
 import { validateRefineryModuleDescriptor } from "./core/modules.ts";
 import { runReview, type ReviewSinkOptions } from "./core/review.ts";
 import type { ModelCaller } from "./core/specialists/types.ts";
+import { runCoralReview } from "./coral/review-conductor.ts";
 
 const HELP = `refinery — agent-callable memory review CLI
 
 USAGE
   refinery instance init [--home <dir>] [--from <dir>] [--reset] [--json]
   refinery adapter check --adapter <path|reference-sqlite> [--probe] [--scope <scope>] [--json]
-  refinery review --adapter <path|reference-sqlite> --scope <scope> [--mode deterministic|live] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
+  refinery review [--project <dir>] [--source claude-code-sessions] [--target codex-memory] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
   refinery trial inspect --run-dir <dir> [--json]
   refinery module check --descriptor <path> [--json]
 
 The CLI is dry-run by default. Review emits proposal artifacts and does not write durable memory.
+Review runs Coral-coordinated specialists by default. Advanced Coral attachment may pass --coral-url/--coral-session-id/--coral-thread-id; local debugging may use --runtime sequential with --adapter.
 Refinery instance data defaults to $PWD/.refinery unless REFINERY_HOME or --home is set.`;
 
 function stableJson(value: unknown): string {
@@ -103,6 +105,34 @@ async function loadModelCaller(spec: string): Promise<ModelCaller> {
     );
   }
   return caller as ModelCaller;
+}
+
+async function loadSourceAdapter(args: {
+  source: string;
+  home?: string;
+  project: string;
+}): Promise<MemoryStoreAdapter> {
+  if (args.source !== "claude-code-sessions") {
+    throw new RefineryError("INVALID_OPTION", "--source must be claude-code-sessions", { phase: "args" });
+  }
+  try {
+    const [adapterMod, configMod] = await Promise.all([
+      import("../examples/reference-sqlite/adapter.ts"),
+      import("../examples/reference-sqlite/config.ts"),
+    ]);
+    return adapterMod.createReferenceSqliteAdapter(
+      configMod.resolvePaths({
+        home: args.home,
+        cwd: args.project,
+      }),
+    ) as MemoryStoreAdapter;
+  } catch (error) {
+    throw new RefineryError(
+      "ADAPTER_LOAD_FAILED",
+      error instanceof Error ? error.message : String(error),
+      { phase: "adapter" },
+    );
+  }
 }
 
 function parseOptionArgs(args: string[], options: Parameters<typeof parseArgs>[0]["options"]) {
@@ -343,6 +373,10 @@ async function cmdModule(rest: string[]): Promise<number> {
 async function cmdReview(rest: string[]): Promise<number> {
   const values = parseOptionArgs(rest, {
     adapter: { type: "string" },
+    project: { type: "string" },
+    source: { type: "string" },
+    target: { type: "string" },
+    runtime: { type: "string" },
     scope: { type: "string", default: "project" },
     mode: { type: "string", default: "deterministic" },
     home: { type: "string" },
@@ -354,32 +388,33 @@ async function cmdReview(rest: string[]): Promise<number> {
     "model-caller": { type: "string" },
     "source-limit": { type: "string" },
     "source-char-limit": { type: "string" },
+    "coral-url": { type: "string" },
+    "coral-auth-key": { type: "string" },
+    "coral-config": { type: "string" },
+    "coral-namespace": { type: "string" },
+    "coral-session-id": { type: "string" },
+    "coral-thread-id": { type: "string" },
+    "coral-package": { type: "string" },
+    "coral-timeout-ms": { type: "string" },
+    "coral-no-start": { type: "boolean", default: false },
+    "coral-no-teardown": { type: "boolean", default: false },
     json: { type: "boolean", default: false },
   });
-  if (!values.adapter || typeof values.adapter !== "string") {
-    throw new RefineryError("INVALID_OPTION", "review requires --adapter <path|reference-sqlite>", { phase: "args" });
-  }
-  const mode = String(values.mode ?? "deterministic");
-  if (mode !== "deterministic" && mode !== "live") {
-    throw new RefineryError("INVALID_OPTION", "review --mode must be deterministic or live", { phase: "args" });
+  const runtime = typeof values.runtime === "string" ? values.runtime : "coral";
+  if (runtime !== "coral" && runtime !== "sequential") {
+    throw new RefineryError("INVALID_OPTION", "review --runtime must be coral or sequential", { phase: "args" });
   }
   const runId = validateRunId(typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId());
   const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
   const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
   const sinkTimeoutMs = parsePositiveIntegerOption(values["sink-timeout-ms"], "--sink-timeout-ms");
+  const coralTimeoutMs = parsePositiveIntegerOption(values["coral-timeout-ms"], "--coral-timeout-ms");
 
-  const adapter = await loadAdapter(values.adapter);
-  const validation = validateMemoryStoreAdapter(adapter);
-  if (!validation.valid) {
-    throw new RefineryError(
-      "ADAPTER_INVALID",
-      validation.errors.join("; "),
-      { phase: "adapter", details: validation.errors },
-    );
-  }
+  const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
 
   const instancePaths = resolveRefineryPaths({
     home: typeof values.home === "string" ? values.home : undefined,
+    cwd: project,
   });
   const outputDir =
     typeof values["output-dir"] === "string" ? path.resolve(values["output-dir"]) : instancePaths.trialsDir;
@@ -389,9 +424,83 @@ async function cmdReview(rest: string[]): Promise<number> {
     typeof values.sink === "string"
       ? await loadSink(values.sink)
       : typeof values["sink-url"] === "string"
-        ? { url: values["sink-url"] }
-        : undefined;
+      ? { url: values["sink-url"] }
+      : undefined;
   const sink = loadedSink && sinkTimeoutMs ? { ...loadedSink, timeoutMs: sinkTimeoutMs } : loadedSink;
+
+  if (runtime === "coral") {
+    if (typeof values.adapter === "string") {
+      throw new RefineryError(
+        "INVALID_OPTION",
+        "review --adapter is only available with --runtime sequential for local debugging.",
+        { phase: "args" },
+      );
+    }
+    const source = typeof values.source === "string" ? values.source : "claude-code-sessions";
+    const target = typeof values.target === "string" ? values.target : "codex-memory";
+    if (target !== "codex-memory") {
+      throw new RefineryError("INVALID_OPTION", "--target must be codex-memory", { phase: "args" });
+    }
+    if (typeof values["coral-thread-id"] === "string" && typeof values["coral-session-id"] !== "string") {
+      throw new RefineryError("INVALID_OPTION", "--coral-thread-id requires --coral-session-id", { phase: "args" });
+    }
+    const adapter = await loadSourceAdapter({
+      source,
+      home: typeof values.home === "string" ? values.home : undefined,
+      project,
+    });
+    const validation = validateMemoryStoreAdapter(adapter);
+    if (!validation.valid) {
+      throw new RefineryError(
+        "ADAPTER_INVALID",
+        validation.errors.join("; "),
+        { phase: "adapter", details: validation.errors },
+      );
+    }
+    const result = await runCoralReview({
+      adapter,
+      project,
+      source: "claude-code-sessions",
+      target: "codex-memory",
+      scope: String(values.scope ?? "project"),
+      runId,
+      outputDir,
+      sink,
+      sourceLimit,
+      sourceCharLimit,
+      coral: {
+        apiUrl: typeof values["coral-url"] === "string" ? values["coral-url"] : undefined,
+        authKey: typeof values["coral-auth-key"] === "string" ? values["coral-auth-key"] : undefined,
+        configPath: typeof values["coral-config"] === "string" ? values["coral-config"] : undefined,
+        namespace: typeof values["coral-namespace"] === "string" ? values["coral-namespace"] : undefined,
+        sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
+        threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
+        coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
+        timeoutMs: coralTimeoutMs,
+        startServer: typeof values["coral-url"] === "string" ? false : !values["coral-no-start"],
+        noTeardown: Boolean(values["coral-no-teardown"]),
+      },
+    });
+    process.stdout.write(stableJson(result));
+    return 0;
+  }
+
+  if (!values.adapter || typeof values.adapter !== "string") {
+    throw new RefineryError("INVALID_OPTION", "review --runtime sequential requires --adapter <path|reference-sqlite>", { phase: "args" });
+  }
+  const mode = String(values.mode ?? "deterministic");
+  if (mode !== "deterministic" && mode !== "live") {
+    throw new RefineryError("INVALID_OPTION", "review --mode must be deterministic or live", { phase: "args" });
+  }
+  const adapter = await loadAdapter(values.adapter);
+  const validation = validateMemoryStoreAdapter(adapter);
+  if (!validation.valid) {
+    throw new RefineryError(
+      "ADAPTER_INVALID",
+      validation.errors.join("; "),
+      { phase: "adapter", details: validation.errors },
+    );
+  }
 
   if (mode === "live") {
     const result = await runLiveReview({

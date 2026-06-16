@@ -1,5 +1,10 @@
 import { loadLocalEnv } from "../env.ts";
-import { getCoralAgentBySpecialistName, getSpecialistNameArg, refineryCoralModelDefaults } from "./definitions.ts";
+import {
+  getCoralAgentBySpecialistName,
+  getSpecialistNameArg,
+  refineryCoralAgentNames,
+  refineryCoralModelDefaults,
+} from "./definitions.ts";
 import { connectCoralMcp, parseWaitForMentionResult, readCoralState } from "./mcp.ts";
 
 interface WorkerModelConfig {
@@ -38,6 +43,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+function compactText(text: string, max = 420): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return compact.slice(0, max - 3).trimEnd() + "...";
+}
+
 function parseMessageEnvelope(text: string): { runId: string; sequence: string[]; index: number; nextAgent: string | null } | null {
   try {
     const parsed = JSON.parse(text);
@@ -55,6 +66,145 @@ function parseMessageEnvelope(text: string): { runId: string; sequence: string[]
   } catch {
     return null;
   }
+}
+
+function parseReviewEnvelope(text: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!isRecord(parsed)) return null;
+    if (parsed.type !== "refinery-review-intake" && parsed.type !== "refinery-review-output") return null;
+    if (typeof parsed.runId !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function contextFrom(envelope: Record<string, unknown>): Record<string, unknown> {
+  if (isRecord(envelope.context)) return envelope.context;
+  return {
+    source_chunks: Array.isArray(envelope.source_chunks) ? envelope.source_chunks : [],
+    active_memory_hints: Array.isArray(envelope.active_memory_hints) ? envelope.active_memory_hints : [],
+  };
+}
+
+function arrayFrom(record: Record<string, unknown>, field: string): Record<string, unknown>[] {
+  const value = record[field];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => isRecord(item));
+}
+
+function sourceRefsFrom(value: unknown): unknown[] {
+  if (!isRecord(value)) return [];
+  return Array.isArray(value.refs)
+    ? value.refs
+    : Array.isArray(value.source_refs)
+      ? value.source_refs
+      : [];
+}
+
+function nextReviewAgent(agentName: string): string | null {
+  const index = refineryCoralAgentNames.indexOf(agentName);
+  return index >= 0 ? refineryCoralAgentNames[index + 1] ?? null : null;
+}
+
+function buildReviewOutput(specialistName: string, envelope: Record<string, unknown>): {
+  output: Record<string, unknown>;
+  context: Record<string, unknown>;
+} {
+  const context = contextFrom(envelope);
+  const previousOutput = isRecord(envelope.output) ? envelope.output : {};
+  if (specialistName === "capture") {
+    const chunks = arrayFrom(context, "source_chunks");
+    const first = chunks[0];
+    const text = typeof first?.text === "string" ? first.text : "No source text was provided.";
+    return {
+      context,
+      output: {
+        candidates: [
+          {
+            claim: compactText(text),
+            source_refs: sourceRefsFrom(first),
+            why_future_useful: "Candidate came from Coral-coordinated Refinery review intake.",
+          },
+        ],
+      },
+    };
+  }
+
+  if (specialistName === "distillation") {
+    const candidates = arrayFrom(previousOutput, "candidates");
+    return {
+      context,
+      output: {
+        distilled: candidates.map((candidate, index) => ({
+          body: compactText(typeof candidate.claim === "string" ? candidate.claim : `Candidate ${index + 1}`),
+          source_refs: sourceRefsFrom(candidate),
+          rationale: "Distilled from the capture specialist candidate.",
+        })),
+      },
+    };
+  }
+
+  if (specialistName === "schema") {
+    const distilled = arrayFrom(previousOutput, "distilled");
+    return {
+      context,
+      output: {
+        typed: distilled.map((item) => ({
+          body: compactText(typeof item.body === "string" ? item.body : "Distilled memory candidate."),
+          memory_type: "semantic",
+          primary_type: "semantic",
+          secondary_type: null,
+          type_confidence: 0.62,
+          type_rationale: "Executable worker scaffold uses a conservative semantic classification.",
+          ambiguities: ["coral_worker_scaffold"],
+          durability: "durable",
+          ttl: null,
+          proposed_scope: "project",
+          action: "create",
+          target_memory_id: null,
+          source_refs: sourceRefsFrom(item),
+        })),
+      },
+    };
+  }
+
+  if (specialistName === "relevance") {
+    const typed = arrayFrom(previousOutput, "typed");
+    return {
+      context,
+      output: {
+        proposals: typed.map((item) => ({
+          memory_type: typeof item.memory_type === "string" ? item.memory_type : "semantic",
+          proposed_scope: typeof item.proposed_scope === "string" ? item.proposed_scope : "project",
+          body: compactText(typeof item.body === "string" ? item.body : "Typed memory candidate."),
+          confidence: 0.62,
+          rationale: "Proposal emitted by bounded Coral worker scaffold from real review intake.",
+          source_refs: sourceRefsFrom(item),
+          action: "create",
+          target_memory_id: null,
+        })),
+        rejected: [],
+      },
+    };
+  }
+
+  const proposals = arrayFrom(previousOutput, "proposals");
+  return {
+    context,
+    output: {
+      findings: proposals.map((proposal) => ({
+        body: compactText(typeof proposal.body === "string" ? proposal.body : "Proposal body unavailable."),
+        relation: "novel",
+        target_memory_id: null,
+        confidence: 0.6,
+        rationale: "No deterministic duplicate match was asserted by the worker scaffold.",
+        source_refs: sourceRefsFrom(proposal),
+        memory_refs: [],
+      })),
+    },
+  };
 }
 
 async function main(): Promise<void> {
@@ -103,6 +253,41 @@ async function main(): Promise<void> {
     if (handledIds.has(message.id)) continue;
     handledIds.add(message.id);
 
+    const reviewEnvelope = parseReviewEnvelope(message.text);
+    if (reviewEnvelope) {
+      const expectedAgent =
+        reviewEnvelope.type === "refinery-review-intake"
+          ? "refinery-capture"
+          : nextReviewAgent(String(reviewEnvelope.agent ?? message.senderName));
+      if (expectedAgent !== definition.agentName && !message.mentionNames.includes(definition.agentName)) {
+        log(definition.agentName, `ignored review message expected=${expectedAgent ?? "none"}`);
+        continue;
+      }
+      handled += 1;
+      const built = buildReviewOutput(definition.specialistName, reviewEnvelope);
+      const next = nextReviewAgent(definition.agentName);
+      const content = JSON.stringify({
+        type: "refinery-review-output",
+        runId: reviewEnvelope.runId,
+        step: definition.specialistName,
+        agent: definition.agentName,
+        specialist: definition.specialistName,
+        receivedMessageId: message.id,
+        output: built.output,
+        context: built.context,
+      });
+      await connection.client.callTool({
+        name: connection.sendMessageToolName,
+        arguments: {
+          threadId: message.threadId,
+          content,
+          mentions: next ? [next] : [],
+        },
+      });
+      log(definition.agentName, `review output sent in thread=${message.threadId} next=${next ?? "none"}`);
+      continue;
+    }
+
     const envelope = parseMessageEnvelope(message.text);
     if (!envelope) {
       log(definition.agentName, `ignored non-ping message from ${message.senderName}`);
@@ -120,7 +305,7 @@ async function main(): Promise<void> {
     }
 
     handled += 1;
-    const nextAgent = envelope.sequence[ownIndex + 1] ?? null;
+    const nextPingAgent = envelope.sequence[ownIndex + 1] ?? null;
     const content = JSON.stringify({
       type: "refinery-pong",
       runId: envelope.runId,
@@ -129,7 +314,7 @@ async function main(): Promise<void> {
       agent: definition.agentName,
       specialist: definition.specialistName,
       receivedMessageId: message.id,
-      nextAgent,
+      nextAgent: nextPingAgent,
       purpose: definition.specialist.purpose,
     });
 
@@ -138,10 +323,10 @@ async function main(): Promise<void> {
       arguments: {
         threadId: message.threadId,
         content,
-        mentions: nextAgent ? [nextAgent] : [],
+        mentions: nextPingAgent ? [nextPingAgent] : [],
       },
     });
-    log(definition.agentName, `responded in thread=${message.threadId} next=${nextAgent ?? "none"}`);
+    log(definition.agentName, `responded in thread=${message.threadId} next=${nextPingAgent ?? "none"}`);
   }
 
   log(definition.agentName, `max turns reached (${maxTurns}); exiting cleanly`);

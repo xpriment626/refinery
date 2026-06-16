@@ -5,6 +5,8 @@ import { RefineryError } from "./errors.ts";
 
 export const reviewStepOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
 
+export type ReviewRunMode = "deterministic" | "live" | "coral";
+
 export type ReviewRunStatus = "succeeded" | "failed";
 
 export interface ReviewStepArtifactPaths {
@@ -19,7 +21,7 @@ export interface ReviewArtifactManifest {
   command: "review";
   runId: string;
   runDir: string;
-  mode: "deterministic" | "live";
+  mode: ReviewRunMode;
   adapter: string | null;
   scope: string;
   status: ReviewRunStatus;
@@ -40,6 +42,8 @@ export interface ReviewArtifactManifest {
     rejected?: string;
     status?: string;
     sink?: string;
+    coral?: string;
+    transcript?: string;
     steps: Record<string, ReviewStepArtifactPaths>;
   };
   error?: Record<string, unknown>;
@@ -51,7 +55,7 @@ export interface TrialInspectSummary {
   schemaVersion: typeof refineryReviewSchemaVersion;
   runId: string;
   runDir: string;
-  mode: "deterministic" | "live";
+  mode: ReviewRunMode;
   status: ReviewRunStatus;
   counts: Record<string, number>;
   actionDistribution: Record<string, number>;
@@ -115,6 +119,8 @@ function buildArtifactPaths(runDir: string): ReviewArtifactManifest["artifacts"]
     rejected: existingRel(runDir, "rejected.json"),
     status: existingRel(runDir, "status.json"),
     sink: existingRel(runDir, "sink.json"),
+    coral: existingRel(runDir, "coral.json"),
+    transcript: existingRel(runDir, "transcript.json"),
     steps: buildStepArtifacts(runDir),
   };
 }
@@ -124,7 +130,7 @@ export function writeReviewArtifactManifest(args: {
   runId: string;
   adapterName: string | null;
   scope: string;
-  mode: "deterministic" | "live";
+  mode: ReviewRunMode;
   status: ReviewRunStatus;
   createdAt: string;
   failedAt?: string;

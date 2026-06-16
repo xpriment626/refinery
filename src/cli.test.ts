@@ -5,6 +5,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { openDb, ensureProject } from "../examples/reference-sqlite/db.ts";
+import { refineryCoralAgentNames } from "./coral/definitions.ts";
 
 const cliPath = path.resolve(import.meta.dirname, "cli.ts");
 const packagePath = path.resolve(import.meta.dirname, "..", "package.json");
@@ -59,6 +61,60 @@ export const adapter = {
 `,
   );
   return adapterPath;
+}
+
+function seedReferenceSqliteHome(tmp: string): { home: string; project: string } {
+  const project = path.join(tmp, "project");
+  const home = path.join(project, ".refinery");
+  const rawDir = path.join(home, "raw");
+  fs.mkdirSync(rawDir, { recursive: true });
+  const sourceText =
+    "The team decided Refinery review should be Coral-coordinated by default while emitting proposals only.";
+  const rawPath = path.join(rawDir, "source-fixture");
+  fs.writeFileSync(rawPath, sourceText);
+
+  const db = openDb({
+    home,
+    dbPath: path.join(home, "refinery.db"),
+    rawDir,
+  });
+  try {
+    const projectId = ensureProject(db, project, "fixture-project");
+    db.prepare(
+      `INSERT INTO source
+         (project_id, kind, source_path, session_id, sha256, byte_size, source_mtime, raw_blob, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      projectId,
+      "claude-code-session",
+      path.join(project, "fixture-session.jsonl"),
+      "fixture-session",
+      "source-fixture",
+      Buffer.byteLength(sourceText),
+      new Date().toISOString(),
+      rawPath,
+      new Date().toISOString(),
+    );
+    db.prepare(
+      `INSERT INTO memory
+         (project_id, type, scope, status, body, confidence, provenance_kind, source_id, source_path, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      projectId,
+      "procedural",
+      "project",
+      "active",
+      "Refinery emits proposals and host systems own durable memory mutation.",
+      0.9,
+      "claude-memory-legacy",
+      1,
+      path.join(project, "memory.md"),
+      new Date().toISOString(),
+    );
+  } finally {
+    db.close();
+  }
+  return { home, project };
 }
 
 function makeInvalidSourceAdapter(tmp: string): string {
@@ -267,11 +323,306 @@ function startHangingSink(): Promise<{
   });
 }
 
+function startFakeCoralReviewServer(): Promise<{
+  apiUrl: string;
+  state: {
+    sessionRequest: Record<string, unknown> | null;
+    seedPacket: Record<string, unknown> | null;
+    deleteCount: number;
+    sessionCreateCount: number;
+    threadCreateCount: number;
+  };
+  close: () => Promise<void>;
+}> {
+  const state: {
+    sessionRequest: Record<string, unknown> | null;
+    seedPacket: Record<string, unknown> | null;
+    deleteCount: number;
+  } = {
+    sessionRequest: null,
+    seedPacket: null,
+    deleteCount: 0,
+    sessionCreateCount: 0,
+    threadCreateCount: 0,
+  };
+  const session = { namespace: "refinery-test-namespace", sessionId: "session-1" };
+  const threadId = "thread-1";
+  let messages: Array<Record<string, unknown>> = [];
+
+  function sendJson(res: http.ServerResponse, status: number, body: unknown) {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  }
+
+  function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        try {
+          resolve(body ? JSON.parse(body) as Record<string, unknown> : {});
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  function buildSpecialistMessages(seed: Record<string, unknown>) {
+    const sourceChunks = Array.isArray(seed.source_chunks) ? seed.source_chunks as Array<Record<string, unknown>> : [];
+    const refs = Array.isArray(sourceChunks[0]?.refs) ? sourceChunks[0].refs : [{ source_id: "source:1" }];
+    const body =
+      "Refinery review should run through Coral coordination by default while emitting proposals only.";
+    messages = [
+      {
+        id: "seed-message",
+        threadId,
+        senderName: "refinery-capture",
+        mentionNames: ["refinery-capture"],
+        text: JSON.stringify(seed),
+      },
+      {
+        id: "capture-message",
+        threadId,
+        senderName: "refinery-capture",
+        mentionNames: ["refinery-distillation"],
+        text: JSON.stringify({
+          type: "refinery-review-output",
+          runId: seed.runId,
+          step: "capture",
+          output: {
+            candidates: [
+              {
+                claim: body,
+                source_refs: refs,
+                why_future_useful: "Captures the default product surface for coding-agent use.",
+              },
+            ],
+          },
+        }),
+      },
+      {
+        id: "distillation-message",
+        threadId,
+        senderName: "refinery-distillation",
+        mentionNames: ["refinery-schema"],
+        text: JSON.stringify({
+          type: "refinery-review-output",
+          runId: seed.runId,
+          step: "distillation",
+          output: {
+            distilled: [
+              {
+                body,
+                source_refs: refs,
+                rationale: "Keeps the memory atomic and action-oriented.",
+              },
+            ],
+          },
+        }),
+      },
+      {
+        id: "schema-message",
+        threadId,
+        senderName: "refinery-schema",
+        mentionNames: ["refinery-relevance"],
+        text: JSON.stringify({
+          type: "refinery-review-output",
+          runId: seed.runId,
+          step: "schema",
+          output: {
+            typed: [
+              {
+                body,
+                memory_type: "procedural",
+                primary_type: "procedural",
+                secondary_type: null,
+                type_confidence: 0.86,
+                type_rationale: "It describes how to run the tool.",
+                ambiguities: [],
+                durability: "durable",
+                ttl: null,
+                proposed_scope: "project",
+                action: "create",
+                target_memory_id: null,
+                source_refs: refs,
+              },
+            ],
+          },
+        }),
+      },
+      {
+        id: "relevance-message",
+        threadId,
+        senderName: "refinery-relevance",
+        mentionNames: ["refinery-relationship-review"],
+        text: JSON.stringify({
+          type: "refinery-review-output",
+          runId: seed.runId,
+          step: "relevance",
+          output: {
+            proposals: [
+              {
+                memory_type: "procedural",
+                proposed_scope: "project",
+                body,
+                confidence: 0.82,
+                rationale: "Useful for future coding-agent integrations.",
+                source_refs: refs,
+                action: "create",
+                target_memory_id: null,
+              },
+            ],
+            rejected: [],
+          },
+        }),
+      },
+      {
+        id: "relationship-message",
+        threadId,
+        senderName: "refinery-relationship-review",
+        mentionNames: [],
+        text: JSON.stringify({
+          type: "refinery-review-output",
+          runId: seed.runId,
+          step: "relationship-review",
+          output: {
+            findings: [
+              {
+                body,
+                relation: "novel",
+                target_memory_id: null,
+                confidence: 0.78,
+                rationale: "No duplicate active memory in the provided hints.",
+                source_refs: refs,
+                memory_refs: [],
+              },
+            ],
+          },
+        }),
+      },
+    ];
+  }
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = req.url ?? "";
+      if (req.method === "GET" && url === "/api/v1/registry") {
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (req.method === "GET" && url.startsWith("/api/v1/registry/local/")) {
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (req.method === "POST" && url === "/api/v1/local/session") {
+        state.sessionCreateCount += 1;
+        state.sessionRequest = await readBody(req);
+        sendJson(res, 200, session);
+        return;
+      }
+      if (req.method === "GET" && url.endsWith("/extended")) {
+        sendJson(res, 200, {
+          agents: refineryCoralAgentNames.map((name) => ({
+            name,
+            status: {
+              type: "running",
+              connectionStatus: {
+                type: "connected",
+                communicationStatus: { type: "waiting_message" },
+              },
+            },
+          })),
+          threads: [
+            {
+              id: threadId,
+              name: "Refinery review fixture",
+              participants: refineryCoralAgentNames,
+              messages,
+            },
+          ],
+        });
+        return;
+      }
+      if (req.method === "POST" && url.endsWith("/thread")) {
+        state.threadCreateCount += 1;
+        await readBody(req);
+        sendJson(res, 200, {
+          thread: {
+            id: threadId,
+            name: "Refinery review fixture",
+            participants: refineryCoralAgentNames,
+          },
+        });
+        return;
+      }
+      if (req.method === "POST" && url.endsWith("/thread/message")) {
+        const body = await readBody(req);
+        state.seedPacket = JSON.parse(String(body.content)) as Record<string, unknown>;
+        buildSpecialistMessages(state.seedPacket);
+        sendJson(res, 200, {
+          status: "ok",
+          message: messages[0],
+        });
+        return;
+      }
+      if (req.method === "DELETE" && url.startsWith("/api/v1/local/session/")) {
+        state.deleteCount += 1;
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      sendJson(res, 404, { error: `unhandled ${req.method} ${url}` });
+    } catch (error) {
+      sendJson(res, 500, { error: (error as Error).message });
+    }
+  });
+
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      resolve({
+        apiUrl: `http://127.0.0.1:${address.port}`,
+        state,
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
 function runCli(args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: path.resolve(import.meta.dirname, ".."),
     env: { ...process.env, ...env },
     encoding: "utf8",
+  });
+}
+
+function runCliAsync(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd: path.resolve(import.meta.dirname, ".."),
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("exit", (status) => resolve({ status, stdout, stderr }));
   });
 }
 
@@ -348,7 +699,7 @@ test("refinery review with --json emits structured errors for invalid mode", () 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-json-mode-"));
   const adapterPath = makeFixtureAdapter(tmp);
 
-  const result = runCli(["review", "--adapter", adapterPath, "--mode", "sideways", "--json"]);
+  const result = runCli(["review", "--runtime", "sequential", "--adapter", adapterPath, "--mode", "sideways", "--json"]);
 
   assert.equal(result.status, 1);
   assert.equal(result.stderr, "");
@@ -356,6 +707,183 @@ test("refinery review with --json emits structured errors for invalid mode", () 
   assert.equal(parsed.ok, false);
   assert.equal(parsed.command, "review");
   assert.equal((parsed.error as { code: string }).code, "INVALID_OPTION");
+});
+
+test("refinery review defaults to Coral-managed coordination for Claude Code session sources", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-coral-review-"));
+  const fixture = seedReferenceSqliteHome(tmp);
+  const coral = await startFakeCoralReviewServer();
+  const outputDir = path.join(tmp, "runs");
+  try {
+    const result = await runCliAsync([
+      "review",
+      "--project",
+      fixture.project,
+      "--source",
+      "claude-code-sessions",
+      "--target",
+      "codex-memory",
+      "--home",
+      fixture.home,
+      "--run-id",
+      "coral-review-test",
+      "--output-dir",
+      outputDir,
+      "--coral-url",
+      coral.apiUrl,
+      "--coral-no-start",
+      "--json",
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = parseJsonOutput(result);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.command, "review");
+    assert.equal(parsed.mode, "coral");
+    assert.equal((parsed.adapter as { name: string }).name, "reference-sqlite");
+    assert.equal(parsed.scope, "project");
+    assert.equal((parsed.counts as { sources: number }).sources, 1);
+    assert.equal((parsed.counts as { activeMemories: number }).activeMemories, 1);
+    assert.equal((parsed.counts as { proposals: number }).proposals, 1);
+    assert.equal((parsed.proposals as Array<{ action: string; lifecycle: string; sourceRefs: unknown[] }>)[0].action, "create");
+    assert.equal((parsed.proposals as Array<{ lifecycle: string }>)[0].lifecycle, "proposed");
+    assert.equal((parsed.proposals as Array<{ sourceRefs: unknown[] }>)[0].sourceRefs.length > 0, true);
+    assert.equal((parsed.metadata as Record<string, unknown>).writesAttempted, false);
+
+    const runtime = (parsed.metadata as { runtime: Record<string, unknown> }).runtime;
+    assert.equal(runtime.kind, "coral");
+    assert.equal(runtime.serverMode, "attached");
+    assert.equal(runtime.namespace, "refinery-test-namespace");
+    assert.equal(runtime.sessionId, "session-1");
+    assert.equal(runtime.threadId, "thread-1");
+    assert.deepEqual(runtime.agents, refineryCoralAgentNames);
+    assert.equal(coral.state.deleteCount, 1);
+    const sessionRequest = coral.state.sessionRequest as {
+      agentGraphRequest: { agents: unknown[]; groups: string[][] };
+    };
+    assert.deepEqual(sessionRequest.agentGraphRequest.groups, [refineryCoralAgentNames]);
+    assert.equal(sessionRequest.agentGraphRequest.agents.length, 5);
+
+    const runDir = path.join(outputDir, "coral-review-test");
+    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8"));
+    assert.equal(manifest.mode, "coral");
+    assert.equal(manifest.runtime.threadId, "thread-1");
+    assert.equal(manifest.artifacts.coral, "coral.json");
+    assert.equal(manifest.artifacts.transcript, "transcript.json");
+
+    const intake = JSON.parse(fs.readFileSync(path.join(runDir, "input.json"), "utf8"));
+    assert.equal(intake.source, "claude-code-sessions");
+    assert.equal(intake.target, "codex-memory");
+    assert.equal(intake.noApply, true);
+    assert.equal(intake.source_chunks.length, 1);
+    assert.match(intake.source_chunks[0].text, /Coral-coordinated by default/);
+    assert.equal(coral.state.seedPacket?.type, "refinery-review-intake");
+    assert.equal(coral.state.seedPacket?.target, "codex-memory");
+
+    const coralArtifact = JSON.parse(fs.readFileSync(path.join(runDir, "coral.json"), "utf8"));
+    assert.equal(coralArtifact.session.sessionId, "session-1");
+    assert.equal(coralArtifact.threadId, "thread-1");
+    assert.equal(coralArtifact.specialistMessages.length, 5);
+  } finally {
+    await coral.close();
+  }
+});
+
+test("refinery review can attach to an existing Coral session and thread without tearing them down", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-coral-existing-session-"));
+  const fixture = seedReferenceSqliteHome(tmp);
+  const coral = await startFakeCoralReviewServer();
+  const outputDir = path.join(tmp, "runs");
+  try {
+    const result = await runCliAsync([
+      "review",
+      "--project",
+      fixture.project,
+      "--source",
+      "claude-code-sessions",
+      "--target",
+      "codex-memory",
+      "--home",
+      fixture.home,
+      "--run-id",
+      "coral-existing-test",
+      "--output-dir",
+      outputDir,
+      "--coral-url",
+      coral.apiUrl,
+      "--coral-no-start",
+      "--coral-namespace",
+      "existing-namespace",
+      "--coral-session-id",
+      "existing-session",
+      "--coral-thread-id",
+      "thread-1",
+      "--json",
+    ]);
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const parsed = parseJsonOutput(result);
+    const runtime = (parsed.metadata as { runtime: Record<string, unknown> }).runtime;
+    assert.equal(runtime.namespace, "existing-namespace");
+    assert.equal(runtime.sessionId, "existing-session");
+    assert.equal(runtime.threadId, "thread-1");
+    assert.equal(runtime.sessionCreated, false);
+    assert.equal(runtime.threadCreated, false);
+    assert.equal(coral.state.sessionCreateCount, 0);
+    assert.equal(coral.state.threadCreateCount, 0);
+    assert.equal(coral.state.deleteCount, 0);
+  } finally {
+    await coral.close();
+  }
+});
+
+test("refinery trial inspect summarizes Coral review artifacts without rerunning", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-coral-inspect-"));
+  const fixture = seedReferenceSqliteHome(tmp);
+  const coral = await startFakeCoralReviewServer();
+  const outputDir = path.join(tmp, "runs");
+  try {
+    const review = await runCliAsync([
+      "review",
+      "--project",
+      fixture.project,
+      "--source",
+      "claude-code-sessions",
+      "--target",
+      "codex-memory",
+      "--home",
+      fixture.home,
+      "--run-id",
+      "coral-inspect-test",
+      "--output-dir",
+      outputDir,
+      "--coral-url",
+      coral.apiUrl,
+      "--coral-no-start",
+      "--json",
+    ]);
+    assert.equal(review.status, 0, review.stderr || review.stdout);
+
+    const inspect = runCli([
+      "trial",
+      "inspect",
+      "--run-dir",
+      path.join(outputDir, "coral-inspect-test"),
+      "--json",
+    ]);
+
+    assert.equal(inspect.status, 0, inspect.stderr);
+    const parsed = parseJsonOutput(inspect);
+    assert.equal(parsed.command, "trial inspect");
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.mode, "coral");
+    assert.deepEqual(parsed.lifecycleDistribution, { proposed: 1 });
+    assert.equal((parsed.artifacts as Record<string, string>).coral, "coral.json");
+    assert.equal((parsed.manifest as { runtime: { sessionId: string; threadId: string } }).runtime.sessionId, "session-1");
+    assert.equal((parsed.manifest as { runtime: { threadId: string } }).runtime.threadId, "thread-1");
+  } finally {
+    await coral.close();
+  }
 });
 
 test("refinery adapter check with --json emits structured errors for adapter load failure", () => {
@@ -375,7 +903,7 @@ test("refinery review with --json emits structured errors for adapter validation
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-adapter-validation-fail-"));
   const adapterPath = makeShapeInvalidAdapter(tmp);
 
-  const result = runCli(["review", "--adapter", adapterPath, "--json"]);
+  const result = runCli(["review", "--runtime", "sequential", "--adapter", adapterPath, "--json"]);
 
   assert.equal(result.status, 1);
   assert.equal(result.stderr, "");
@@ -393,6 +921,8 @@ test("refinery review live with --json emits structured errors for model caller 
   const result = runCli(
     [
       "review",
+      "--runtime",
+      "sequential",
       "--mode",
       "live",
       "--adapter",
@@ -420,14 +950,14 @@ test("refinery review validates source limits and run ids before writing artifac
   const adapterPath = makeFixtureAdapter(tmp);
 
   for (const args of [
-    ["review", "--adapter", adapterPath, "--source-limit", "not-a-number", "--json"],
-    ["review", "--adapter", adapterPath, "--source-limit", "-1", "--json"],
-    ["review", "--adapter", adapterPath, "--source-limit", "0", "--json"],
-    ["review", "--adapter", adapterPath, "--source-limit", "1.5", "--json"],
-    ["review", "--adapter", adapterPath, "--source-char-limit", "0", "--json"],
-    ["review", "--adapter", adapterPath, "--source-char-limit", "1.5", "--json"],
-    ["review", "--adapter", adapterPath, "--run-id", "../escape", "--json"],
-    ["review", "--adapter", adapterPath, "--run-id", "bad:name", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--source-limit", "not-a-number", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--source-limit", "-1", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--source-limit", "0", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--source-limit", "1.5", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--source-char-limit", "0", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--source-char-limit", "1.5", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--run-id", "../escape", "--json"],
+    ["review", "--runtime", "sequential", "--adapter", adapterPath, "--run-id", "bad:name", "--json"],
   ]) {
     const result = runCli(args);
     assert.equal(result.status, 1, args.join(" "));
@@ -444,6 +974,8 @@ test("refinery review emits proposal JSON and deterministic dry-run artifacts", 
 
   const result = runCli([
     "review",
+    "--runtime",
+    "sequential",
     "--adapter",
     adapterPath,
     "--scope",
@@ -518,6 +1050,8 @@ test("refinery trial inspect summarizes deterministic run artifacts without reru
 
   const review = runCli([
     "review",
+    "--runtime",
+    "sequential",
     "--adapter",
     adapterPath,
     "--scope",
@@ -572,6 +1106,8 @@ export async function callModel({ specialist }) {
   const result = runCli(
     [
       "review",
+      "--runtime",
+      "sequential",
       "--mode",
       "live",
       "--adapter",
@@ -641,6 +1177,8 @@ export async function callModel() {
   const review = runCli(
     [
       "review",
+      "--runtime",
+      "sequential",
       "--mode",
       "live",
       "--adapter",
@@ -701,6 +1239,8 @@ test("refinery review sink non-2xx emits JSON failure and failed-run artifacts",
   try {
     const result = runCli([
       "review",
+      "--runtime",
+      "sequential",
       "--adapter",
       adapterPath,
       "--scope",
@@ -735,6 +1275,8 @@ test("refinery review sink timeout emits JSON failure without hanging", async ()
   try {
     const result = runCli([
       "review",
+      "--runtime",
+      "sequential",
       "--adapter",
       adapterPath,
       "--scope",
@@ -779,6 +1321,8 @@ export const sink = {
 
   const result = runCli([
     "review",
+    "--runtime",
+    "sequential",
     "--adapter",
     adapterPath,
     "--scope",
@@ -828,6 +1372,8 @@ export async function callModel({ specialist }) {
   const result = runCli(
     [
       "review",
+      "--runtime",
+      "sequential",
       "--mode",
       "live",
       "--adapter",
@@ -910,6 +1456,8 @@ test("downstream module compatibility fixture parses CLI contracts without prose
 
   const review = runBin([
     "review",
+    "--runtime",
+    "sequential",
     "--adapter",
     adapterPath,
     "--scope",
@@ -944,6 +1492,8 @@ test("downstream module compatibility fixture parses CLI contracts without prose
   const failed = runBin(
     [
       "review",
+      "--runtime",
+      "sequential",
       "--mode",
       "live",
       "--adapter",
@@ -1006,6 +1556,8 @@ test("refinery review writes to REFINERY_HOME trials by default", () => {
   const result = runCli(
     [
       "review",
+      "--runtime",
+      "sequential",
       "--adapter",
       adapterPath,
       "--scope",
