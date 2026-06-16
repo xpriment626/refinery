@@ -1,0 +1,23 @@
+edition = 4
+
+[agent]
+name = "refinery-schema"
+version = "0.1.0"
+description = "Refinery Schema specialist as a Coral executable agent."
+summary = "Schema specialist for proposal contract checks."
+readme = "Executable Refinery specialist. Worker owns Coral wait/send and maps to src/core/specialists/schema."
+
+[agent.license]
+type = "spdx"
+expression = "MIT"
+
+[options]
+MODEL_NAME = { type = "string", default = "deepseek/deepseek-v4-pro" }
+MODEL_BASE_URL = { type = "string", default = "https://openrouter.ai/api/v1" }
+REASONING_EFFORT = { type = "string", default = "low" }
+REFINERY_CORAL_MAX_TURNS = { type = "string", default = "1" }
+
+[runtimes.executable]
+path = "../run-worker.sh"
+arguments = ["--specialist", "schema"]
+transport = "streamable_http"

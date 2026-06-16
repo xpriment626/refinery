@@ -19,6 +19,8 @@
     "experiment:relevance": "node examples/reference-sqlite/experiments/relevance.ts",
     "experiment:relationship-review": "node examples/reference-sqlite/experiments/relationship-review.ts",
     "experiment:workflow": "node examples/reference-sqlite/experiments/workflow.ts",
+    "coral:worker": "node src/coral/worker.ts",
+    "coral:smoke": "node src/coral/smoke.ts",
     "test": "node --test $(find src examples -name '*.test.ts' -print)"
   },
   "engines": {
@@ -27,6 +29,7 @@
   "dependencies": {
     "@ai-sdk/openai": "^3.0.67",
     "@mastra/core": "^1.40.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
   }
 }
