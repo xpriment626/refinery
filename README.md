@@ -1,8 +1,8 @@
 # refinery
 
 Refinery is a Coral-first memory-maintenance CLI and storage-agnostic refinement
-core. Its default product path runs coordinated Coral specialists over local
-session history and existing memory candidates, then emits reviewable proposal
+core. Its default product path runs coordinated Coral specialists over Codex
+memory files and existing memory candidates, then emits reviewable proposal
 artifacts for the host app or coding agent to apply elsewhere.
 
 The core package does not require `refinery.db`, does not own customer memory
@@ -48,11 +48,19 @@ refinery instance init --from /path/to/old/.refinery --reset --json
 # Validate an agent-facing memory-store adapter.
 refinery adapter check --adapter ./my-memory-adapter.mjs --json
 
+# Probe the built-in bounded Codex memory adapter.
+refinery adapter check --adapter codex-memory --probe --json
+
 # Probe adapter reads and validate returned record shapes.
 refinery adapter check --adapter ./my-memory-adapter.mjs --probe --scope project --json
 
-# Run the default live Coral-coordinated dry-run review over local Claude Code sessions.
-refinery review --project . --source claude-code-sessions --target codex-memory --json
+# Run the default live Coral-coordinated dry-run review over ~/.codex/memories.
+refinery review --project . --source codex-memory --target codex-memory --json
+
+# Ask a pointed memory-maintenance question.
+refinery review --project . --source codex-memory --target codex-memory \
+  --intent stale-audit \
+  --request "Find Codex memories that may be stale after recent repo moves." --json
 
 # Advanced local debugging: run the old sequential adapter-backed scaffold.
 refinery review --runtime sequential --adapter ./my-memory-adapter.mjs --scope project --json
@@ -64,7 +72,7 @@ refinery review --runtime sequential --mode live --adapter ./my-memory-adapter.m
 refinery trial inspect --run-dir ./.refinery/trials/<run-id> --json
 
 # Deliver the final review bundle to an app-owned callback/sink.
-refinery review --project . --source claude-code-sessions --target codex-memory \
+refinery review --project . --source codex-memory --target codex-memory \
   --sink-url https://your-app.example/refinery/proposals \
   --sink-timeout-ms 10000 --json
 
@@ -72,17 +80,17 @@ refinery review --project . --source claude-code-sessions --target codex-memory 
 refinery module check --descriptor ./refinery-module.json --json
 
 # Run the same CLI path against an existing Coral server without starting one.
-refinery review --project . --source claude-code-sessions --target codex-memory \
+refinery review --project . --source codex-memory --target codex-memory \
   --coral-url http://localhost:5555 --coral-no-start --json
 
 # Advanced attachment: reuse a caller-owned Coral session/thread.
-refinery review --project . --source claude-code-sessions --target codex-memory \
+refinery review --project . --source codex-memory --target codex-memory \
   --coral-url http://localhost:5555 --coral-no-start \
   --coral-namespace existing-namespace \
   --coral-session-id existing-session --coral-thread-id existing-thread --json
 
 # From a local checkout before linking/installing the bin:
-node src/cli.ts review --project . --source claude-code-sessions --target codex-memory --json
+node src/cli.ts review --project . --source codex-memory --target codex-memory --json
 
 # Run the storage-agnostic MCP stdio server.
 npm run mcp
@@ -110,8 +118,8 @@ and hand proposal bundles to their own approval/apply path.
 The CLI currently exposes:
 
 - `refinery instance init --home <dir> --from <dir> --reset --json`
-- `refinery adapter check --adapter <path|reference-sqlite> --probe --scope <scope> --json`
-- `refinery review --project <dir> --source claude-code-sessions --target codex-memory --home <dir> --run-id <id> --sink-url <url> --sink-timeout-ms <ms> --json`
+- `refinery adapter check --adapter <path|reference-sqlite|codex-memory> --memory-home <dir> --probe --scope <scope> --json`
+- `refinery review --project <dir> --source codex-memory --target codex-memory --memory-home <dir> --intent <intent> --request <text> --home <dir> --run-id <id> --sink-url <url> --sink-timeout-ms <ms> --json`
 - `refinery trial inspect --run-dir <dir> --json`
 - `refinery module check --descriptor <path> --json`
 
@@ -132,10 +140,10 @@ JSON output is the machine contract. Successful review payloads include
 `error.code`, `error.message`, optional `error.phase`, and `runId`/`runDir` when
 available. Non-JSON terminal usage still reports failures on stderr.
 
-Review metadata records reproducibility inputs: mode, adapter, scope, creation
-time, sink URL, source limits, specialist order, runtime adapter, Coral
-namespace/session/thread refs, and redacted model provider/base URL/model name
-for live runs. API keys are never emitted.
+Review metadata records reproducibility inputs: mode, adapter, scope, intent,
+request, creation time, sink URL, source limits, specialist order, runtime
+adapter, Coral namespace/session/thread refs, and redacted model provider/base
+URL/model name for live runs. API keys are never emitted.
 
 Modes:
 
@@ -248,6 +256,15 @@ small `listSourceEvidence` and `listActiveMemories` reads and validate returned
 record shapes. Probe mode expects opaque string IDs, source text, and active
 memory `id`, `type`, `scope`, `status`, and `body` fields.
 
+The built-in `codex-memory` adapter is a bounded filesystem adapter for
+`~/.codex/memories`. Pass `--memory-home <dir>` to target another directory
+named `memories`; Refinery intentionally rejects broader parent directories and
+does not scan all of `~/.codex`. The adapter indexes `MEMORY.md`,
+`memory_summary.md`, `rollout_summaries/*.md`, and
+`extensions/ad_hoc/**/*.md` as source evidence and active-memory candidates with
+stable opaque IDs, origin kind, relative file path, heading/line provenance
+when available, and rollout thread/update metadata when present.
+
 Agent-facing records should use opaque string IDs. Numeric database IDs are an
 adapter implementation detail and should not leak into core contracts.
 
@@ -269,6 +286,20 @@ Newly emitted proposals default to `lifecycle: "proposed"`. `accepted` means a
 reviewer or workflow accepted the recommendation. `applied_externally` means a
 host app or customer-owned system performed the durable mutation. Refinery core
 does not perform that mutation.
+
+Review intents are strict enum values:
+
+```text
+general-review, stale-audit, forget-candidates,
+update-candidates, conflict-audit, scope-audit
+```
+
+Use `--intent <intent>` with optional `--request <text>` to make a review more
+pointed, such as stale-memory review or forget-candidate discovery. The intent
+is included in CLI validation, input packets, Coral seed messages, specialist
+payloads, metadata, manifests, and final JSON. Proposal records may include
+intent-specific fields: `stalenessReason`, `forgetReason`, `updateReason`,
+`conflictReason`, `scopeReason`, `replacementBody`, and `ambiguities`.
 
 ### Module Descriptor Contract
 
@@ -409,7 +440,8 @@ involve Coral.
 
 ## Harness Surfaces
 
-Refinery core does not depend on Pi, OpenCode, Cursor, or Coral.
+Refinery's core specialist contracts do not depend on Pi, OpenCode, Cursor, or
+Coral. The default CLI product path does use Coral coordination.
 
 - Pi is a candidate runtime for optional interactive workbench sessions,
   specialist follow-up, and custom harnesses.
