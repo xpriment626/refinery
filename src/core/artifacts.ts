@@ -6,7 +6,7 @@ import { type ReviewIntent } from "./intents.ts";
 
 export const reviewStepOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
 
-export type ReviewRunMode = "deterministic" | "live" | "coral";
+export type ReviewRunMode = "coral";
 
 export type ReviewRunStatus = "succeeded" | "failed";
 

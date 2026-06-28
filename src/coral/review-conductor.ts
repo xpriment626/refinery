@@ -82,7 +82,7 @@ export interface CoralReviewRuntimeOptions {
 export interface CoralReviewRunOptions {
   adapter: MemoryStoreAdapter;
   project: string;
-  source: "claude-code-sessions" | "codex-memory";
+  source: "codex-memory";
   target: "codex-memory";
   scope: string;
   runId: string;
@@ -97,7 +97,7 @@ export interface CoralReviewRunOptions {
 
 export interface CoralReviewRunResult extends ReviewRunResult {
   mode: "coral";
-  source: "claude-code-sessions" | "codex-memory";
+  source: "codex-memory";
   target: "codex-memory";
   project: string;
   relationshipReview: unknown;

@@ -3,32 +3,22 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Refinery — storage-agnostic memory refinement core with reference adapters.",
+  "description": "Refinery — Codex-first memory review CLI.",
   "bin": {
-    "refinery": "src/cli.ts",
-    "refinery-reference-sqlite": "examples/reference-sqlite/cli.ts"
+    "refinery": "src/cli.ts"
   },
   "scripts": {
     "cli": "node src/cli.ts",
-    "reference:sqlite": "node examples/reference-sqlite/cli.ts",
     "mcp": "node src/mcp.ts",
-    "mcp:reference-sqlite": "node examples/reference-sqlite/mcp.ts",
-    "experiment:capture": "node examples/reference-sqlite/experiments/capture.ts",
-    "experiment:distillation": "node examples/reference-sqlite/experiments/distillation.ts",
-    "experiment:schema": "node examples/reference-sqlite/experiments/schema.ts",
-    "experiment:relevance": "node examples/reference-sqlite/experiments/relevance.ts",
-    "experiment:relationship-review": "node examples/reference-sqlite/experiments/relationship-review.ts",
-    "experiment:workflow": "node examples/reference-sqlite/experiments/workflow.ts",
     "coral:worker": "node src/coral/worker.ts",
     "coral:smoke": "node src/coral/smoke.ts",
-    "test": "node --test $(find src examples -name '*.test.ts' -print)"
+    "test": "node --test $(find src -name '*.test.ts' -print)"
   },
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.67",
-    "@mastra/core": "^1.40.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
   }

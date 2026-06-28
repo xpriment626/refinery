@@ -3,7 +3,6 @@ export { distillationSpecialist } from "./distillation.ts";
 export { schemaSpecialist } from "./schema.ts";
 export { relevanceSpecialist } from "./relevance.ts";
 export { relationshipReviewSpecialist } from "./relationship-review.ts";
-export { createSequentialRefinementHarness } from "./harness.ts";
 export {
   buildSpecialistInstructions,
   buildSpecialistUserPrompt,

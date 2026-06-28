@@ -18,7 +18,7 @@ import {
   schemaSpecialist,
 } from "../core/specialists/index.ts";
 import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
-import { callOpenRouterChatWithMetadata, type OpenRouterCallMetadata } from "../runtimes/mastra/runtime.ts";
+import { callOpenRouterChatWithMetadata, type OpenRouterCallMetadata } from "../core/model-client.ts";
 import {
   getCoralAgentBySpecialistName,
   getSpecialistNameArg,

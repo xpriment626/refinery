@@ -44,7 +44,7 @@ function seedCodexMemoryHome(): string {
       "",
       "### /Users/bambozlor/Lab/Research-Desk",
       "",
-      "- refinery CLI module-ready substrate and release hygiene: `manifest.json`, `trial inspect`, `module check`",
+      "- refinery Codex-first CLI substrate and release hygiene: `doctor`, `review`, `manifest.json`, `trial inspect`",
     ].join("\n"),
   );
   fs.writeFileSync(
@@ -55,11 +55,11 @@ function seedCodexMemoryHome(): string {
       "rollout_path: /Users/bambozlor/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl",
       "cwd: /Users/bambozlor/Lab/Research-Desk",
       "",
-      "# Refinery was hardened into a module-ready CLI substrate",
+      "# Refinery was hardened into a Codex-first CLI substrate",
       "",
       "Reusable knowledge:",
       "",
-      "- The stable machine-facing CLI surfaces are `review`, `trial inspect`, and `module check`.",
+      "- The stable machine-facing CLI surfaces are `doctor`, `review`, and `trial inspect`.",
     ].join("\n"),
   );
   fs.writeFileSync(

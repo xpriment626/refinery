@@ -83,4 +83,3 @@ export function parseWaitForMentionResult(result: unknown): IncomingCoralMessage
       : [],
   };
 }
-

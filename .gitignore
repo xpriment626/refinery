@@ -1,4 +1,4 @@
-# local Refinery instance data (DB + raw source store) — never committed
+# local Refinery review trials and runtime state
 .refinery/
 .refinery.archive-*/
 .env
