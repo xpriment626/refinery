@@ -4,7 +4,13 @@ import { refineryReviewSchemaVersion } from "./adapter.ts";
 import { RefineryError } from "./errors.ts";
 import { type ReviewIntent } from "./intents.ts";
 
-export const reviewStepOrder = ["capture", "distillation", "schema", "relevance", "relationship-review"];
+export const reviewStepOrder = [
+  "claim-scout",
+  "memory-cartographer",
+  "evidence-auditor",
+  "proposal-editor",
+  "decision-synthesizer",
+];
 
 export type ReviewRunMode = "coral";
 
@@ -43,6 +49,9 @@ export interface ReviewArtifactManifest {
     review?: string;
     proposals?: string;
     rejected?: string;
+    claims?: string;
+    challengeLedger?: string;
+    deliberation?: string;
     status?: string;
     sink?: string;
     coral?: string;
@@ -63,6 +72,12 @@ export interface TrialInspectSummary {
   counts: Record<string, number>;
   actionDistribution: Record<string, number>;
   lifecycleDistribution: Record<string, number>;
+  deliberation: {
+    claims: number;
+    challenges: number;
+    moves: number;
+    unresolvedChallenges: number;
+  };
   steps: Record<string, { input: boolean; outputRaw: boolean; outputParsed: boolean }>;
   artifacts: ReviewArtifactManifest["artifacts"];
   sink?: Record<string, unknown>;
@@ -120,6 +135,9 @@ function buildArtifactPaths(runDir: string): ReviewArtifactManifest["artifacts"]
     review: existingRel(runDir, "review.json"),
     proposals: existingRel(runDir, "proposals.json"),
     rejected: existingRel(runDir, "rejected.json"),
+    claims: existingRel(runDir, "claims.json"),
+    challengeLedger: existingRel(runDir, "challenge-ledger.json"),
+    deliberation: existingRel(runDir, "deliberation.json"),
     status: existingRel(runDir, "status.json"),
     sink: existingRel(runDir, "sink.json"),
     coral: existingRel(runDir, "coral.json"),
@@ -227,6 +245,19 @@ function countByStringField(records: Array<Record<string, unknown>>, field: stri
   return counts;
 }
 
+function deliberationSummary(runDir: string): TrialInspectSummary["deliberation"] {
+  const parsed = readOptionalObject(runDir, "deliberation.json");
+  const summary = parsed && typeof parsed.summary === "object" && parsed.summary !== null && !Array.isArray(parsed.summary)
+    ? parsed.summary as Record<string, unknown>
+    : {};
+  return {
+    claims: typeof summary.claims === "number" ? summary.claims : readArrayCount(runDir, "claims.json"),
+    challenges: typeof summary.challenges === "number" ? summary.challenges : readArrayCount(runDir, "challenge-ledger.json"),
+    moves: typeof summary.moves === "number" ? summary.moves : 0,
+    unresolvedChallenges: typeof summary.unresolvedChallenges === "number" ? summary.unresolvedChallenges : 0,
+  };
+}
+
 function stepPresence(runDir: string): TrialInspectSummary["steps"] {
   return Object.fromEntries(
     reviewStepOrder.map((step) => [
@@ -266,6 +297,7 @@ export function inspectReviewRun(runDirInput: string): TrialInspectSummary {
     },
     actionDistribution: countByStringField(proposals, "action"),
     lifecycleDistribution: countByStringField(proposals, "lifecycle"),
+    deliberation: deliberationSummary(runDir),
     steps: stepPresence(runDir),
     artifacts: manifest.artifacts,
     ...(sink ? { sink } : {}),

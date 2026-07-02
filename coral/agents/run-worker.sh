@@ -13,5 +13,7 @@ else
 fi
 
 cd "${REPO_ROOT}"
+if [[ -f "${REPO_ROOT}/dist/coral/worker.js" ]]; then
+  exec "${NODE_BIN}" dist/coral/worker.js "$@"
+fi
 exec "${NODE_BIN}" src/coral/worker.ts "$@"
-

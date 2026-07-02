@@ -23,6 +23,9 @@ surface.
 # Verify the local Codex memory source is readable.
 refinery doctor --json
 
+# Verify the installed CLI version.
+refinery version --json
+
 # Verify a non-default Codex memory directory.
 refinery doctor --memory-home /path/to/memories --json
 
@@ -33,8 +36,14 @@ refinery review \
   --request "Find Codex memories that may be stale after recent repo moves." \
   --json
 
+# Seed a live Coral Console debate/critique session without writing run artifacts.
+refinery console run \
+  --project . \
+  --intent stale-audit \
+  --json
+
 # Inspect an existing run without invoking Coral or a model.
-refinery trial inspect --run-dir ./.refinery/trials/<run-id> --json
+refinery trial inspect --run-dir ~/.refinery/runs/by-project/<project-key>/<run-id> --json
 ```
 
 The CLI always emits structured JSON for these commands. Failures use
@@ -60,9 +69,16 @@ database IDs or file offsets.
 
 ## Review
 
-`refinery review` is dry-run only. It starts or targets Coral, creates a bounded
-session/thread, runs the five Refinery specialists, writes a trial directory,
-and returns proposed memory-maintenance actions.
+`refinery review` is dry-run only. It starts or targets Coral, creates bounded
+proposal and critique threads, runs the five Refinery specialists, writes a run
+directory, and returns proposed memory-maintenance actions.
+
+The default workflow is debate/critique. Claim Scout extracts candidate memory
+claims, Memory Cartographer maps nearby active memories, Evidence Auditor checks
+support and provenance, Proposal Editor turns surviving claims into typed
+proposal packets, and Decision Synthesizer resolves challenges into final
+proposals, rejected candidates, and unresolved questions. Each specialist
+message is persisted under that step's `messages/` artifact directory.
 
 Supported review intents:
 
@@ -94,31 +110,42 @@ owned by the caller.
 
 ## Trial Artifacts
 
-Local runtime state is limited to review trials by default:
+Runtime state is globally organized by default:
 
 ```text
-.refinery/
-  trials/
-    <run-id>/
-      input.json
-      manifest.json
-      metadata.json
-      proposals.json
-      rejected.json
-      review.json
-      coral.json
-      transcript.json
-      steps/
-        capture/{input.json,output.raw.md,output.parsed.json}
-        distillation/{input.json,output.raw.md,output.parsed.json}
-        schema/{input.json,output.raw.md,output.parsed.json}
-        relevance/{input.json,output.raw.md,output.parsed.json}
-        relationship-review/{input.json,output.raw.md,output.parsed.json}
+~/.refinery/
+  config/
+  credentials/
+  runs/
+    by-project/
+      <project-key>/
+        <run-id>/
+          input.json
+          manifest.json
+          metadata.json
+          proposals.json
+          rejected.json
+          claims.json
+          challenge-ledger.json
+          deliberation.json
+          review.json
+          coral.json
+          transcript.json
+          steps/
+            claim-scout/{input.json,output.raw.md,output.parsed.json}
+            memory-cartographer/{input.json,output.raw.md,output.parsed.json}
+            evidence-auditor/{input.json,output.raw.md,output.parsed.json}
+            proposal-editor/{input.json,output.raw.md,output.parsed.json}
+            decision-synthesizer/{input.json,output.raw.md,output.parsed.json}
 ```
 
 Failed reviews that reach a run directory write `status.json`, failed
 `review.json`, and any available step error artifacts. Use `trial inspect` for a
 stable summary instead of scraping file paths.
+
+Use `--home ./.refinery` only when you intentionally want project-local
+Refinery state. The default keeps run artifacts and future credentials/config
+global while grouping runs by project key.
 
 ## Coral Runtime
 
@@ -135,12 +162,55 @@ refinery review \
 
 Caller-owned Coral sessions and threads are not torn down by Refinery.
 
+## Console Mode
+
+`refinery console run` is a local development command for Coral Console
+inspection. It reads the bounded Codex memory source, starts Coral when
+`--coral-url` is not provided, creates a session and thread set, seeds the
+default debate/critique workflow, prints the console URL and session
+identifiers, and does not write run artifacts.
+
+The default console topology is `debate-critique`. When Refinery starts the
+Coral server, the command stays in the foreground so the Console remains
+available until interrupted.
+
 ## Development
 
 ```bash
 PATH="$HOME/.nvm/versions/node/v24.10.0/bin:$PATH" npm test
+npm run build
+npm link
+refinery version --json
 ```
 
 The test suite covers the Codex memory adapter, Codex-first CLI contract, Coral
 worker/conductor helpers, artifact inspection, model client, intents, MCP
 specialist prompt tools, and specialist contracts.
+
+### Codex Skill
+
+Use one Codex skill for Refinery memory work:
+
+```text
+$refinery
+```
+
+Example prompt:
+
+```text
+Use $refinery to inspect the current project Codex memories with intent update-candidates, source-limit 1, source-char-limit 2500, and summarize the proposed edits.
+```
+
+The companion skill should be installed once in the Codex global skill root:
+
+```text
+~/.codex/skills/refinery/SKILL.md
+```
+
+Do not keep repo-local alternate copies of the Refinery skill; they create
+duplicate suggestions and teach agents old invocation names. `$refinery`
+defaults to live `refinery review`. For deterministic rehearsal only:
+
+```bash
+refinery dev fixture memory-proposal --json
+```

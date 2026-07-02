@@ -74,6 +74,7 @@ export interface MemoryProposal {
   rationale: string;
   sourceRefs: unknown[];
   targetMemoryId: string | null;
+  targetMemoryIds?: string[];
   stalenessReason?: string | null;
   forgetReason?: string | null;
   updateReason?: string | null;

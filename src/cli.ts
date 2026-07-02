@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   probeMemoryStoreAdapter,
+  refineryReviewSchemaVersion,
   validateMemoryStoreAdapter,
 } from "./core/adapter.ts";
 import {
@@ -16,24 +18,31 @@ import { resolveRefineryPaths } from "./core/paths.ts";
 import { parseReviewIntent } from "./core/intents.ts";
 import { type ReviewSinkOptions } from "./core/review.ts";
 import { createCodexMemoryAdapter, resolveCodexMemoryHome } from "./adapters/codex-memory.ts";
-import { runCoralReview } from "./coral/review-conductor.ts";
+import { runCoralReview, startCoralConsoleRun, type CoralConsoleRunSession } from "./coral/review-conductor.ts";
+import { parseReviewTopology } from "./coral/topology.ts";
 
 const HELP = `refinery — Codex-first memory review CLI
 
 USAGE
   refinery doctor [--memory-home <dir>] [--json]
+  refinery version [--json]
   refinery review [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
+  refinery console run [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--run-id <id>] [--coral-url <url>] [--json]
+  refinery dev fixture memory-proposal [--json]
   refinery trial inspect --run-dir <dir> [--json]
 
 Refinery reads bounded Codex memory files, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
-It does not approve, apply, or write durable memory. Local runtime state is limited to $PWD/.refinery/trials unless REFINERY_HOME or --home is set.`;
+It does not approve, apply, or write durable memory. Runtime state defaults to ~/.refinery/runs/by-project/<project-key>.
+Use console run for local Coral Console trials that seed a live session without writing run artifacts.`;
+
+type ParseArgOptions = NonNullable<Parameters<typeof parseArgs>[0]>["options"];
 
 function stableJson(value: unknown): string {
   return JSON.stringify(value, null, 2) + "\n";
 }
 
-function defaultRunId(): string {
-  return `review-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+function defaultRunId(prefix = "review"): string {
+  return `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 }
 
 async function loadSink(spec: string): Promise<ReviewSinkOptions> {
@@ -49,7 +58,7 @@ async function loadSink(spec: string): Promise<ReviewSinkOptions> {
     );
   }
   const sink = mod.sink ?? mod.default;
-  if (!sink || typeof sink !== "object" || typeof sink.url !== "string") {
+  if (!sink || typeof sink !== "object" || !("url" in sink) || typeof sink.url !== "string") {
     throw new RefineryError(
       "SINK_LOAD_FAILED",
       "sink module must export { sink: { url, headers? } } or default { url, headers? }",
@@ -59,13 +68,13 @@ async function loadSink(spec: string): Promise<ReviewSinkOptions> {
   return sink as ReviewSinkOptions;
 }
 
-function parseOptionArgs(args: string[], options: Parameters<typeof parseArgs>[0]["options"]) {
+function parseOptionArgs(args: string[], options: ParseArgOptions): Record<string, unknown> {
   try {
     return parseArgs({
       args,
       options,
       allowPositionals: false,
-    }).values;
+    }).values as Record<string, unknown>;
   } catch (error) {
     throw new RefineryError(
       "INVALID_OPTION",
@@ -119,6 +128,8 @@ function ensureRunDirInside(outputDir: string, runId: string): void {
 
 function inferCommand(argv: string[]): string {
   if (argv[0] === "trial" && argv[1] === "inspect") return "trial inspect";
+  if (argv[0] === "console" && argv[1] === "run") return "console run";
+  if (argv[0] === "dev" && argv[1] === "fixture") return "dev fixture";
   return argv[0] ?? "unknown";
 }
 
@@ -136,6 +147,15 @@ function writeJsonFailure(argv: string[], error: unknown): void {
     ...(refined.runDir ? { runDir: refined.runDir } : {}),
   };
   process.stdout.write(stableJson(output));
+}
+
+function isMainModule(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1]);
+  } catch {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
 }
 
 async function cmdDoctor(rest: string[]): Promise<number> {
@@ -194,6 +214,27 @@ async function cmdDoctor(rest: string[]): Promise<number> {
   return 0;
 }
 
+function packageMetadata(): { name: string; version: string } {
+  const packagePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+  const parsed = JSON.parse(fs.readFileSync(packagePath, "utf8")) as Partial<{ name: string; version: string }>;
+  return {
+    name: parsed.name ?? "refinery",
+    version: parsed.version ?? "0.0.0",
+  };
+}
+
+async function cmdVersion(rest: string[]): Promise<number> {
+  parseOptionArgs(rest, {
+    json: { type: "boolean", default: false },
+  });
+  process.stdout.write(stableJson({
+    ok: true,
+    command: "version",
+    ...packageMetadata(),
+  }));
+  return 0;
+}
+
 async function cmdTrial(rest: string[]): Promise<number> {
   const sub = rest[0];
   if (sub !== "inspect") throw new RefineryError("INVALID_OPTION", "Unknown trial command. Use: refinery trial inspect", { phase: "args" });
@@ -206,6 +247,214 @@ async function cmdTrial(rest: string[]): Promise<number> {
   }
   const result = inspectReviewRun(values["run-dir"]);
   process.stdout.write(stableJson(result));
+  return 0;
+}
+
+function memoryProposalFixture(): Record<string, unknown> {
+  const runId = "fixture-memory-proposal";
+  const proposal = {
+    schemaVersion: refineryReviewSchemaVersion,
+    id: `proposal:${runId}:1`,
+    action: "update",
+    lifecycle: "proposed",
+    intent: "update-candidates",
+    memoryType: "preference",
+    scope: "project",
+    body: "Prefer live Refinery review for memory-update proposals; use fixture mode only when the user explicitly asks for mock, fixture, deterministic, or no-Coral behavior.",
+    confidence: 0.91,
+    rationale: "This preserves the production path as the default while giving local sessions a deterministic way to rehearse skill and CLI behavior.",
+    sourceRefs: [
+      {
+        source_id: "skill:$refinery",
+        source_path: "$refinery",
+        kind: "companion-skill",
+      },
+    ],
+    targetMemoryId: null,
+    updateReason: "Clarifies the expected agent workflow for Refinery memory review usage tests.",
+  };
+  return {
+    ok: true,
+    schemaVersion: refineryReviewSchemaVersion,
+    command: "review",
+    mode: "fixture",
+    fixture: "memory-proposal",
+    adapter: { name: "fixture" },
+    scope: "project",
+    dryRun: true,
+    writesAttempted: false,
+    runId,
+    runDir: null,
+    counts: {
+      sources: 1,
+      activeMemories: 1,
+      proposals: 1,
+      rejected: 0,
+    },
+    proposals: [proposal],
+    rejected: [],
+    evidenceReview: {
+      findings: [
+        {
+          relation: "refinement",
+          rationale: "Fixture output is intentionally review-shaped but does not inspect real memory.",
+          confidence: 0.94,
+        },
+      ],
+    },
+    metadata: {
+      schemaVersion: refineryReviewSchemaVersion,
+      runId,
+      adapter: "fixture",
+      scope: "project",
+      dryRun: true,
+      mode: "fixture",
+      createdAt: "fixture",
+      writesAttempted: false,
+      sinkUrl: null,
+      runtime: { kind: "fixture", coral: false },
+      specialistOrder: ["fixture"],
+      sourceLimit: 1,
+      sourceCharLimit: null,
+      intent: "update-candidates",
+      request: "Mock fixture memory update proposal.",
+    },
+  };
+}
+
+async function cmdDev(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  const fixture = rest[1];
+  if (sub !== "fixture" || fixture !== "memory-proposal") {
+    throw new RefineryError(
+      "INVALID_OPTION",
+      "Unknown dev command. Use: refinery dev fixture memory-proposal",
+      { phase: "args" },
+    );
+  }
+  parseOptionArgs(rest.slice(2), {
+    json: { type: "boolean", default: false },
+  });
+  process.stdout.write(stableJson(memoryProposalFixture()));
+  return 0;
+}
+
+async function waitForConsoleShutdown(session: CoralConsoleRunSession): Promise<void> {
+  const managedProcess = session.managedProcess;
+  if (!managedProcess) return;
+  await new Promise<void>((resolve, reject) => {
+    let finished = false;
+    const cleanup = () => {
+      process.off("SIGINT", shutdown);
+      process.off("SIGTERM", shutdown);
+      managedProcess.off("exit", exited);
+    };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve();
+    };
+    const fail = (error: unknown) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(error);
+    };
+    const shutdown = () => {
+      session.close().then(finish, fail);
+    };
+    const exited = () => {
+      finish();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+    managedProcess.once("exit", exited);
+  });
+}
+
+async function cmdConsole(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub !== "run") {
+    throw new RefineryError("INVALID_OPTION", "Unknown console command. Use: refinery console run", { phase: "args" });
+  }
+  const values = parseOptionArgs(rest.slice(1), {
+    project: { type: "string" },
+    intent: { type: "string" },
+    request: { type: "string" },
+    scope: { type: "string", default: "project" },
+    "memory-home": { type: "string" },
+    "run-id": { type: "string" },
+    "source-limit": { type: "string" },
+    "source-char-limit": { type: "string" },
+    "coral-url": { type: "string" },
+    "coral-auth-key": { type: "string" },
+    "coral-config": { type: "string" },
+    "coral-namespace": { type: "string" },
+    "coral-session-id": { type: "string" },
+    "coral-thread-id": { type: "string" },
+    "coral-package": { type: "string" },
+    "coral-timeout-ms": { type: "string" },
+    "coral-no-start": { type: "boolean", default: false },
+    "coral-no-teardown": { type: "boolean", default: false },
+    "exit-after-seed": { type: "boolean", default: false },
+    topology: { type: "string", default: "debate-critique" },
+    json: { type: "boolean", default: false },
+  });
+  const runId = validateRunId(typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId("console"));
+  const intent = parseReviewIntent(values.intent);
+  const request = typeof values.request === "string" && values.request.trim() ? values.request.trim() : null;
+  const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
+  const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
+  const coralTimeoutMs = parsePositiveIntegerOption(values["coral-timeout-ms"], "--coral-timeout-ms");
+  const topology = parseReviewTopology(values.topology);
+
+  if (typeof values["coral-thread-id"] === "string" && typeof values["coral-session-id"] !== "string") {
+    throw new RefineryError("INVALID_OPTION", "--coral-thread-id requires --coral-session-id", { phase: "args" });
+  }
+  const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
+  const adapter = createCodexMemoryAdapter({
+    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+  });
+  const validation = validateMemoryStoreAdapter(adapter);
+  if (!validation.valid) {
+    throw new RefineryError("ADAPTER_INVALID", validation.errors.join("; "), {
+      phase: "adapter",
+      details: validation.errors,
+    });
+  }
+
+  const session = await startCoralConsoleRun({
+    adapter,
+    project,
+    source: "codex-memory",
+    target: "codex-memory",
+    scope: String(values.scope ?? "project"),
+    runId,
+    intent,
+    request,
+    sourceLimit,
+    sourceCharLimit,
+    coral: {
+      apiUrl: typeof values["coral-url"] === "string" ? values["coral-url"] : undefined,
+      authKey: typeof values["coral-auth-key"] === "string" ? values["coral-auth-key"] : undefined,
+      configPath: typeof values["coral-config"] === "string" ? values["coral-config"] : undefined,
+      namespace: typeof values["coral-namespace"] === "string" ? values["coral-namespace"] : undefined,
+      sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
+      threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
+      coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
+      timeoutMs: coralTimeoutMs,
+      topology,
+      startServer: typeof values["coral-url"] === "string" ? false : !values["coral-no-start"],
+      noTeardown: Boolean(values["coral-no-teardown"]),
+    },
+  });
+  process.stdout.write(stableJson(session.result));
+  if (Boolean(values["exit-after-seed"])) {
+    await session.close();
+    return 0;
+  }
+  if (session.managedServerStarted) await waitForConsoleShutdown(session);
   return 0;
 }
 
@@ -234,6 +483,7 @@ async function cmdReview(rest: string[]): Promise<number> {
     "coral-timeout-ms": { type: "string" },
     "coral-no-start": { type: "boolean", default: false },
     "coral-no-teardown": { type: "boolean", default: false },
+    topology: { type: "string" },
     json: { type: "boolean", default: false },
   });
   const runId = validateRunId(typeof values["run-id"] === "string" ? values["run-id"] : defaultRunId());
@@ -243,13 +493,14 @@ async function cmdReview(rest: string[]): Promise<number> {
   const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
   const sinkTimeoutMs = parsePositiveIntegerOption(values["sink-timeout-ms"], "--sink-timeout-ms");
   const coralTimeoutMs = parsePositiveIntegerOption(values["coral-timeout-ms"], "--coral-timeout-ms");
+  const topology = parseReviewTopology(values.topology);
 
   const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
   const paths = resolveRefineryPaths({
     home: typeof values.home === "string" ? values.home : undefined,
     cwd: project,
   });
-  const outputDir = typeof values["output-dir"] === "string" ? path.resolve(values["output-dir"]) : paths.trialsDir;
+  const outputDir = typeof values["output-dir"] === "string" ? path.resolve(values["output-dir"]) : paths.runsDir;
   ensureRunDirInside(outputDir, runId);
 
   const loadedSink =
@@ -296,6 +547,7 @@ async function cmdReview(rest: string[]): Promise<number> {
       threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
       coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
       timeoutMs: coralTimeoutMs,
+      topology,
       startServer: typeof values["coral-url"] === "string" ? false : !values["coral-no-start"],
       noTeardown: Boolean(values["coral-no-teardown"]),
     },
@@ -311,12 +563,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (command === "doctor") return cmdDoctor(argv.slice(1));
+  if (command === "version") return cmdVersion(argv.slice(1));
   if (command === "trial") return cmdTrial(argv.slice(1));
+  if (command === "console") return cmdConsole(argv.slice(1));
+  if (command === "dev") return cmdDev(argv.slice(1));
   if (command === "review") return cmdReview(argv.slice(1));
   throw new RefineryError("INVALID_OPTION", `Unknown command: ${command}`, { phase: "args" });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   const argv = process.argv.slice(2);
   main(argv).then(
     (code) => {

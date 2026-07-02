@@ -1,21 +1,20 @@
 import { loadLocalEnv } from "../env.ts";
 import { parseModelMaxTokens, type ModelConfig } from "../env.ts";
 import {
-  parseCapture,
-  parseDistillation,
-  parseRelationshipReview,
-  parseRelevance,
-  parseSchema,
+  parseClaimScout,
+  parseDecisionSynthesizer,
+  parseEvidenceFindings,
+  parseProposalEditor,
   buildPrompt,
   redactModel,
 } from "../core/live-review.ts";
 import { refineryReviewSchemaVersion } from "../core/adapter.ts";
 import {
-  captureSpecialist,
-  distillationSpecialist,
-  relationshipReviewSpecialist,
-  relevanceSpecialist,
-  schemaSpecialist,
+  claimScoutSpecialist,
+  decisionSynthesizerSpecialist,
+  evidenceAuditorSpecialist,
+  memoryCartographerSpecialist,
+  proposalEditorSpecialist,
 } from "../core/specialists/index.ts";
 import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
 import { callOpenRouterChatWithMetadata, type OpenRouterCallMetadata } from "../core/model-client.ts";
@@ -26,6 +25,7 @@ import {
   refineryCoralModelDefaults,
 } from "./definitions.ts";
 import { connectCoralMcp, parseWaitForMentionResult, readCoralState } from "./mcp.ts";
+import { defaultReviewTopology, isReviewTopology, type ReviewTopology } from "./topology.ts";
 
 const coralSpecialistPromptVersion = "refinery.coral-specialist-prompt.v1";
 
@@ -102,11 +102,44 @@ function parseReviewEnvelope(text: string): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(text) as unknown;
     if (!isRecord(parsed)) return null;
-    if (parsed.type !== "refinery-review-intake" && parsed.type !== "refinery-review-output") return null;
+    if (
+      parsed.type !== "refinery-review-intake" &&
+      parsed.type !== "refinery-review-output" &&
+      parsed.type !== "refinery-review-merge"
+    ) return null;
     if (typeof parsed.runId !== "string") return null;
     return parsed;
   } catch {
     return null;
+  }
+}
+
+function topologyFrom(envelope: Record<string, unknown>): ReviewTopology {
+  return isReviewTopology(envelope.topology) ? envelope.topology : defaultReviewTopology;
+}
+
+function phaseFrom(envelope: Record<string, unknown>): string | null {
+  return typeof envelope.phase === "string" ? envelope.phase : null;
+}
+
+function outputPhaseFor(args: {
+  topology: ReviewTopology;
+  specialistName: SpecialistName;
+  envelope: Record<string, unknown>;
+}): string {
+  if (args.topology !== "debate-critique") return "pipeline";
+  const incomingPhase = phaseFrom(args.envelope);
+  switch (args.specialistName) {
+    case "claim-scout":
+      return "candidate-proposal";
+    case "memory-cartographer":
+      return "memory-cartography";
+    case "evidence-auditor":
+      return incomingPhase === "critique-intake" ? "preflight-critique" : "evidence-review";
+    case "proposal-editor":
+      return "typed-proposal";
+    case "decision-synthesizer":
+      return "proposal-synthesis";
   }
 }
 
@@ -119,6 +152,8 @@ function contextFrom(envelope: Record<string, unknown>): Record<string, unknown>
   };
   return {
     ...base,
+    topology: topologyFrom(envelope),
+    phase: phaseFrom(envelope),
     review_intent:
       typeof envelope.intent === "string"
         ? envelope.intent
@@ -137,6 +172,11 @@ function contextFrom(envelope: Record<string, unknown>): Record<string, unknown>
         : typeof base.intent_description === "string"
           ? base.intent_description
           : null,
+    claim_cards: Array.isArray(envelope.claim_cards)
+      ? envelope.claim_cards
+      : Array.isArray(base.claim_cards)
+        ? base.claim_cards
+        : [],
   };
 }
 
@@ -151,48 +191,81 @@ function nextReviewAgent(agentName: string): string | null {
   return index >= 0 ? refineryCoralAgentNames[index + 1] ?? null : null;
 }
 
+export function expectedReviewAgent(envelope: Record<string, unknown>, senderName: string): string | null {
+  if (envelope.type === "refinery-review-intake") {
+    return topologyFrom(envelope) === "debate-critique" && phaseFrom(envelope) === "critique-intake"
+      ? "refinery-evidence-auditor"
+      : "refinery-claim-scout";
+  }
+  if (envelope.type === "refinery-review-merge") return "refinery-decision-synthesizer";
+  return nextReviewAgent(String(envelope.agent ?? senderName));
+}
+
+function nextReviewMentions(outputEnvelope: Record<string, unknown>, currentAgent: string): string[] {
+  const topology = topologyFrom(outputEnvelope);
+  if (topology !== "debate-critique") {
+    const next = nextReviewAgent(currentAgent);
+    return next ? [next] : [];
+  }
+  switch (phaseFrom(outputEnvelope)) {
+    case "candidate-proposal":
+      return ["refinery-memory-cartographer"];
+    case "memory-cartography":
+      return ["refinery-proposal-editor"];
+    case "typed-proposal":
+      return [];
+    case "preflight-critique":
+      return [];
+    case "proposal-synthesis":
+      return [];
+    default: {
+      const next = nextReviewAgent(currentAgent);
+      return next ? [next] : [];
+    }
+  }
+}
+
 function specialistForName(name: SpecialistName): LocalSpecialist {
   switch (name) {
-    case "capture":
-      return captureSpecialist;
-    case "distillation":
-      return distillationSpecialist;
-    case "schema":
-      return schemaSpecialist;
-    case "relevance":
-      return relevanceSpecialist;
-    case "relationship-review":
-      return relationshipReviewSpecialist;
+    case "claim-scout":
+      return claimScoutSpecialist;
+    case "memory-cartographer":
+      return memoryCartographerSpecialist;
+    case "evidence-auditor":
+      return evidenceAuditorSpecialist;
+    case "proposal-editor":
+      return proposalEditorSpecialist;
+    case "decision-synthesizer":
+      return decisionSynthesizerSpecialist;
   }
 }
 
 function outputShapeForSpecialist(name: SpecialistName): string {
   switch (name) {
-    case "capture":
+    case "claim-scout":
       return `{"candidates":[{"claim":"...","source_refs":[],"why_future_useful":"..."}]}`;
-    case "distillation":
-      return `{"distilled":[{"body":"...","source_refs":[],"rationale":"..."}]}`;
-    case "schema":
-      return `{"typed":[{"body":"...","memory_type":"semantic","primary_type":"semantic","secondary_type":null,"type_confidence":0.8,"type_rationale":"...","ambiguities":[],"durability":"durable","ttl":null,"proposed_scope":"project","action":"create","target_memory_id":null,"source_refs":[]}]}`;
-    case "relevance":
-      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null,"staleness_reason":null,"forget_reason":null,"update_reason":null,"conflict_reason":null,"scope_reason":null,"replacement_body":null,"ambiguities":[]}],"rejected":[]}`;
-    case "relationship-review":
+    case "memory-cartographer":
+    case "evidence-auditor":
       return `{"findings":[{"body":"...","relation":"novel","target_memory_id":null,"confidence":0.8,"rationale":"...","source_refs":[],"memory_refs":[{"memory_id":"memory:1","provenance_kind":"fixture"}]}]}`;
+    case "proposal-editor":
+      return `{"typed":[{"body":"...","memory_type":"semantic","primary_type":"semantic","secondary_type":null,"type_confidence":0.8,"type_rationale":"...","ambiguities":[],"durability":"durable","ttl":null,"proposed_scope":"project","action":"create","target_memory_id":null,"target_memory_ids":[],"source_refs":[]}]}`;
+    case "decision-synthesizer":
+      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null,"target_memory_ids":[],"staleness_reason":null,"forget_reason":null,"update_reason":null,"conflict_reason":null,"scope_reason":null,"replacement_body":null,"ambiguities":[]}],"rejected":[{"body":"...","reason":"..."}]}`;
   }
 }
 
 function instructionForSpecialist(name: SpecialistName): string {
   switch (name) {
-    case "capture":
+    case "claim-scout":
       return "Emit at most three durable, evidence-bound candidate memories. Prefer fewer high-signal candidates over broad extraction.";
-    case "distillation":
-      return "Rewrite each candidate into an atomic, self-contained memory body while preserving source_refs.";
-    case "schema":
-      return "Use project scope for this slice. Set memory_type equal to primary_type. Use canonical action, not mutation_op.";
-    case "relevance":
-      return "Emit proposal-shaped records only for durable future-useful candidates. Include rejected[] for filtered candidates. Use canonical action enum values only; include intent-specific rationale fields when relevant and null otherwise.";
-    case "relationship-review":
-      return "Classify each proposal exactly once against active-memory candidates. memory_refs must be objects, never bare strings.";
+    case "memory-cartographer":
+      return "Classify each claim exactly once against active-memory candidates. memory_refs must be objects, never bare strings.";
+    case "evidence-auditor":
+      return "Audit each claim card exactly once. Prefer challenge relations for duplicate, weak, stale, unsupported, or scope-risk claims; use novel only when the evidence and memory context justify endorsement.";
+    case "proposal-editor":
+      return "Use project scope for this slice. Set memory_type equal to primary_type. Use canonical action, not mutation_op. Preserve source_refs and target_memory_id from cartography when applicable. For merge or supersede across multiple memories, set target_memory_id to the primary target and target_memory_ids to the full list.";
+    case "decision-synthesizer":
+      return "Emit proposal-shaped records only for durable future-useful candidates that survive critique. Include rejected[] for filtered candidates and every rejected item must include reason. Use canonical action enum values only; include intent-specific rationale fields when relevant and null otherwise. For multi-target merge or supersede proposals, preserve target_memory_ids and put the primary target in target_memory_id.";
   }
 }
 
@@ -219,19 +292,73 @@ function intentInstruction(context: Record<string, unknown>): string {
   }
 }
 
+function topologyInstructionForSpecialist(args: {
+  topology: ReviewTopology;
+  phase: string;
+  specialistName: SpecialistName;
+}): string {
+  if (args.topology !== "debate-critique") return "";
+  switch (args.phase) {
+    case "candidate-proposal":
+      return "Topology guidance: this is the Claim Scout phase of the default debate-critique run. Produce source-grounded claims that can become claim cards. Keep each claim durable, evidence-bound, and suitable for local critique.";
+    case "memory-cartography":
+      return "Topology guidance: this is the Memory Cartographer phase. Map claim cards/candidates to nearby active memories, duplicate targets, supersession targets, and conflicts. Leave final acceptance to debate-critique synthesis.";
+    case "preflight-critique":
+      return "Topology guidance: this is the Evidence/Provenance Auditor local critique thread. Treat claim_cards as the deliberation unit. For each claim card, make one small structured move using the findings JSON shape: novel is an endorsement; duplicate, too_weak, contradiction, refinement, and supersession are challenges. Ground each challenge in source or active-memory evidence and avoid broad global debate.";
+    case "typed-proposal":
+      return "Topology guidance: this is the Proposal Editor phase. Turn surviving claims and cartography into typed proposal packets. Preserve evidence so final challenges can target the claim precisely.";
+    case "proposal-synthesis":
+      return "Topology guidance: this is the Decision Synthesizer merge point. Synthesize typed claims together with debate_critique.claim_cards and debate_critique.challenge_ledger. Final proposal or rejection rationale must explicitly account for relevant challenges, endorsements, or unresolved questions.";
+    default:
+      return `Topology guidance: debate/critique phase ${args.phase}. Keep reasoning evidence-bound and do not write memory.`;
+  }
+}
+
 function compactMemoryHints(value: unknown, limit = 10): unknown[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, limit);
 }
 
-function activeMemoryCandidates(context: Record<string, unknown>, relevanceOutput: Record<string, unknown>): unknown[] {
-  const proposals = arrayFrom(relevanceOutput, "proposals");
+function claimCards(context: Record<string, unknown>): Record<string, unknown>[] {
+  return arrayFrom(context, "claim_cards");
+}
+
+function activeMemoryCandidates(context: Record<string, unknown>, proposalOutput: Record<string, unknown>): unknown[] {
+  const proposals = arrayFrom(proposalOutput, "proposals");
   const memories = compactMemoryHints(context.active_memory_hints, 8);
   return proposals.map((proposal, proposalIndex) => ({
     proposal_index: proposalIndex,
     proposal_body: typeof proposal.body === "string" ? proposal.body : null,
     memories,
   }));
+}
+
+function preflightMemoryCandidates(context: Record<string, unknown>): unknown[] {
+  const claims = claimCards(context);
+  if (claims.length > 0) {
+    const memories = compactMemoryHints(context.active_memory_hints, 10);
+    return claims.map((claim, index) => ({
+      claim_id: typeof claim.claimId === "string" ? claim.claimId : `claim:${index + 1}`,
+      proposal_index: index,
+      proposal_body: typeof claim.body === "string" ? claim.body : null,
+      source_refs: Array.isArray(claim.sourceRefs) ? claim.sourceRefs : [],
+      memories,
+    }));
+  }
+  return compactMemoryHints(context.active_memory_hints, 10).map((memory, index) => ({
+    proposal_index: index,
+    proposal_body: isRecord(memory) && typeof memory.body === "string" ? memory.body : null,
+    memories: [memory],
+  }));
+}
+
+function mergeProposalEditorOutput(envelope: Record<string, unknown>): Record<string, unknown> {
+  return isRecord(envelope.proposal_editor_output) ? envelope.proposal_editor_output : {};
+}
+
+function critiqueBundle(envelope: Record<string, unknown>, context: Record<string, unknown>): Record<string, unknown> | null {
+  if (isRecord(envelope.critique)) return envelope.critique;
+  return isRecord(context.debate_critique) ? context.debate_critique : null;
 }
 
 function coralThreadContext(args: {
@@ -254,15 +381,19 @@ function payloadForSpecialist(args: {
   message: { id: string; senderName: string; mentionNames: string[]; threadId: string };
 }): { payload: Record<string, unknown>; context: Record<string, unknown> } {
   const context = contextFrom(args.envelope);
+  const topology = topologyFrom(args.envelope);
+  const phase = phaseFrom(args.envelope);
   const intentContext = {
     review_intent: context.review_intent,
     review_request: context.review_request,
     intent_description: context.intent_description,
+    topology,
+    phase,
   };
   const previousOutput = isRecord(args.envelope.output) ? args.envelope.output : {};
   const threadContext = coralThreadContext({ message: args.message, envelope: args.envelope });
   switch (args.specialistName) {
-    case "capture":
+    case "claim-scout":
       return {
         context,
         payload: {
@@ -272,26 +403,48 @@ function payloadForSpecialist(args: {
           coral_thread_context: threadContext,
         },
       };
-    case "distillation":
+    case "memory-cartographer":
       return {
-        context,
+        context: {
+          ...context,
+          claim_candidates: arrayFrom(previousOutput, "candidates"),
+        },
         payload: {
           ...intentContext,
           candidates: arrayFrom(previousOutput, "candidates"),
-          coral_thread_context: threadContext,
-        },
-      };
-    case "schema":
-      return {
-        context,
-        payload: {
-          ...intentContext,
-          distilled: arrayFrom(previousOutput, "distilled"),
           active_memory_hints: compactMemoryHints(context.active_memory_hints),
           coral_thread_context: threadContext,
         },
       };
-    case "relevance":
+    case "proposal-editor":
+      return {
+        context,
+        payload: {
+          ...intentContext,
+          claim_cards: claimCards(context),
+          candidates: arrayFrom(context, "claim_candidates"),
+          memory_map: previousOutput,
+          cartography_findings: arrayFrom(previousOutput, "findings"),
+          active_memory_hints: compactMemoryHints(context.active_memory_hints),
+          coral_thread_context: threadContext,
+        },
+      };
+    case "decision-synthesizer":
+      if (topology === "debate-critique" && args.envelope.type === "refinery-review-merge") {
+        return {
+          context: {
+            ...context,
+            debate_critique: critiqueBundle(args.envelope, context),
+          },
+          payload: {
+            ...intentContext,
+            typed: arrayFrom(mergeProposalEditorOutput(args.envelope), "typed"),
+            debate_critique: critiqueBundle(args.envelope, context),
+            claim_cards: claimCards(context),
+            coral_thread_context: threadContext,
+          },
+        };
+      }
       return {
         context,
         payload: {
@@ -300,13 +453,27 @@ function payloadForSpecialist(args: {
           coral_thread_context: threadContext,
         },
       };
-    case "relationship-review":
+    case "evidence-auditor":
+      if (topology === "debate-critique" && phase === "critique-intake") {
+        return {
+          context,
+          payload: {
+            ...intentContext,
+            claim_cards: claimCards(context),
+            source_chunks: Array.isArray(context.source_chunks) ? context.source_chunks : [],
+            active_memory_candidates: preflightMemoryCandidates(context),
+            coral_thread_context: threadContext,
+          },
+        };
+      }
       return {
         context,
         payload: {
           ...intentContext,
-          relevance: previousOutput,
+          proposal_synthesis: previousOutput,
           active_memory_candidates: activeMemoryCandidates(context, previousOutput),
+          debate_critique: critiqueBundle(args.envelope, context),
+          claim_cards: claimCards(context),
           coral_thread_context: threadContext,
         },
       };
@@ -315,21 +482,22 @@ function payloadForSpecialist(args: {
 
 function parseSpecialistOutput(name: SpecialistName, raw: string): Record<string, unknown> {
   switch (name) {
-    case "capture":
-      return parseCapture(raw) as unknown as Record<string, unknown>;
-    case "distillation":
-      return parseDistillation(raw) as unknown as Record<string, unknown>;
-    case "schema":
-      return parseSchema(raw) as unknown as Record<string, unknown>;
-    case "relevance":
-      return parseRelevance(raw) as unknown as Record<string, unknown>;
-    case "relationship-review":
-      return parseRelationshipReview(raw) as unknown as Record<string, unknown>;
+    case "claim-scout":
+      return parseClaimScout(raw) as unknown as Record<string, unknown>;
+    case "memory-cartographer":
+    case "evidence-auditor":
+      return parseEvidenceFindings(raw) as unknown as Record<string, unknown>;
+    case "proposal-editor":
+      return parseProposalEditor(raw) as unknown as Record<string, unknown>;
+    case "decision-synthesizer":
+      return parseDecisionSynthesizer(raw) as unknown as Record<string, unknown>;
   }
 }
 
 function failureEnvelope(args: {
   runId: string;
+  topology: ReviewTopology;
+  phase: string;
   step: SpecialistName;
   agentName: string;
   receivedMessageId: string;
@@ -345,6 +513,8 @@ function failureEnvelope(args: {
     type: "refinery-review-output",
     status: "failed",
     runId: args.runId,
+    topology: args.topology,
+    phase: args.phase,
     step: args.step,
     agent: args.agentName,
     specialist: args.step,
@@ -371,11 +541,17 @@ export async function buildLiveReviewEnvelope(args: {
 }): Promise<Record<string, unknown>> {
   const runId = String(args.envelope.runId);
   const specialist = specialistForName(args.specialistName);
+  const topology = topologyFrom(args.envelope);
+  const phase = outputPhaseFor({ topology, specialistName: args.specialistName, envelope: args.envelope });
   const { payload, context } = payloadForSpecialist(args);
   const prompt = buildPrompt({
     specialist,
     shape: outputShapeForSpecialist(args.specialistName),
-    instruction: [instructionForSpecialist(args.specialistName), intentInstruction(context)].join(" "),
+    instruction: [
+      instructionForSpecialist(args.specialistName),
+      intentInstruction(context),
+      topologyInstructionForSpecialist({ topology, phase, specialistName: args.specialistName }),
+    ].filter(Boolean).join(" "),
     payload,
   });
 
@@ -383,6 +559,8 @@ export async function buildLiveReviewEnvelope(args: {
     return failureEnvelope({
       runId,
       step: args.specialistName,
+      topology,
+      phase,
       agentName: args.agentName,
       receivedMessageId: args.message.id,
       code: "MODEL_CONFIG_MISSING",
@@ -407,6 +585,8 @@ export async function buildLiveReviewEnvelope(args: {
     return failureEnvelope({
       runId,
       step: args.specialistName,
+      topology,
+      phase,
       agentName: args.agentName,
       receivedMessageId: args.message.id,
       code: "MODEL_CALL_FAILED",
@@ -424,6 +604,8 @@ export async function buildLiveReviewEnvelope(args: {
     return failureEnvelope({
       runId,
       step: args.specialistName,
+      topology,
+      phase,
       agentName: args.agentName,
       receivedMessageId: args.message.id,
       code: "MODEL_OUTPUT_INVALID",
@@ -440,6 +622,8 @@ export async function buildLiveReviewEnvelope(args: {
     type: "refinery-review-output",
     status: "succeeded",
     runId,
+    topology,
+    phase,
     step: args.specialistName,
     agent: args.agentName,
     specialist: args.specialistName,
@@ -507,10 +691,7 @@ async function main(): Promise<void> {
 
     const reviewEnvelope = parseReviewEnvelope(message.text);
     if (reviewEnvelope) {
-      const expectedAgent =
-        reviewEnvelope.type === "refinery-review-intake"
-          ? "refinery-capture"
-          : nextReviewAgent(String(reviewEnvelope.agent ?? message.senderName));
+      const expectedAgent = expectedReviewAgent(reviewEnvelope, message.senderName);
       if (expectedAgent !== definition.agentName && !message.mentionNames.includes(definition.agentName)) {
         log(definition.agentName, `ignored review message expected=${expectedAgent ?? "none"}`);
         continue;
@@ -523,19 +704,19 @@ async function main(): Promise<void> {
         message,
         model,
       });
-      const next = outputEnvelope.status === "succeeded" ? nextReviewAgent(definition.agentName) : null;
+      const mentions = outputEnvelope.status === "succeeded" ? nextReviewMentions(outputEnvelope, definition.agentName) : [];
       const content = JSON.stringify(outputEnvelope);
       await connection.client.callTool({
         name: connection.sendMessageToolName,
         arguments: {
           threadId: message.threadId,
           content,
-          mentions: next ? [next] : [],
+          mentions,
         },
       });
       log(
         definition.agentName,
-        `review output sent status=${String(outputEnvelope.status)} thread=${message.threadId} next=${next ?? "none"}`,
+        `review output sent status=${String(outputEnvelope.status)} phase=${String(outputEnvelope.phase ?? "none")} thread=${message.threadId} next=${mentions.join(",") || "none"}`,
       );
       continue;
     }

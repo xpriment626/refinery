@@ -7,6 +7,7 @@ import test from "node:test";
 
 const cliPath = path.resolve(import.meta.dirname, "cli.ts");
 const packagePath = path.resolve(import.meta.dirname, "..", "package.json");
+const repoRoot = path.resolve(import.meta.dirname, "..");
 
 function runCli(args: string[], options: { cwd?: string } = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
@@ -67,8 +68,12 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /refinery doctor/);
+  assert.match(result.stdout, /refinery version/);
   assert.match(result.stdout, /refinery review/);
+  assert.match(result.stdout, /refinery console run/);
+  assert.match(result.stdout, /refinery dev fixture memory-proposal/);
   assert.match(result.stdout, /refinery trial inspect/);
+  assert.doesNotMatch(result.stdout, /--topology/);
   assert.doesNotMatch(result.stdout, /reference-sqlite/);
   assert.doesNotMatch(result.stdout, /adapter check/);
   assert.doesNotMatch(result.stdout, /instance init/);
@@ -81,16 +86,32 @@ test("package surface does not publish legacy SQLite or experiment commands", ()
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
     dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
   };
 
   assert.deepEqual(Object.keys(pkg.bin ?? {}).sort(), ["refinery"]);
+  assert.equal(pkg.bin?.refinery, "dist/cli.js");
+  assert.match(pkg.scripts?.build ?? "", /tsc/);
   const serialized = JSON.stringify({
     scripts: pkg.scripts ?? {},
     dependencies: pkg.dependencies ?? {},
+    devDependencies: pkg.devDependencies ?? {},
   });
   assert.doesNotMatch(serialized, /reference-sqlite/);
   assert.doesNotMatch(serialized, /experiment:/);
   assert.doesNotMatch(serialized, /@mastra\/core/);
+});
+
+test("version returns package metadata as structured JSON", () => {
+  const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8")) as { name: string; version: string };
+  const result = runCli(["version", "--json"]);
+  const parsed = parseJson(result.stdout);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "version");
+  assert.equal(parsed.name, pkg.name);
+  assert.equal(parsed.version, pkg.version);
 });
 
 test("doctor validates the bounded Codex memory home without model credentials", () => {
@@ -106,7 +127,7 @@ test("doctor validates the bounded Codex memory home without model credentials",
   assert.equal(parsed.memoryHomeExists, true);
   assert.equal(parsed.authRequired, false);
   assert.equal(parsed.sourceCount, 3);
-  assert.equal(parsed.activeMemoryCount > 0, true);
+  assert.equal(Number(parsed.activeMemoryCount) > 0, true);
 });
 
 test("legacy commands return structured JSON failures", () => {
@@ -124,4 +145,49 @@ test("legacy commands return structured JSON failures", () => {
     assert.equal(parsed.ok, false);
     assert.equal((parsed.error as { code?: string }).code, "INVALID_OPTION");
   }
+});
+
+test("console run validates topology before starting Coral", () => {
+  const memoryHome = seedCodexMemoryHome();
+  const result = runCli([
+    "console",
+    "run",
+    "--memory-home",
+    memoryHome,
+    "--topology",
+    "not-a-topology",
+    "--json",
+  ]);
+  const parsed = parseJson(result.stdout);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "console run");
+  assert.equal((parsed.error as { code?: string }).code, "INVALID_OPTION");
+  assert.match((parsed.error as { message?: string }).message ?? "", /topology/);
+});
+
+test("dev fixture emits a review-shaped memory proposal without Coral", () => {
+  const result = runCli(["dev", "fixture", "memory-proposal", "--json"]);
+  const parsed = parseJson(result.stdout);
+  const proposals = parsed.proposals as Array<Record<string, unknown>>;
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "review");
+  assert.equal(parsed.mode, "fixture");
+  assert.equal(parsed.fixture, "memory-proposal");
+  assert.equal(parsed.dryRun, true);
+  assert.equal(parsed.writesAttempted, false);
+  assert.equal(parsed.runDir, null);
+  assert.equal(Array.isArray(proposals), true);
+  assert.equal(proposals.length >= 1, true);
+  assert.equal(proposals[0]?.lifecycle, "proposed");
+  assert.equal(typeof proposals[0]?.body, "string");
+  assert.equal(((proposals[0]?.sourceRefs as Array<Record<string, unknown>>)[0])?.source_path, "$refinery");
+});
+
+test("repo does not publish duplicate local Codex skill names", () => {
+  assert.equal(fs.existsSync(path.join(repoRoot, ".agents/skills/refinery-memory-review")), false);
+  assert.equal(fs.existsSync(path.join(repoRoot, ".codex-test/skills/refinery-memory-proposal")), false);
 });

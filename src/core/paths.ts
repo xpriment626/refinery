@@ -1,9 +1,14 @@
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 export interface RefineryPaths {
   home: string;
-  trialsDir: string;
+  configDir: string;
+  credentialsDir: string;
+  runsRootDir: string;
+  projectKey: string;
+  runsDir: string;
 }
 
 export interface ResolveRefineryPathsOptions {
@@ -18,13 +23,37 @@ export function expandHome(p: string): string {
   return p;
 }
 
+function resolvePathInput(input: string, cwd: string): string {
+  const expanded = expandHome(input);
+  return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(cwd, expanded);
+}
+
+export function projectKeyForPath(projectPath: string): string {
+  const resolved = path.resolve(projectPath);
+  const escapedSep = path.sep.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const normalized = resolved.replace(new RegExp(`${escapedSep}+`, "g"), path.sep);
+  const slug = normalized
+    .replace(/^[A-Za-z]:/, "")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "project";
+  const hash = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 10);
+  return `${slug}-${hash}`;
+}
+
 export function resolveRefineryPaths(options: ResolveRefineryPathsOptions = {}): RefineryPaths {
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
-  const homeInput = options.home ?? env.REFINERY_HOME ?? path.join(cwd, ".refinery");
-  const home = path.resolve(expandHome(homeInput));
+  const homeInput = options.home ?? env.REFINERY_HOME ?? "~/.refinery";
+  const home = resolvePathInput(homeInput, cwd);
+  const runsRootDir = path.join(home, "runs");
+  const projectKey = projectKeyForPath(cwd);
   return {
     home,
-    trialsDir: path.join(home, "trials"),
+    configDir: path.join(home, "config"),
+    credentialsDir: path.join(home, "credentials"),
+    runsRootDir,
+    projectKey,
+    runsDir: path.join(runsRootDir, "by-project", projectKey),
   };
 }

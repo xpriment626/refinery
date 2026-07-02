@@ -26,6 +26,7 @@ import {
   refineryCoralModelDefaults,
   refineryCoralPort,
 } from "./definitions.ts";
+import { defaultReviewTopology, type ReviewTopology } from "./topology.ts";
 import {
   memoryMaintenanceActions,
   refineryReviewSchemaVersion,
@@ -43,6 +44,12 @@ import {
 } from "../core/errors.ts";
 import { writeReviewArtifactManifest, reviewStepOrder } from "../core/artifacts.ts";
 import {
+  buildDeliberationArtifacts,
+  claimCardsForCritique,
+  type DeliberationArtifacts,
+  type DeliberationSpecialistMessage,
+} from "../core/deliberation.ts";
+import {
   deliverReviewSink,
   writeReviewFailureStatus,
   type ReviewRejected,
@@ -55,7 +62,8 @@ import { defaultReviewIntent, describeReviewIntent, type ReviewIntent } from "..
 
 const DEFAULT_SOURCE_LIMIT = 3;
 const DEFAULT_SOURCE_CHAR_LIMIT = 6000;
-const DEFAULT_WAIT_TIMEOUT_MS = 180_000;
+const DEFAULT_PIPELINE_WAIT_TIMEOUT_MS = 180_000;
+const DEFAULT_DEBATE_CRITIQUE_WAIT_TIMEOUT_MS = 600_000;
 const DEFAULT_WAIT_INTERVAL_MS = 1_500;
 const MAX_EXCERPT_CHARS = 1200;
 
@@ -77,6 +85,7 @@ export interface CoralReviewRuntimeOptions {
   modelBaseUrl?: string;
   reasoningEffort?: string;
   maxTurns?: string;
+  topology?: ReviewTopology;
 }
 
 export interface CoralReviewRunOptions {
@@ -100,14 +109,81 @@ export interface CoralReviewRunResult extends ReviewRunResult {
   source: "codex-memory";
   target: "codex-memory";
   project: string;
-  relationshipReview: unknown;
+  evidenceReview: unknown;
   coral: {
     namespace: string;
     sessionId: string;
     threadId: string;
+    threadIds?: string[];
     agents: string[];
   };
   sink?: ReviewSinkResult;
+}
+
+export interface CoralConsoleRunOptions {
+  adapter: MemoryStoreAdapter;
+  project: string;
+  source: "codex-memory";
+  target: "codex-memory";
+  scope: string;
+  runId: string;
+  intent?: ReviewIntent;
+  request?: string | null;
+  sourceLimit?: number;
+  sourceCharLimit?: number;
+  coral?: CoralReviewRuntimeOptions;
+}
+
+export interface CoralConsoleRunResult {
+  ok: true;
+  schemaVersion: typeof refineryReviewSchemaVersion;
+  command: "console run";
+  mode: "coral-console";
+  source: "codex-memory";
+  target: "codex-memory";
+  project: string;
+  adapter: { name: string };
+  scope: string;
+  dryRun: true;
+  archive: false;
+  artifactDir: null;
+  writesAttempted: false;
+  runId: string;
+  consoleUrl: string;
+  schemaUrl: string;
+  counts: {
+    sources: number;
+    activeMemories: number;
+    seededMessages: number;
+  };
+  coral: {
+    apiUrl: string;
+    namespace: string;
+    sessionId: string;
+    threadId: string;
+    threadIds: string[];
+    proposalThreadId?: string;
+    critiqueThreadId?: string;
+    agents: string[];
+    topology: ReviewTopology;
+    serverMode: "managed" | "attached";
+    managedServerStarted: boolean;
+  };
+  seededMessages: Array<{
+    id: string;
+    threadId: string;
+    senderName: string;
+    mentionNames: string[];
+    textExcerpt: string;
+  }>;
+  next: string;
+}
+
+export interface CoralConsoleRunSession {
+  result: CoralConsoleRunResult;
+  managedServerStarted: boolean;
+  managedProcess: ChildProcessWithoutNullStreams | null;
+  close: () => Promise<void>;
 }
 
 interface ReviewOutputEnvelope {
@@ -121,6 +197,8 @@ interface ReviewOutputEnvelope {
   providerMetadata?: unknown;
   promptVersion?: string;
   prompt?: unknown;
+  topology?: ReviewTopology;
+  phase?: string;
   error?: Record<string, unknown>;
 }
 
@@ -138,6 +216,8 @@ interface SpecialistMessage {
   providerMetadata: unknown;
   promptVersion: string | null;
   prompt: unknown;
+  topology: ReviewTopology;
+  phase: string | null;
   error: Record<string, unknown> | null;
 }
 
@@ -149,6 +229,12 @@ interface ReadinessSnapshot {
 function writeJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function defaultCoralReviewTimeoutMs(topology: ReviewTopology): number {
+  return topology === "debate-critique"
+    ? DEFAULT_DEBATE_CRITIQUE_WAIT_TIMEOUT_MS
+    : DEFAULT_PIPELINE_WAIT_TIMEOUT_MS;
 }
 
 function compactText(text: string, max = MAX_EXCERPT_CHARS): string {
@@ -189,6 +275,98 @@ function memoryHints(memories: ActiveMemory[], limit = 12): unknown[] {
   }));
 }
 
+function buildConsoleUrl(apiUrl: string, pathname: string): string {
+  try {
+    const url = new URL(apiUrl);
+    url.pathname = pathname;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return `${apiUrl.replace(/\/+$/, "")}${pathname}`;
+  }
+}
+
+function resolveConfiguredModel(coral: CoralReviewRuntimeOptions): {
+  provider: string;
+  baseUrl: string;
+  modelName: string;
+  reasoningEffort: string;
+  maxTokens: number;
+} {
+  const localEnv = loadLocalEnv(repoRoot);
+  const readConfig = (name: string): string | undefined => process.env[name] ?? localEnv[name];
+  return {
+    provider: readConfig("MODEL_PROVIDER") ?? readConfig("REFINERY_MODEL_PROVIDER") ?? "openrouter",
+    baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
+    modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
+    reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,
+    maxTokens: parseModelMaxTokens(readConfig("MODEL_MAX_TOKENS") ?? readConfig("REFINERY_MODEL_MAX_TOKENS")),
+  };
+}
+
+function buildReviewIntake(args: {
+  runId: string;
+  project: string;
+  source: "codex-memory";
+  target: "codex-memory";
+  adapterName: string;
+  scope: string;
+  intent: ReviewIntent;
+  request: string | null;
+  topology: ReviewTopology;
+  sourceLimit: number;
+  sourceCharLimit: number;
+  sourceChunks: unknown[];
+  activeMemoryHints: unknown[];
+}): Record<string, unknown> {
+  return {
+    schemaVersion: refineryReviewSchemaVersion,
+    type: "refinery-review-intake",
+    runId: args.runId,
+    project: args.project,
+    source: args.source,
+    target: args.target,
+    adapter: args.adapterName,
+    scope: args.scope,
+    intent: args.intent,
+    request: args.request,
+    intentDescription: describeReviewIntent(args.intent),
+    noApply: true,
+    dryRun: true,
+    topology: args.topology,
+    phase: args.topology === "debate-critique" ? "proposal-intake" : "pipeline",
+    sourceLimit: args.sourceLimit,
+    sourceCharLimit: args.sourceCharLimit,
+    source_chunks: args.sourceChunks,
+    active_memory_hints: args.activeMemoryHints,
+    proposal_schema: {
+      schemaVersion: refineryReviewSchemaVersion,
+      lifecycle: "proposed",
+      writesAttempted: false,
+      actions: memoryMaintenanceActions,
+      intentFields: [
+        "staleness_reason",
+        "forget_reason",
+        "update_reason",
+        "conflict_reason",
+        "scope_reason",
+        "replacement_body",
+        "ambiguities",
+      ],
+    },
+    instruction: [
+      "Coordinate over this intake and emit proposal-shaped outputs only.",
+      `Review intent: ${args.intent}. ${describeReviewIntent(args.intent)}`,
+      args.request ? `User request: ${args.request}` : "No additional user request.",
+      "Do not activate, approve, or write memory.",
+      args.topology === "debate-critique"
+        ? "Use debate/critique topology: proposal work and critique work happen in separate Coral threads before final synthesis."
+        : "Use the default pipeline topology.",
+    ].join(" "),
+  };
+}
+
 function parseReviewOutput(text: string): ReviewOutputEnvelope | null {
   try {
     const parsed = JSON.parse(text) as Partial<ReviewOutputEnvelope>;
@@ -214,9 +392,10 @@ function parseReviewOutput(text: string): ReviewOutputEnvelope | null {
   }
 }
 
-function collectSpecialistMessages(messages: CoralMessage[], threadId: string, runId: string): SpecialistMessage[] {
+function collectSpecialistMessages(messages: CoralMessage[], threadIds: string[], runId: string): SpecialistMessage[] {
+  const allowedThreadIds = new Set(threadIds);
   return messages
-    .filter((message) => message.threadId === threadId)
+    .filter((message) => allowedThreadIds.has(message.threadId))
     .map((message) => ({ message, envelope: parseReviewOutput(message.text) }))
     .filter((item): item is { message: CoralMessage; envelope: ReviewOutputEnvelope } =>
       item.envelope !== null && item.envelope.runId === runId
@@ -237,6 +416,8 @@ function collectSpecialistMessages(messages: CoralMessage[], threadId: string, r
       providerMetadata: envelope.providerMetadata ?? null,
       promptVersion: typeof envelope.promptVersion === "string" ? envelope.promptVersion : null,
       prompt: envelope.prompt ?? null,
+      topology: envelope.topology ?? defaultReviewTopology,
+      phase: typeof envelope.phase === "string" ? envelope.phase : null,
       error: envelope.error && typeof envelope.error === "object" && !Array.isArray(envelope.error)
         ? envelope.error
         : null,
@@ -244,10 +425,23 @@ function collectSpecialistMessages(messages: CoralMessage[], threadId: string, r
     .sort((left, right) => reviewStepOrder.indexOf(left.step) - reviewStepOrder.indexOf(right.step));
 }
 
-function outputMap(messages: SpecialistMessage[]): Map<string, SpecialistMessage> {
+function debatePriority(message: SpecialistMessage): number {
+  if (message.step === "decision-synthesizer" && message.phase === "proposal-synthesis") return 3;
+  if (message.phase === "pipeline") return 2;
+  if (!message.phase) return 1;
+  return 0;
+}
+
+function outputMap(messages: SpecialistMessage[], topology: ReviewTopology = defaultReviewTopology): Map<string, SpecialistMessage> {
   const byStep = new Map<string, SpecialistMessage>();
   for (const message of messages) {
-    if (message.status === "succeeded" && message.output && !byStep.has(message.step)) {
+    if (message.status !== "succeeded" || !message.output) continue;
+    if (topology !== "debate-critique" && !byStep.has(message.step)) {
+      byStep.set(message.step, message);
+      continue;
+    }
+    const current = byStep.get(message.step);
+    if (!current || debatePriority(message) >= debatePriority(current)) {
       byStep.set(message.step, message);
     }
   }
@@ -259,6 +453,17 @@ function normalizeId(value: unknown): string | null {
   if (typeof value === "number") return `memory:${value}`;
   if (typeof value === "string") return value;
   throw new Error("target_memory_id must be string, number, or null.");
+}
+
+function normalizeIds(value: unknown): string[] {
+  if (value === null || value === undefined) return [];
+  if (Array.isArray(value)) return value.map((item) => {
+    const normalized = normalizeId(item);
+    if (!normalized) throw new Error("target_memory_id array must not contain null values.");
+    return normalized;
+  });
+  const normalized = normalizeId(value);
+  return normalized ? [normalized] : [];
 }
 
 function parseAction(value: unknown): MemoryMaintenanceAction {
@@ -309,37 +514,47 @@ function optionalStringArray(record: Record<string, unknown>, field: string): st
   return value;
 }
 
-function parseRelevanceOutput(runId: string, output: Record<string, unknown>): {
+function parseDecisionSynthesizerOutput(runId: string, output: Record<string, unknown>): {
   proposals: MemoryProposal[];
   rejected: ReviewRejected[];
 } {
-  const proposalRows = asRecords(output.proposals, "relevance.proposals");
-  const rejectedRows = asRecords(output.rejected ?? [], "relevance.rejected");
+  const proposalRows = asRecords(output.proposals, "decision-synthesizer.proposals");
+  const rejectedRows = asRecords(output.rejected ?? [], "decision-synthesizer.rejected");
   return {
-    proposals: proposalRows.map((row, index) => ({
-      schemaVersion: refineryReviewSchemaVersion,
-      id: `proposal:${runId}:${index + 1}`,
-      action: parseAction(row.action),
-      lifecycle: "proposed",
-      intent: typeof row.intent === "string" ? row.intent : undefined,
-      memoryType: requiredString(row, "memory_type"),
-      scope: requiredString(row, "proposed_scope"),
-      body: requiredString(row, "body"),
-      confidence: requiredNumber(row, "confidence"),
-      rationale: requiredString(row, "rationale"),
-      sourceRefs: Array.isArray(row.source_refs) ? row.source_refs : [],
-      targetMemoryId: normalizeId(row.target_memory_id),
-      ...(optionalString(row, "staleness_reason") !== undefined ? { stalenessReason: optionalString(row, "staleness_reason") } : {}),
-      ...(optionalString(row, "forget_reason") !== undefined ? { forgetReason: optionalString(row, "forget_reason") } : {}),
-      ...(optionalString(row, "update_reason") !== undefined ? { updateReason: optionalString(row, "update_reason") } : {}),
-      ...(optionalString(row, "conflict_reason") !== undefined ? { conflictReason: optionalString(row, "conflict_reason") } : {}),
-      ...(optionalString(row, "scope_reason") !== undefined ? { scopeReason: optionalString(row, "scope_reason") } : {}),
-      ...(optionalString(row, "replacement_body") !== undefined ? { replacementBody: optionalString(row, "replacement_body") } : {}),
-      ...(optionalStringArray(row, "ambiguities") !== undefined ? { ambiguities: optionalStringArray(row, "ambiguities") } : {}),
-    })),
+    proposals: proposalRows.map((row, index) => {
+      const targetMemoryIds = normalizeIds(row.target_memory_ids ?? row.target_memory_id);
+      return {
+        schemaVersion: refineryReviewSchemaVersion,
+        id: `proposal:${runId}:${index + 1}`,
+        action: parseAction(row.action),
+        lifecycle: "proposed",
+        intent: typeof row.intent === "string" ? row.intent : undefined,
+        memoryType: requiredString(row, "memory_type"),
+        scope: requiredString(row, "proposed_scope"),
+        body: requiredString(row, "body"),
+        confidence: requiredNumber(row, "confidence"),
+        rationale: requiredString(row, "rationale"),
+        sourceRefs: Array.isArray(row.source_refs) ? row.source_refs : [],
+        targetMemoryId: targetMemoryIds[0] ?? null,
+        ...(targetMemoryIds.length > 1 ? { targetMemoryIds } : {}),
+        ...(optionalString(row, "staleness_reason") !== undefined ? { stalenessReason: optionalString(row, "staleness_reason") } : {}),
+        ...(optionalString(row, "forget_reason") !== undefined ? { forgetReason: optionalString(row, "forget_reason") } : {}),
+        ...(optionalString(row, "update_reason") !== undefined ? { updateReason: optionalString(row, "update_reason") } : {}),
+        ...(optionalString(row, "conflict_reason") !== undefined ? { conflictReason: optionalString(row, "conflict_reason") } : {}),
+        ...(optionalString(row, "scope_reason") !== undefined ? { scopeReason: optionalString(row, "scope_reason") } : {}),
+        ...(optionalString(row, "replacement_body") !== undefined ? { replacementBody: optionalString(row, "replacement_body") } : {}),
+        ...(optionalStringArray(row, "ambiguities") !== undefined ? { ambiguities: optionalStringArray(row, "ambiguities") } : {}),
+      };
+    }),
     rejected: rejectedRows.map((row, index) => ({
       sourceId: typeof row.source_id === "string" ? row.source_id : `rejected:${runId}:${index + 1}`,
-      reason: requiredString(row, "reason"),
+      reason: typeof row.reason === "string" && row.reason.trim()
+        ? row.reason
+        : typeof row.rationale === "string" && row.rationale.trim()
+          ? row.rationale
+          : typeof row.type_rationale === "string" && row.type_rationale.trim()
+            ? row.type_rationale
+            : requiredString(row, "update_reason"),
     })),
   };
 }
@@ -442,10 +657,12 @@ async function pollReviewOutputs(args: {
   apiUrl: string;
   authKey: string;
   session: SessionIdentifier;
-  threadId: string;
+  threadIds: string[];
   runId: string;
   timeoutMs: number;
   readinessSnapshots: ReadinessSnapshot[];
+  topology?: ReviewTopology;
+  complete?: (messages: SpecialistMessage[]) => boolean;
 }): Promise<{ snapshot: ExtendedState | null; specialistMessages: SpecialistMessage[] }> {
   const deadline = Date.now() + args.timeoutMs;
   let lastSnapshot: ExtendedState | null = null;
@@ -454,12 +671,13 @@ async function pollReviewOutputs(args: {
     const snapshot = await getExtended({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session);
     lastSnapshot = snapshot;
     recordReadinessSnapshot(args.readinessSnapshots, snapshot);
-    lastMessages = collectSpecialistMessages(allMessages(snapshot), args.threadId, args.runId);
+    lastMessages = collectSpecialistMessages(allMessages(snapshot), args.threadIds, args.runId);
     if (lastMessages.some((message) => message.status === "failed")) {
       return { snapshot, specialistMessages: lastMessages };
     }
-    const byStep = outputMap(lastMessages);
-    if (reviewStepOrder.every((step) => byStep.has(step))) {
+    const byStep = outputMap(lastMessages, args.topology);
+    const complete = args.complete ?? (() => reviewStepOrder.every((step) => byStep.has(step)));
+    if (complete(lastMessages)) {
       return { snapshot, specialistMessages: lastMessages };
     }
     const stopped = snapshot.agents
@@ -471,10 +689,42 @@ async function pollReviewOutputs(args: {
   return { snapshot: lastSnapshot, specialistMessages: lastMessages };
 }
 
-function transcriptFromSnapshot(snapshot: ExtendedState | null, threadId: string): unknown[] {
+function findMessage(args: {
+  messages: SpecialistMessage[];
+  step: string;
+  threadId?: string;
+  phase?: string;
+}): SpecialistMessage | null {
+  return args.messages.find((message) =>
+    message.status === "succeeded" &&
+    message.output &&
+    message.step === args.step &&
+    (args.threadId ? message.threadId === args.threadId : true) &&
+    (args.phase ? message.phase === args.phase : true)
+  ) ?? null;
+}
+
+function debateBranchesComplete(messages: SpecialistMessage[], proposalThreadId: string, critiqueThreadId: string): boolean {
+  return Boolean(
+    findMessage({ messages, step: "claim-scout", threadId: proposalThreadId, phase: "candidate-proposal" }) &&
+    findMessage({ messages, step: "memory-cartographer", threadId: proposalThreadId, phase: "memory-cartography" }) &&
+    findMessage({ messages, step: "proposal-editor", threadId: proposalThreadId, phase: "typed-proposal" }) &&
+    findMessage({ messages, step: "evidence-auditor", threadId: critiqueThreadId, phase: "preflight-critique" })
+  );
+}
+
+function debateFinalComplete(messages: SpecialistMessage[], proposalThreadId: string, critiqueThreadId: string): boolean {
+  return debateBranchesComplete(messages, proposalThreadId, critiqueThreadId) &&
+    Boolean(
+      findMessage({ messages, step: "decision-synthesizer", threadId: proposalThreadId, phase: "proposal-synthesis" })
+    );
+}
+
+function transcriptFromSnapshot(snapshot: ExtendedState | null, threadIds: string[]): unknown[] {
   if (!snapshot) return [];
+  const allowedThreadIds = new Set(threadIds);
   return allMessages(snapshot)
-    .filter((message) => message.threadId === threadId)
+    .filter((message) => allowedThreadIds.has(message.threadId))
     .map((message) => ({
       id: message.id,
       threadId: message.threadId,
@@ -485,8 +735,29 @@ function transcriptFromSnapshot(snapshot: ExtendedState | null, threadId: string
     }));
 }
 
-function writeSpecialistStepArtifacts(runDir: string, messages: SpecialistMessage[]): void {
+function safeFileToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 120) || "message";
+}
+
+function writeSpecialistMessageArtifacts(runDir: string, messages: SpecialistMessage[]): void {
   for (const message of messages) {
+    const token = safeFileToken(`${message.phase ?? "unphased"}-${message.messageId}`);
+    const messageDir = path.join(runDir, "steps", message.step, "messages", token);
+    writeJson(path.join(messageDir, "message.json"), message);
+    fs.writeFileSync(path.join(messageDir, "output.raw.md"), `${message.rawOutput ?? message.textExcerpt}\n`);
+    if (message.output) writeJson(path.join(messageDir, "output.parsed.json"), message.output);
+    if (message.error) writeJson(path.join(messageDir, "error.json"), message.error);
+  }
+}
+
+function writeSpecialistStepArtifacts(
+  runDir: string,
+  messages: SpecialistMessage[],
+  topology: ReviewTopology = defaultReviewTopology,
+): void {
+  writeSpecialistMessageArtifacts(runDir, messages);
+  const canonical = Array.from(outputMap(messages, topology).values());
+  for (const message of canonical) {
     const stepDir = path.join(runDir, "steps", message.step);
     writeJson(path.join(stepDir, "input.json"), {
       step: message.step,
@@ -494,6 +765,8 @@ function writeSpecialistStepArtifacts(runDir: string, messages: SpecialistMessag
       status: message.status,
       messageId: message.messageId,
       threadId: message.threadId,
+      topology: message.topology,
+      phase: message.phase,
       mentions: message.mentionNames,
       promptVersion: message.promptVersion,
       model: message.model,
@@ -504,6 +777,18 @@ function writeSpecialistStepArtifacts(runDir: string, messages: SpecialistMessag
     if (message.output) writeJson(path.join(stepDir, "output.parsed.json"), message.output);
     if (message.error) writeJson(path.join(stepDir, "error.json"), message.error);
   }
+}
+
+function toDeliberationMessages(messages: SpecialistMessage[]): DeliberationSpecialistMessage[] {
+  return messages.map((message) => ({
+    step: message.step,
+    agent: message.agent,
+    status: message.status,
+    messageId: message.messageId,
+    threadId: message.threadId,
+    phase: message.phase,
+    output: message.output,
+  }));
 }
 
 function failedSpecialistError(args: {
@@ -527,6 +812,274 @@ function failedSpecialistError(args: {
   );
 }
 
+export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Promise<CoralConsoleRunSession> {
+  const intent = options.intent ?? defaultReviewIntent;
+  const request = options.request ?? null;
+  const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? DEFAULT_SOURCE_LIMIT, 10));
+  const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? DEFAULT_SOURCE_CHAR_LIMIT, 24_000));
+  const coral = options.coral ?? {};
+  const topology = coral.topology ?? defaultReviewTopology;
+  const apiUrl = coral.apiUrl ?? `http://localhost:${refineryCoralPort}`;
+  const authKey = coral.authKey ?? refineryCoralAuthKey;
+  const configPath = coral.configPath ?? refineryCoralConfigPath;
+  const startServer = coral.startServer ?? !coral.apiUrl;
+  const serverMode = startServer ? "managed" : "attached";
+  const namespace = coral.namespace ?? `refinery-${options.runId}`;
+  const timeoutMs = coral.timeoutMs ?? defaultCoralReviewTimeoutMs(topology);
+  const configuredModel = resolveConfiguredModel(coral);
+  const logs: string[] = [];
+  const readinessSnapshots: ReadinessSnapshot[] = [];
+  const seededMessages: CoralConsoleRunResult["seededMessages"] = [];
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let session: SessionIdentifier | null = null;
+  let sessionCreated = false;
+  let closed = false;
+
+  try {
+    const [sources, activeMemories] = await Promise.all([
+      options.adapter.listSourceEvidence({ scope: options.scope, limit: sourceLimit }),
+      options.adapter.listActiveMemories({ scope: options.scope, limit: 50 }),
+    ]);
+    const sourceChunks = toSourceChunks(sources, sourceCharLimit);
+    const activeMemoryHints = memoryHints(activeMemories);
+    const intake = buildReviewIntake({
+      runId: options.runId,
+      project: options.project,
+      source: options.source,
+      target: options.target,
+      adapterName: options.adapter.name,
+      scope: options.scope,
+      intent,
+      request,
+      topology,
+      sourceLimit,
+      sourceCharLimit,
+      sourceChunks,
+      activeMemoryHints,
+    });
+
+    if (startServer && !(await isServerReady(apiUrl, authKey))) {
+      child = startCoralServer({
+        configPath,
+        coralPackage: coral.coralPackage ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
+        logs,
+      });
+    }
+    if (!(await waitForServer(apiUrl, authKey, 60_000))) {
+      throw new RefineryError(
+        "CORAL_SERVER_UNREACHABLE",
+        `Coral server was not reachable at ${apiUrl}.`,
+        { phase: "coral", runId: options.runId },
+      );
+    }
+
+    const registry = [];
+    for (const agentName of refineryCoralAgentNames) {
+      try {
+        await getLocalAgent({ apiUrl, authKey }, agentName);
+        registry.push({ agentName, ok: true });
+      } catch (error) {
+        registry.push({ agentName, ok: false, error: (error as Error).message });
+        throw new RefineryError(
+          "CORAL_AGENT_REGISTRY_MISSING",
+          `Coral registry missing ${agentName}: ${(error as Error).message}`,
+          { phase: "coral", runId: options.runId, details: registry },
+        );
+      }
+    }
+
+    if (coral.sessionId) {
+      session = { namespace, sessionId: coral.sessionId };
+    } else {
+      session = await createSession(
+        { apiUrl, authKey },
+        buildCoralSessionRequest({
+          namespace,
+          runId: options.runId,
+          modelName: configuredModel.modelName,
+          modelBaseUrl: configuredModel.baseUrl,
+          reasoningEffort: configuredModel.reasoningEffort,
+          maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? (topology === "debate-critique" ? "3" : "2"),
+          ttlMs: Math.max(timeoutMs + 60_000, 30 * 60_000),
+          holdAfterExitMs: Math.max(timeoutMs + 60_000, 30 * 60_000),
+        }),
+      );
+      sessionCreated = true;
+    }
+
+    const ready = await waitForAgentsReady(
+      { apiUrl, authKey },
+      session,
+      refineryCoralAgentNames,
+      (snapshot) => recordReadinessSnapshot(readinessSnapshots, snapshot),
+      { timeoutMs: 90_000, intervalMs: DEFAULT_WAIT_INTERVAL_MS },
+    );
+    if (!ready.ok) {
+      throw new RefineryError(
+        "CORAL_AGENTS_NOT_READY",
+        `Agents did not reach readiness. stopped=${ready.stopped.join(",") || "none"}`,
+        { phase: "coral", runId: options.runId, details: ready.snapshot },
+      );
+    }
+
+    let threadId: string;
+    let threadIds: string[];
+    let proposalThreadId: string | undefined;
+    let critiqueThreadId: string | undefined;
+
+    const rememberSeed = (message: CoralMessage): void => {
+      seededMessages.push({
+        id: message.id,
+        threadId: message.threadId,
+        senderName: message.senderName,
+        mentionNames: message.mentionNames ?? [],
+        textExcerpt: compactText(message.text),
+      });
+    };
+
+    if (topology === "debate-critique") {
+      if (coral.threadId) {
+        proposalThreadId = coral.threadId;
+      } else {
+        const proposalThread = await puppetCreateThread(
+          { apiUrl, authKey },
+          session,
+          "refinery-claim-scout",
+          {
+            threadName: `Refinery console ${options.runId} proposal`,
+            participantNames: refineryCoralAgentNames,
+          },
+        );
+        proposalThreadId = proposalThread.thread.id;
+      }
+      const critiqueThread = await puppetCreateThread(
+        { apiUrl, authKey },
+        session,
+        "refinery-evidence-auditor",
+        {
+          threadName: `Refinery console ${options.runId} critique`,
+          participantNames: refineryCoralAgentNames,
+        },
+      );
+      critiqueThreadId = critiqueThread.thread.id;
+      threadId = proposalThreadId;
+      threadIds = [proposalThreadId, critiqueThreadId];
+
+      const proposalSeed = await puppetSendMessage(
+        { apiUrl, authKey },
+        session,
+        "refinery-evidence-auditor",
+        {
+          threadId: proposalThreadId,
+          content: JSON.stringify({ ...intake, phase: "proposal-intake" }),
+          mentions: ["refinery-claim-scout"],
+        },
+      );
+      rememberSeed(proposalSeed.message);
+      const critiqueSeed = await puppetSendMessage(
+        { apiUrl, authKey },
+        session,
+        "refinery-claim-scout",
+        {
+          threadId: critiqueThreadId,
+          content: JSON.stringify({ ...intake, phase: "critique-intake" }),
+          mentions: ["refinery-evidence-auditor"],
+        },
+      );
+      rememberSeed(critiqueSeed.message);
+    } else {
+      if (coral.threadId) {
+        threadId = coral.threadId;
+      } else {
+        const thread = await puppetCreateThread(
+          { apiUrl, authKey },
+          session,
+          "refinery-claim-scout",
+          {
+            threadName: `Refinery console ${options.runId}`,
+            participantNames: refineryCoralAgentNames,
+          },
+        );
+        threadId = thread.thread.id;
+      }
+      threadIds = [threadId];
+      const seed = await puppetSendMessage(
+        { apiUrl, authKey },
+        session,
+        "refinery-evidence-auditor",
+        {
+          threadId,
+          content: JSON.stringify(intake),
+          mentions: ["refinery-claim-scout"],
+        },
+      );
+      rememberSeed(seed.message);
+    }
+
+    const close = async (): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      if (session && sessionCreated && !coral.noTeardown) {
+        await closeSession({ apiUrl, authKey }, session);
+      }
+      await stopStartedServer(child);
+    };
+
+    return {
+      managedServerStarted: Boolean(child),
+      managedProcess: child,
+      close,
+      result: {
+        ok: true,
+        schemaVersion: refineryReviewSchemaVersion,
+        command: "console run",
+        mode: "coral-console",
+        source: options.source,
+        target: options.target,
+        project: options.project,
+        adapter: { name: options.adapter.name },
+        scope: options.scope,
+        dryRun: true,
+        archive: false,
+        artifactDir: null,
+        writesAttempted: false,
+        runId: options.runId,
+        consoleUrl: buildConsoleUrl(apiUrl, "/ui/console"),
+        schemaUrl: buildConsoleUrl(apiUrl, "/api_v1.json"),
+        counts: {
+          sources: sources.length,
+          activeMemories: activeMemories.length,
+          seededMessages: seededMessages.length,
+        },
+        coral: {
+          apiUrl,
+          namespace: session.namespace,
+          sessionId: session.sessionId,
+          threadId,
+          threadIds,
+          ...(proposalThreadId ? { proposalThreadId } : {}),
+          ...(critiqueThreadId ? { critiqueThreadId } : {}),
+          agents: refineryCoralAgentNames,
+          topology,
+          serverMode,
+          managedServerStarted: Boolean(child),
+        },
+        seededMessages,
+        next: `Open ${buildConsoleUrl(apiUrl, "/ui/console")} and inspect namespace ${session.namespace}, session ${session.sessionId}.`,
+      },
+    };
+  } catch (error) {
+    if (session && sessionCreated && !coral.noTeardown) {
+      await closeSession({ apiUrl, authKey }, session);
+    }
+    await stopStartedServer(child);
+    throw applyErrorContext(asRefineryError(error, { code: "CORAL_CONSOLE_FAILED" }), {
+      phase: "coral",
+      runId: options.runId,
+    });
+  }
+}
+
 export async function runCoralReview(options: CoralReviewRunOptions): Promise<CoralReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
   const createdAt = new Date().toISOString();
@@ -535,27 +1088,23 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
   const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? DEFAULT_SOURCE_LIMIT, 10));
   const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? DEFAULT_SOURCE_CHAR_LIMIT, 24_000));
   const coral = options.coral ?? {};
+  const topology = coral.topology ?? defaultReviewTopology;
   const apiUrl = coral.apiUrl ?? `http://localhost:${refineryCoralPort}`;
   const authKey = coral.authKey ?? refineryCoralAuthKey;
   const configPath = coral.configPath ?? refineryCoralConfigPath;
   const startServer = coral.startServer ?? !coral.apiUrl;
   const serverMode = startServer ? "managed" : "attached";
   const namespace = coral.namespace ?? `refinery-${options.runId}`;
-  const timeoutMs = coral.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
-  const localEnv = loadLocalEnv(repoRoot);
-  const readConfig = (name: string): string | undefined => process.env[name] ?? localEnv[name];
-  const configuredModel = {
-    provider: readConfig("MODEL_PROVIDER") ?? readConfig("REFINERY_MODEL_PROVIDER") ?? "openrouter",
-    baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
-    modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
-    reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,
-    maxTokens: parseModelMaxTokens(readConfig("MODEL_MAX_TOKENS") ?? readConfig("REFINERY_MODEL_MAX_TOKENS")),
-  };
+  const timeoutMs = coral.timeoutMs ?? defaultCoralReviewTimeoutMs(topology);
+  const configuredModel = resolveConfiguredModel(coral);
   const logs: string[] = [];
   const readinessSnapshots: ReadinessSnapshot[] = [];
   let child: ChildProcessWithoutNullStreams | null = null;
   let session: SessionIdentifier | null = null;
   let threadId: string | null = null;
+  let threadIds: string[] = [];
+  let proposalThreadId: string | null = null;
+  let critiqueThreadId: string | null = null;
   let sessionCreated = false;
   let threadCreated = false;
   let finalSnapshot: ExtendedState | null = null;
@@ -569,46 +1118,21 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     ]);
     const sourceChunks = toSourceChunks(sources, sourceCharLimit);
     const activeMemoryHints = memoryHints(activeMemories);
-    const intake = {
-      schemaVersion: refineryReviewSchemaVersion,
-      type: "refinery-review-intake",
+    const intake = buildReviewIntake({
       runId: options.runId,
       project: options.project,
       source: options.source,
       target: options.target,
-      adapter: options.adapter.name,
+      adapterName: options.adapter.name,
       scope: options.scope,
       intent,
       request,
-      intentDescription: describeReviewIntent(intent),
-      noApply: true,
-      dryRun: true,
+      topology,
       sourceLimit,
       sourceCharLimit,
-      source_chunks: sourceChunks,
-      active_memory_hints: activeMemoryHints,
-      proposal_schema: {
-        schemaVersion: refineryReviewSchemaVersion,
-        lifecycle: "proposed",
-        writesAttempted: false,
-        actions: memoryMaintenanceActions,
-        intentFields: [
-          "staleness_reason",
-          "forget_reason",
-          "update_reason",
-          "conflict_reason",
-          "scope_reason",
-          "replacement_body",
-          "ambiguities",
-        ],
-      },
-      instruction: [
-        "Coordinate over this intake and emit proposal-shaped outputs only.",
-        `Review intent: ${intent}. ${describeReviewIntent(intent)}`,
-        request ? `User request: ${request}` : "No additional user request.",
-        "Do not activate, approve, or write memory.",
-      ].join(" "),
-    };
+      sourceChunks,
+      activeMemoryHints,
+    });
     writeJson(path.join(runDir, "input.json"), intake);
 
     if (startServer && !(await isServerReady(apiUrl, authKey))) {
@@ -652,7 +1176,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
           modelName: configuredModel.modelName,
           modelBaseUrl: configuredModel.baseUrl,
           reasoningEffort: configuredModel.reasoningEffort,
-          maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? "2",
+          maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? (topology === "debate-critique" ? "3" : "2"),
           ttlMs: Math.max(timeoutMs + 60_000, 180_000),
           holdAfterExitMs: Math.max(timeoutMs + 60_000, 180_000),
         }),
@@ -675,49 +1199,284 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       );
     }
 
-    if (coral.threadId) {
-      threadId = coral.threadId;
-    } else {
-      const thread = await puppetCreateThread(
+    if (topology === "debate-critique") {
+      if (coral.threadId) {
+        proposalThreadId = coral.threadId;
+      } else {
+        const proposalThread = await puppetCreateThread(
+          { apiUrl, authKey },
+          session,
+          "refinery-claim-scout",
+          {
+            threadName: `Refinery review ${options.runId} proposal`,
+            participantNames: refineryCoralAgentNames,
+          },
+        );
+        proposalThreadId = proposalThread.thread.id;
+        threadCreated = true;
+      }
+      threadId = proposalThreadId;
+      threadIds = [proposalThreadId];
+
+      await puppetSendMessage(
         { apiUrl, authKey },
         session,
-        "refinery-capture",
+        "refinery-evidence-auditor",
         {
-          threadName: `Refinery review ${options.runId}`,
+          threadId: proposalThreadId,
+          content: JSON.stringify({ ...intake, phase: "proposal-intake" }),
+          mentions: ["refinery-claim-scout"],
+        },
+      );
+
+      const claimScoutPoll = await pollReviewOutputs({
+        apiUrl,
+        authKey,
+        session,
+        threadIds,
+        runId: options.runId,
+        timeoutMs,
+        readinessSnapshots,
+        topology,
+        complete: (messages) => Boolean(
+          findMessage({ messages, step: "claim-scout", threadId: proposalThreadId!, phase: "candidate-proposal" }),
+        ),
+      });
+      finalSnapshot = claimScoutPoll.snapshot;
+      specialistMessages = claimScoutPoll.specialistMessages;
+      const claimScoutFailure = specialistMessages.find((message) => message.status === "failed");
+      if (claimScoutFailure) {
+        writeSpecialistStepArtifacts(runDir, specialistMessages, topology);
+        throw failedSpecialistError({ runDir, runId: options.runId, message: claimScoutFailure });
+      }
+      const claimScoutMessage = findMessage({
+        messages: specialistMessages,
+        step: "claim-scout",
+        threadId: proposalThreadId,
+        phase: "candidate-proposal",
+      });
+      if (!claimScoutMessage?.output) {
+        throw new RefineryError(
+          "CORAL_REVIEW_INCOMPLETE",
+          "Debate/critique review did not emit claim scout candidates before claim critique.",
+          { phase: "coral", runId: options.runId, runDir, details: { specialistMessages } },
+        );
+      }
+      const claimCards = claimCardsForCritique({
+        runId: options.runId,
+        claimScoutOutput: claimScoutMessage.output,
+      });
+
+      const critiqueThread = await puppetCreateThread(
+        { apiUrl, authKey },
+        session,
+        "refinery-evidence-auditor",
+        {
+          threadName: `Refinery review ${options.runId} claim critique`,
           participantNames: refineryCoralAgentNames,
         },
       );
-      threadId = thread.thread.id;
+      critiqueThreadId = critiqueThread.thread.id;
       threadCreated = true;
-    }
-    await puppetSendMessage(
-      { apiUrl, authKey },
-      session,
-      "refinery-relationship-review",
-      {
-        threadId,
-        content: JSON.stringify(intake),
-        mentions: ["refinery-capture"],
-      },
-    );
+      threadIds = [proposalThreadId, critiqueThreadId];
 
-    const polled = await pollReviewOutputs({
-      apiUrl,
-      authKey,
-      session,
-      threadId,
-      runId: options.runId,
-      timeoutMs,
-      readinessSnapshots,
-    });
-    finalSnapshot = polled.snapshot;
-    specialistMessages = polled.specialistMessages;
-    writeSpecialistStepArtifacts(runDir, specialistMessages);
+      await puppetSendMessage(
+        { apiUrl, authKey },
+        session,
+        "refinery-claim-scout",
+        {
+          threadId: critiqueThreadId,
+          content: JSON.stringify({
+            ...intake,
+            phase: "critique-intake",
+            claim_cards: claimCards,
+            context: {
+              source_chunks: sourceChunks,
+              active_memory_hints: activeMemoryHints,
+              review_intent: intent,
+              review_request: request,
+              intent_description: describeReviewIntent(intent),
+              topology,
+              phase: "critique-intake",
+              claim_cards: claimCards,
+            },
+          }),
+          mentions: ["refinery-evidence-auditor"],
+        },
+      );
+
+      const branches = await pollReviewOutputs({
+        apiUrl,
+        authKey,
+        session,
+        threadIds,
+        runId: options.runId,
+        timeoutMs,
+        readinessSnapshots,
+        topology,
+        complete: (messages) => debateBranchesComplete(messages, proposalThreadId!, critiqueThreadId!),
+      });
+      finalSnapshot = branches.snapshot;
+      specialistMessages = branches.specialistMessages;
+      const branchFailure = specialistMessages.find((message) => message.status === "failed");
+      if (branchFailure) {
+        writeSpecialistStepArtifacts(runDir, specialistMessages, topology);
+        throw failedSpecialistError({ runDir, runId: options.runId, message: branchFailure });
+      }
+      if (!debateBranchesComplete(specialistMessages, proposalThreadId, critiqueThreadId)) {
+        throw new RefineryError(
+          "CORAL_REVIEW_INCOMPLETE",
+          "Debate/critique branches did not emit required proposal and critique outputs before merge.",
+          { phase: "coral", runId: options.runId, runDir, details: { specialistMessages } },
+        );
+      }
+
+      const proposalEditorMessage = findMessage({
+        messages: specialistMessages,
+        step: "proposal-editor",
+        threadId: proposalThreadId,
+        phase: "typed-proposal",
+      });
+      const evidenceAudit = findMessage({
+        messages: specialistMessages,
+        step: "evidence-auditor",
+        threadId: critiqueThreadId,
+        phase: "preflight-critique",
+      });
+      if (!proposalEditorMessage?.output || !evidenceAudit?.output) {
+        throw new RefineryError(
+          "CORAL_REVIEW_INCOMPLETE",
+          "Debate/critique merge inputs were missing after branch completion.",
+          { phase: "coral", runId: options.runId, runDir, details: { proposalEditorMessage, evidenceAudit } },
+        );
+      }
+
+      const branchDeliberation = buildDeliberationArtifacts({
+        runId: options.runId,
+        topology,
+        messages: toDeliberationMessages(specialistMessages),
+      });
+      const critique = {
+        topology,
+        proposalThreadId,
+        critiqueThreadId,
+        claim_cards: branchDeliberation.claims.length > 0 ? branchDeliberation.claims : claimCards,
+        challenge_ledger: branchDeliberation.challengeLedger,
+        deliberation_trace: branchDeliberation.trace,
+        evidenceAudit: evidenceAudit.output,
+        evidenceMessages: [
+          {
+            step: evidenceAudit.step,
+            phase: evidenceAudit.phase,
+            agent: evidenceAudit.agent,
+            messageId: evidenceAudit.messageId,
+            threadId: evidenceAudit.threadId,
+          },
+        ],
+      };
+      const merge = {
+        schemaVersion: refineryReviewSchemaVersion,
+        type: "refinery-review-merge",
+        topology,
+        phase: "proposal-synthesis-intake",
+        runId: options.runId,
+        project: options.project,
+        source: options.source,
+        target: options.target,
+        adapter: options.adapter.name,
+        scope: options.scope,
+        intent,
+        request,
+        context: {
+          source_chunks: sourceChunks,
+          active_memory_hints: activeMemoryHints,
+          review_intent: intent,
+          review_request: request,
+          intent_description: describeReviewIntent(intent),
+          topology,
+          claim_cards: branchDeliberation.claims.length > 0 ? branchDeliberation.claims : claimCards,
+          challenge_ledger: branchDeliberation.challengeLedger,
+          debate_critique: critique,
+        },
+        proposal_editor_output: proposalEditorMessage.output,
+        critique,
+        instruction: [
+          "Merge the typed proposal branch with the local claim critique thread.",
+          "Reject, qualify, or endorse candidates according to claim-level challenges and evidence.",
+          "Do not activate, approve, or write memory.",
+        ].join(" "),
+      };
+      await puppetSendMessage(
+        { apiUrl, authKey },
+        session,
+        "refinery-proposal-editor",
+        {
+          threadId: proposalThreadId,
+          content: JSON.stringify(merge),
+          mentions: ["refinery-decision-synthesizer"],
+        },
+      );
+
+      const final = await pollReviewOutputs({
+        apiUrl,
+        authKey,
+        session,
+        threadIds,
+        runId: options.runId,
+        timeoutMs,
+        readinessSnapshots,
+        topology,
+        complete: (messages) => debateFinalComplete(messages, proposalThreadId!, critiqueThreadId!),
+      });
+      finalSnapshot = final.snapshot;
+      specialistMessages = final.specialistMessages;
+    } else {
+      if (coral.threadId) {
+        threadId = coral.threadId;
+      } else {
+        const thread = await puppetCreateThread(
+          { apiUrl, authKey },
+          session,
+          "refinery-claim-scout",
+          {
+            threadName: `Refinery review ${options.runId}`,
+            participantNames: refineryCoralAgentNames,
+          },
+        );
+        threadId = thread.thread.id;
+        threadCreated = true;
+      }
+      threadIds = [threadId];
+      await puppetSendMessage(
+        { apiUrl, authKey },
+        session,
+        "refinery-evidence-auditor",
+        {
+          threadId,
+          content: JSON.stringify(intake),
+          mentions: ["refinery-claim-scout"],
+        },
+      );
+
+      const polled = await pollReviewOutputs({
+        apiUrl,
+        authKey,
+        session,
+        threadIds,
+        runId: options.runId,
+        timeoutMs,
+        readinessSnapshots,
+        topology,
+      });
+      finalSnapshot = polled.snapshot;
+      specialistMessages = polled.specialistMessages;
+    }
+    writeSpecialistStepArtifacts(runDir, specialistMessages, topology);
     const failedMessage = specialistMessages.find((message) => message.status === "failed");
     if (failedMessage) {
       throw failedSpecialistError({ runDir, runId: options.runId, message: failedMessage });
     }
-    const byStep = outputMap(specialistMessages);
+    const byStep = outputMap(specialistMessages, topology);
     const missingSteps = reviewStepOrder.filter((step) => !byStep.has(step));
     if (missingSteps.length > 0) {
       throw new RefineryError(
@@ -727,20 +1486,30 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       );
     }
 
-    const relevance = byStep.get("relevance");
-    if (!relevance) throw new Error("Missing relevance output.");
-    const parsedRelevance = parseRelevanceOutput(options.runId, relevance.output ?? {});
-    parsedRelevance.proposals = parsedRelevance.proposals.map((proposal) => ({
+    const decisionSynthesis = byStep.get("decision-synthesizer");
+    if (!decisionSynthesis) throw new Error("Missing decision-synthesizer output.");
+    const parsedDecision = parseDecisionSynthesizerOutput(options.runId, decisionSynthesis.output ?? {});
+    parsedDecision.proposals = parsedDecision.proposals.map((proposal) => ({
       ...proposal,
       intent,
     }));
-    const relationshipReview = byStep.get("relationship-review")?.output ?? { findings: [] };
-    writeJson(path.join(runDir, "proposals.json"), parsedRelevance.proposals);
-    writeJson(path.join(runDir, "rejected.json"), parsedRelevance.rejected);
+    const evidenceReview = byStep.get("evidence-auditor")?.output ?? { findings: [] };
+    const deliberation: DeliberationArtifacts = buildDeliberationArtifacts({
+      runId: options.runId,
+      topology,
+      messages: toDeliberationMessages(specialistMessages),
+    });
+    writeJson(path.join(runDir, "claims.json"), deliberation.claims);
+    writeJson(path.join(runDir, "challenge-ledger.json"), deliberation.challengeLedger);
+    writeJson(path.join(runDir, "deliberation.json"), deliberation);
+    writeJson(path.join(runDir, "proposals.json"), parsedDecision.proposals);
+    writeJson(path.join(runDir, "rejected.json"), parsedDecision.rejected);
 
-    const transcript = transcriptFromSnapshot(finalSnapshot, threadId);
+    const transcript = transcriptFromSnapshot(finalSnapshot, threadIds);
     const runtime = {
       kind: "coral",
+      topology,
+      topologyDesign: topology === "debate-critique" ? "claim-centered-interruptible" : "pipeline",
       serverMode,
       apiUrl,
       authKeyPresent: Boolean(authKey),
@@ -748,6 +1517,9 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       namespace: session.namespace,
       sessionId: session.sessionId,
       threadId,
+      threadIds,
+      proposalThreadId,
+      critiqueThreadId,
       agents: refineryCoralAgentNames,
       startedServer: Boolean(child),
       sessionCreated,
@@ -760,16 +1532,21 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       status: "succeeded",
       runId: options.runId,
       apiUrl,
+      topology,
       serverMode,
       configPath: runtime.configPath,
       session,
       threadId,
+      threadIds,
+      proposalThreadId,
+      critiqueThreadId,
       agents: refineryCoralAgentNames,
       sessionCreated,
       threadCreated,
       model: configuredModel,
       readinessSnapshots,
       specialistMessages,
+      deliberation,
       transcriptExcerpts: transcript,
       serverLogExcerpt: logs.slice(-200),
     };
@@ -788,12 +1565,21 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       sinkUrl: options.sink?.url ?? null,
       runtime,
       model: configuredModel,
-      specialistOrder: reviewStepOrder,
+      specialistOrder: topology === "debate-critique"
+        ? [
+          "proposal:claim-scout",
+          "proposal:memory-cartographer",
+          "critique:evidence-auditor",
+          "proposal:proposal-editor",
+          "proposal:decision-synthesizer",
+        ]
+        : reviewStepOrder,
       sourceLimit,
       sourceCharLimit,
       intent,
       request,
     };
+    const manifestMetadata = metadata as unknown as Record<string, unknown>;
     const result: CoralReviewRunResult = {
       ok: true,
       schemaVersion: refineryReviewSchemaVersion,
@@ -810,16 +1596,20 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       counts: {
         sources: sources.length,
         activeMemories: activeMemories.length,
-        proposals: parsedRelevance.proposals.length,
-        rejected: parsedRelevance.rejected.length,
+        proposals: parsedDecision.proposals.length,
+        rejected: parsedDecision.rejected.length,
+        claims: deliberation.summary.claims,
+        challenges: deliberation.summary.challenges,
+        deliberationMoves: deliberation.summary.moves,
       },
-      proposals: parsedRelevance.proposals,
-      rejected: parsedRelevance.rejected,
-      relationshipReview,
+      proposals: parsedDecision.proposals,
+      rejected: parsedDecision.rejected,
+      evidenceReview,
       coral: {
         namespace: session.namespace,
         sessionId: session.sessionId,
-        threadId,
+        threadId: threadId ?? threadIds[0] ?? "",
+        threadIds,
         agents: refineryCoralAgentNames,
       },
       metadata,
@@ -835,7 +1625,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       status: "succeeded",
       createdAt,
       counts: result.counts,
-      metadata,
+      metadata: manifestMetadata,
       intent,
       request,
     });
@@ -854,7 +1644,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       status: "succeeded",
       createdAt,
       counts: result.counts,
-      metadata,
+      metadata: manifestMetadata,
       intent,
       request,
     });
@@ -870,17 +1660,21 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       status: "failed",
       runId: options.runId,
       apiUrl,
+      topology,
       serverMode,
       configPath: path.isAbsolute(configPath) ? configPath : path.resolve(repoRoot, configPath),
       session,
       threadId,
+      threadIds,
+      proposalThreadId,
+      critiqueThreadId,
       agents: refineryCoralAgentNames,
       model: configuredModel,
       intent,
       request,
       readinessSnapshots,
       specialistMessages,
-      transcriptExcerpts: threadId ? transcriptFromSnapshot(finalSnapshot, threadId) : [],
+      transcriptExcerpts: threadIds.length > 0 ? transcriptFromSnapshot(finalSnapshot, threadIds) : [],
       serverLogExcerpt: logs.slice(-200),
       error: {
         code: refineryError.code,

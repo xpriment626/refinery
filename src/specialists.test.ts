@@ -5,7 +5,7 @@ import { specialists } from "./core/specialists/index.ts";
 test("local specialists remain explicit Coral review roles with contracts", () => {
   assert.deepEqual(
     specialists.map((s) => s.name),
-    ["capture", "distillation", "schema", "relevance", "relationship-review"],
+    ["claim-scout", "memory-cartographer", "evidence-auditor", "proposal-editor", "decision-synthesizer"],
   );
 
   for (const specialist of specialists) {

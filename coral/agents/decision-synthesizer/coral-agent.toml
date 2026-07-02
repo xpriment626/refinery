@@ -1,0 +1,23 @@
+edition = 4
+
+[agent]
+name = "refinery-decision-synthesizer"
+version = "0.1.0"
+description = "Refinery Decision Synthesizer specialist as a Coral executable agent."
+summary = "Decision Synthesizer resolves challenges into final proposed edits, rejected candidates, and unresolved questions."
+readme = "Executable Refinery specialist. Worker owns Coral wait/send and maps to src/core/specialists/decision-synthesizer."
+
+[agent.license]
+type = "spdx"
+expression = "MIT"
+
+[options]
+MODEL_NAME = { type = "string", default = "deepseek/deepseek-v4-pro" }
+MODEL_BASE_URL = { type = "string", default = "https://openrouter.ai/api/v1" }
+REASONING_EFFORT = { type = "string", default = "low" }
+REFINERY_CORAL_MAX_TURNS = { type = "string", default = "1" }
+
+[runtimes.executable]
+path = "../run-worker.sh"
+arguments = ["--specialist", "decision-synthesizer"]
+transport = "streamable_http"

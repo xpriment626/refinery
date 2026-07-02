@@ -33,13 +33,13 @@ test("core MCP lists storage-agnostic specialist contracts", () => {
 
 test("core MCP builds prompt pairs without storage inputs", () => {
   const response = callTool("refinery_build_specialist_prompt", {
-    name: "capture",
+    name: "claim-scout",
     input: { source_chunks: [{ text: "Remember this design decision." }] },
   });
 
   assert.equal(response.error, undefined);
   const content = response.result?.structuredContent;
-  assert.equal(content?.specialist, "capture");
-  assert.match(String(content?.system), /You are the Capture specialist/);
+  assert.equal(content?.specialist, "claim-scout");
+  assert.match(String(content?.system), /You are the Claim Scout/);
   assert.match(String(content?.user), /Remember this design decision/);
 });

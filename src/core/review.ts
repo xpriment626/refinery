@@ -42,6 +42,9 @@ export interface ReviewRunResult {
     activeMemories: number;
     proposals: number;
     rejected: number;
+    claims?: number;
+    challenges?: number;
+    deliberationMoves?: number;
   };
   proposals: MemoryProposal[];
   rejected: ReviewRejected[];

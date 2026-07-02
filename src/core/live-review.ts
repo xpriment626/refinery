@@ -2,24 +2,20 @@ import type { ModelConfig } from "../env.ts";
 import { memoryMaintenanceActions, type MemoryMaintenanceAction } from "./adapter.ts";
 import type { LocalSpecialist } from "./specialists/types.ts";
 
-export interface CaptureCandidate {
+export interface ClaimScoutCandidate {
   claim: string;
   source_refs: unknown[];
   why_future_useful: string;
 }
 
-export interface CaptureOutput {
-  candidates: CaptureCandidate[];
+export interface ClaimScoutOutput {
+  candidates: ClaimScoutCandidate[];
 }
 
 export interface DistilledMemory {
   body: string;
   source_refs: unknown[];
   rationale: string;
-}
-
-export interface DistillationOutput {
-  distilled: DistilledMemory[];
 }
 
 export interface TypedCandidate {
@@ -35,14 +31,15 @@ export interface TypedCandidate {
   proposed_scope: string;
   action: MemoryMaintenanceAction;
   target_memory_id: string | number | null;
+  target_memory_ids?: Array<string | number>;
   source_refs: unknown[];
 }
 
-export interface SchemaOutput {
+export interface ProposalEditorOutput {
   typed: TypedCandidate[];
 }
 
-export interface RelevanceProposal {
+export interface MemoryProposalDraft {
   memory_type: string;
   proposed_scope: string;
   body: string;
@@ -51,6 +48,7 @@ export interface RelevanceProposal {
   source_refs: unknown[];
   action: MemoryMaintenanceAction;
   target_memory_id: string | number | null;
+  target_memory_ids?: Array<string | number>;
   staleness_reason?: string | null;
   forget_reason?: string | null;
   update_reason?: string | null;
@@ -65,8 +63,8 @@ export interface RejectedCandidate {
   reason: string;
 }
 
-export interface RelevanceOutput {
-  proposals: RelevanceProposal[];
+export interface DecisionSynthesizerOutput {
+  proposals: MemoryProposalDraft[];
   rejected: RejectedCandidate[];
 }
 
@@ -80,7 +78,7 @@ export interface RelationshipFinding {
   memory_refs: { memory_id: string | number; provenance_kind: string | null }[];
 }
 
-export interface RelationshipReviewOutput {
+export interface EvidenceFindingOutput {
   findings: RelationshipFinding[];
 }
 
@@ -130,13 +128,33 @@ function optionalStringArray(record: Record<string, unknown>, field: string): st
   return value;
 }
 
-export function parseCapture(raw: string): CaptureOutput {
+function parseTargetMemoryIds(value: unknown, label: string): {
+  target_memory_id: string | number | null;
+  target_memory_ids: Array<string | number>;
+} {
+  if (value === null || value === undefined) {
+    return { target_memory_id: null, target_memory_ids: [] };
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    return { target_memory_id: value, target_memory_ids: [value] };
+  }
+  if (Array.isArray(value)) {
+    const ids = value.filter((item): item is string | number => typeof item === "string" || typeof item === "number");
+    if (ids.length !== value.length) {
+      throw new Error(`${label} target_memory_id must contain only strings or numbers when an array is used.`);
+    }
+    return { target_memory_id: ids[0] ?? null, target_memory_ids: ids };
+  }
+  throw new Error(`${label} target_memory_id must be string, number, null, or an array of strings/numbers.`);
+}
+
+export function parseClaimScout(raw: string): ClaimScoutOutput {
   const parsed = extractJson(raw) as { candidates?: unknown[] };
-  if (!Array.isArray(parsed.candidates)) throw new Error("Capture output must contain candidates array.");
+  if (!Array.isArray(parsed.candidates)) throw new Error("Claim Scout output must contain candidates array.");
   return {
     candidates: parsed.candidates.map((candidate, index) => {
       if (!candidate || typeof candidate !== "object") throw new Error(`Candidate ${index} must be an object.`);
-      const c = candidate as Partial<CaptureCandidate>;
+      const c = candidate as Partial<ClaimScoutCandidate>;
       if (typeof c.claim !== "string" || !c.claim.trim()) throw new Error(`Candidate ${index} missing claim.`);
       if (!Array.isArray(c.source_refs)) throw new Error(`Candidate ${index} missing source_refs array.`);
       if (typeof c.why_future_useful !== "string" || !c.why_future_useful.trim()) {
@@ -147,26 +165,9 @@ export function parseCapture(raw: string): CaptureOutput {
   };
 }
 
-export function parseDistillation(raw: string): DistillationOutput {
-  const parsed = extractJson(raw) as { distilled?: unknown[] };
-  if (!Array.isArray(parsed.distilled)) throw new Error("Distillation output must contain distilled array.");
-  return {
-    distilled: parsed.distilled.map((item, index) => {
-      if (!item || typeof item !== "object") throw new Error(`Distilled item ${index} must be an object.`);
-      const d = item as Partial<DistilledMemory>;
-      if (typeof d.body !== "string" || !d.body.trim()) throw new Error(`Distilled item ${index} missing body.`);
-      if (!Array.isArray(d.source_refs)) throw new Error(`Distilled item ${index} missing source_refs array.`);
-      if (typeof d.rationale !== "string" || !d.rationale.trim()) {
-        throw new Error(`Distilled item ${index} missing rationale.`);
-      }
-      return { body: d.body, source_refs: d.source_refs, rationale: d.rationale };
-    }),
-  };
-}
-
-export function parseSchema(raw: string): SchemaOutput {
+export function parseProposalEditor(raw: string): ProposalEditorOutput {
   const parsed = extractJson(raw) as { typed?: unknown[] };
-  if (!Array.isArray(parsed.typed)) throw new Error("Schema output must contain typed array.");
+  if (!Array.isArray(parsed.typed)) throw new Error("Proposal Editor output must contain typed array.");
   return {
     typed: parsed.typed.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Typed item ${index} must be an object.`);
@@ -192,9 +193,11 @@ export function parseSchema(raw: string): SchemaOutput {
         throw new Error(`Typed item ${index} missing proposed_scope.`);
       }
       const action = parseAction(t.action, (t as { mutation_op?: unknown }).mutation_op, `Typed item ${index}`);
-      if (t.target_memory_id !== null && typeof t.target_memory_id !== "string" && typeof t.target_memory_id !== "number") {
-        throw new Error(`Typed item ${index} target_memory_id must be string, number, or null.`);
-      }
+      const record = item as Record<string, unknown>;
+      const target = parseTargetMemoryIds(
+        record.target_memory_ids ?? record.target_memory_id,
+        `Typed item ${index}`,
+      );
       if (!Array.isArray(t.source_refs)) throw new Error(`Typed item ${index} missing source_refs array.`);
       return {
         body: t.body,
@@ -208,22 +211,23 @@ export function parseSchema(raw: string): SchemaOutput {
         ttl: t.ttl,
         proposed_scope: t.proposed_scope,
         action,
-        target_memory_id: t.target_memory_id,
+        target_memory_id: target.target_memory_id,
+        ...(target.target_memory_ids.length > 1 ? { target_memory_ids: target.target_memory_ids } : {}),
         source_refs: t.source_refs,
       };
     }),
   };
 }
 
-export function parseRelevance(raw: string): RelevanceOutput {
+export function parseDecisionSynthesizer(raw: string): DecisionSynthesizerOutput {
   const parsed = extractJson(raw) as { proposals?: unknown[]; rejected?: unknown[] };
   if (!Array.isArray(parsed.proposals) || !Array.isArray(parsed.rejected)) {
-    throw new Error("Relevance output must contain proposals and rejected arrays.");
+    throw new Error("Decision Synthesizer output must contain proposals and rejected arrays.");
   }
   return {
     proposals: parsed.proposals.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Proposal ${index} must be an object.`);
-      const p = item as Partial<RelevanceProposal>;
+      const p = item as Partial<MemoryProposalDraft>;
       if (typeof p.memory_type !== "string" || !p.memory_type.trim()) throw new Error(`Proposal ${index} missing memory_type.`);
       if (typeof p.proposed_scope !== "string" || !p.proposed_scope.trim()) {
         throw new Error(`Proposal ${index} missing proposed_scope.`);
@@ -235,10 +239,11 @@ export function parseRelevance(raw: string): RelevanceOutput {
       if (typeof p.rationale !== "string" || !p.rationale.trim()) throw new Error(`Proposal ${index} missing rationale.`);
       if (!Array.isArray(p.source_refs)) throw new Error(`Proposal ${index} missing source_refs array.`);
       const action = parseAction(p.action, (p as { mutation_op?: unknown }).mutation_op, `Proposal ${index}`);
-      if (p.target_memory_id !== null && typeof p.target_memory_id !== "string" && typeof p.target_memory_id !== "number") {
-        throw new Error(`Proposal ${index} target_memory_id must be string, number, or null.`);
-      }
       const record = item as Record<string, unknown>;
+      const target = parseTargetMemoryIds(
+        record.target_memory_ids ?? record.target_memory_id,
+        `Proposal ${index}`,
+      );
       return {
         memory_type: p.memory_type,
         proposed_scope: p.proposed_scope,
@@ -247,7 +252,8 @@ export function parseRelevance(raw: string): RelevanceOutput {
         rationale: p.rationale,
         source_refs: p.source_refs,
         action,
-        target_memory_id: p.target_memory_id,
+        target_memory_id: target.target_memory_id,
+        ...(target.target_memory_ids.length > 1 ? { target_memory_ids: target.target_memory_ids } : {}),
         ...(optionalString(record, "staleness_reason") !== undefined ? { staleness_reason: optionalString(record, "staleness_reason") } : {}),
         ...(optionalString(record, "forget_reason") !== undefined ? { forget_reason: optionalString(record, "forget_reason") } : {}),
         ...(optionalString(record, "update_reason") !== undefined ? { update_reason: optionalString(record, "update_reason") } : {}),
@@ -260,15 +266,25 @@ export function parseRelevance(raw: string): RelevanceOutput {
     rejected: parsed.rejected.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Rejected item ${index} must be an object.`);
       const r = item as Partial<RejectedCandidate>;
-      if (typeof r.reason !== "string" || !r.reason.trim()) throw new Error(`Rejected item ${index} missing reason.`);
-      return { body: typeof r.body === "string" ? r.body : undefined, reason: r.reason };
+      const explanation = (item as { rejection_rationale?: unknown }).rejection_rationale
+        ?? (item as { rationale?: unknown }).rationale
+        ?? (item as { rejection_reason?: unknown }).rejection_reason
+        ?? (item as { type_rationale?: unknown }).type_rationale
+        ?? (item as { update_reason?: unknown }).update_reason;
+      const reason = typeof r.reason === "string" && r.reason.trim()
+        ? r.reason
+        : typeof explanation === "string" && explanation.trim()
+          ? explanation
+          : null;
+      if (!reason) throw new Error(`Rejected item ${index} missing reason.`);
+      return { body: typeof r.body === "string" ? r.body : undefined, reason };
     }),
   };
 }
 
-export function parseRelationshipReview(raw: string): RelationshipReviewOutput {
+export function parseEvidenceFindings(raw: string): EvidenceFindingOutput {
   const parsed = extractJson(raw) as { findings?: unknown[] };
-  if (!Array.isArray(parsed.findings)) throw new Error("Relationship Review output must contain findings array.");
+  if (!Array.isArray(parsed.findings)) throw new Error("Evidence finding output must contain findings array.");
   return {
     findings: parsed.findings.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Finding ${index} must be an object.`);

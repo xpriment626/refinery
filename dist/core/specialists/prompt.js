@@ -1,0 +1,25 @@
+export function buildSpecialistInstructions(specialist) {
+    return [
+        specialist.prompt,
+        "",
+        "Input contract:",
+        ...specialist.inputContract.map((item) => `- ${item}`),
+        "",
+        "Output contract:",
+        ...specialist.outputContract.map((item) => `- ${item}`),
+        "",
+        "Tool boundary:",
+        `- Allowed tools: ${specialist.toolBoundary.allowedTools.join(", ") || "none"}`,
+        `- Forbidden tools: ${specialist.toolBoundary.forbiddenTools.join(", ") || "none"}`,
+    ].join("\n");
+}
+export function buildSpecialistUserPrompt(input) {
+    return [
+        "Process this Refinery payload using your specialist contract.",
+        "",
+        "Return only JSON that satisfies the output contract.",
+        "",
+        JSON.stringify(input, null, 2),
+    ].join("\n");
+}
+//# sourceMappingURL=prompt.js.map

@@ -28,6 +28,7 @@ import {
   refineryCoralModelDefaults,
   refineryCoralPort,
 } from "./definitions.ts";
+import { resolveRefineryPaths } from "../core/paths.ts";
 
 interface SmokeArgs {
   apiUrl: string;
@@ -80,7 +81,7 @@ function parseArgs(argv: string[]): SmokeArgs {
     configPath: read("--config") ?? refineryCoralConfigPath,
     namespace: read("--namespace") ?? `refinery-${runId}`,
     runId,
-    outputDir: read("--output-dir") ?? path.join(".refinery", "trials", runId),
+    outputDir: read("--output-dir") ?? path.join(resolveRefineryPaths({ cwd: repoRoot }).runsDir, runId),
     startServer: has("--start-server"),
     coralPackage: read("--coral-package") ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
     timeoutMs: Number.parseInt(read("--timeout-ms") ?? "180000", 10),
@@ -202,11 +203,11 @@ async function runSmoke(args: SmokeArgs): Promise<SmokeArtifact> {
     session: null,
     threadId: null,
     sequence: [
-      "refinery-distillation",
-      "refinery-schema",
-      "refinery-relevance",
-      "refinery-relationship-review",
-      "refinery-capture",
+      "refinery-memory-cartographer",
+      "refinery-proposal-editor",
+      "refinery-decision-synthesizer",
+      "refinery-evidence-auditor",
+      "refinery-claim-scout",
     ],
     registry: [],
     readinessSnapshots: [],
@@ -266,7 +267,7 @@ async function runSmoke(args: SmokeArgs): Promise<SmokeArtifact> {
     const thread = await puppetCreateThread(
       { apiUrl: args.apiUrl, authKey: args.authKey },
       session,
-      "refinery-capture",
+      "refinery-claim-scout",
       {
         threadName: `Refinery ping-pong ${args.runId}`,
         participantNames: refineryCoralAgentNames,
@@ -277,7 +278,7 @@ async function runSmoke(args: SmokeArgs): Promise<SmokeArtifact> {
     await puppetSendMessage(
       { apiUrl: args.apiUrl, authKey: args.authKey },
       session,
-      "refinery-capture",
+      "refinery-claim-scout",
       {
         threadId: thread.thread.id,
         content: JSON.stringify({
@@ -285,7 +286,7 @@ async function runSmoke(args: SmokeArgs): Promise<SmokeArtifact> {
           runId: args.runId,
           sequence: artifact.sequence,
           index: 0,
-          agent: "refinery-capture",
+          agent: "refinery-claim-scout",
           nextAgent: artifact.sequence[0],
         }),
         mentions: [artifact.sequence[0]],
