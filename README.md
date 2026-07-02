@@ -20,7 +20,7 @@ surface.
 ## Install
 
 ```bash
-npm install -g @itsshadowai/refinery
+npm i -g @itsshadowai/refinery
 refinery init --json
 refinery doctor --json
 ```

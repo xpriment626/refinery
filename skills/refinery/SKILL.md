@@ -30,7 +30,7 @@ refinery doctor --json
 If `refinery` is not installed, install the package first:
 
 ```bash
-npm install -g @itsshadowai/refinery
+npm i -g @itsshadowai/refinery
 ```
 
 ## Slice Controls
