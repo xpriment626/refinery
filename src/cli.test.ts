@@ -8,13 +8,16 @@ import test from "node:test";
 const cliPath = path.resolve(import.meta.dirname, "cli.ts");
 const packagePath = path.resolve(import.meta.dirname, "..", "package.json");
 const repoRoot = path.resolve(import.meta.dirname, "..");
+const bundledSkillPath = path.join(repoRoot, "skills/refinery/SKILL.md");
+const bundledSkillOpenAiPath = path.join(repoRoot, "skills/refinery/agents/openai.yaml");
 
-function runCli(args: string[], options: { cwd?: string } = {}) {
+function runCli(args: string[], options: { cwd?: string; env?: Record<string, string | undefined> } = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: options.cwd ?? path.resolve(import.meta.dirname, ".."),
     encoding: "utf8",
     env: {
       ...process.env,
+      ...options.env,
       PATH: `${path.dirname(process.execPath)}:${process.env.PATH ?? ""}`,
     },
   });
@@ -67,6 +70,7 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
   const result = runCli(["--help"]);
 
   assert.equal(result.status, 0);
+  assert.match(result.stdout, /refinery init/);
   assert.match(result.stdout, /refinery doctor/);
   assert.match(result.stdout, /refinery version/);
   assert.match(result.stdout, /refinery review/);
@@ -83,12 +87,24 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
 
 test("package surface does not publish legacy SQLite or experiment commands", () => {
   const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
+    name?: string;
+    version?: string;
+    private?: boolean;
+    license?: string;
+    files?: string[];
+    publishConfig?: Record<string, string>;
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
   };
 
+  assert.equal(pkg.name, "@itsshadowai/refinery");
+  assert.equal(pkg.version, "0.1.0");
+  assert.equal(pkg.private, undefined);
+  assert.equal(pkg.license, "MIT");
+  assert.deepEqual(pkg.publishConfig, { access: "public" });
+  assert.deepEqual(pkg.files, ["dist", "coral", "skills", "README.md", "LICENSE", "package.json"]);
   assert.deepEqual(Object.keys(pkg.bin ?? {}).sort(), ["refinery"]);
   assert.equal(pkg.bin?.refinery, "dist/cli.js");
   assert.match(pkg.scripts?.build ?? "", /tsc/);
@@ -100,6 +116,34 @@ test("package surface does not publish legacy SQLite or experiment commands", ()
   assert.doesNotMatch(serialized, /reference-sqlite/);
   assert.doesNotMatch(serialized, /experiment:/);
   assert.doesNotMatch(serialized, /@mastra\/core/);
+});
+
+test("npm pack allowlist contains runtime files only", () => {
+  const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: process.env,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const [pack] = JSON.parse(result.stdout) as Array<{ files: Array<{ path: string }> }>;
+  const paths = pack.files.map((file) => file.path).sort();
+
+  for (const expected of [
+    "LICENSE",
+    "README.md",
+    "coral/refinery-config.toml",
+    "dist/cli.js",
+    "package.json",
+    "skills/refinery/SKILL.md",
+    "skills/refinery/agents/openai.yaml",
+  ]) {
+    assert.equal(paths.includes(expected), true, expected);
+  }
+  assert.equal(paths.some((file) => file.startsWith("src/")), false);
+  assert.equal(paths.some((file) => file.endsWith(".test.ts")), false);
+  assert.equal(paths.includes(".env.example"), false);
+  assert.equal(paths.includes(".nvmrc"), false);
+  assert.equal(paths.includes("package-lock.json"), false);
 });
 
 test("version returns package metadata as structured JSON", () => {
@@ -116,7 +160,11 @@ test("version returns package metadata as structured JSON", () => {
 
 test("doctor validates the bounded Codex memory home without model credentials", () => {
   const memoryHome = seedCodexMemoryHome();
-  const result = runCli(["doctor", "--memory-home", memoryHome, "--json"]);
+  const codexHome = path.dirname(memoryHome);
+  const refineryHome = path.join(os.tmpdir(), `refinery-doctor-home-${Date.now()}`);
+  const result = runCli(["doctor", "--memory-home", memoryHome, "--json"], {
+    env: { CODEX_HOME: codexHome, REFINERY_HOME: refineryHome },
+  });
   const parsed = parseJson(result.stdout);
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -128,6 +176,18 @@ test("doctor validates the bounded Codex memory home without model credentials",
   assert.equal(parsed.authRequired, false);
   assert.equal(parsed.sourceCount, 3);
   assert.equal(Number(parsed.activeMemoryCount) > 0, true);
+  assert.deepEqual(parsed.refineryHome, {
+    home: refineryHome,
+    exists: false,
+  });
+  assert.deepEqual(parsed.bundledCodexSkill, {
+    path: bundledSkillPath,
+    exists: true,
+  });
+  assert.deepEqual(parsed.installedCodexSkill, {
+    path: path.join(codexHome, "skills/refinery/SKILL.md"),
+    exists: false,
+  });
 });
 
 test("legacy commands return structured JSON failures", () => {
@@ -185,6 +245,63 @@ test("dev fixture emits a review-shaped memory proposal without Coral", () => {
   assert.equal(proposals[0]?.lifecycle, "proposed");
   assert.equal(typeof proposals[0]?.body, "string");
   assert.equal(((proposals[0]?.sourceRefs as Array<Record<string, unknown>>)[0])?.source_path, "$refinery");
+});
+
+test("bundled Codex skill is the single $refinery instruction surface", () => {
+  const skill = fs.readFileSync(bundledSkillPath, "utf8");
+  const openai = fs.readFileSync(bundledSkillOpenAiPath, "utf8");
+
+  assert.match(skill, /^---\nname: refinery/m);
+  assert.match(skill, /Use whenever Codex is asked to inspect, audit, summarize, or propose edits for memory using Refinery/);
+  assert.match(skill, /debate-critique is the default/i);
+  assert.doesNotMatch(skill, /--topology\s+debate-critique/);
+  assert.match(openai, /display_name: "Refinery"/);
+  assert.match(openai, /default_prompt: "Use \$refinery/);
+});
+
+test("init creates global state directories and installs bundled Codex skill", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-init-"));
+  const home = path.join(tmp, "refinery-home");
+  const codexHome = path.join(tmp, "codex-home");
+  const result = runCli(["init", "--home", home, "--codex-home", codexHome, "--json"]);
+  const parsed = parseJson(result.stdout);
+  const installedSkill = path.join(codexHome, "skills/refinery/SKILL.md");
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "init");
+  assert.equal(parsed.home, home);
+  assert.equal(fs.statSync(path.join(home, "config")).isDirectory(), true);
+  assert.equal(fs.statSync(path.join(home, "credentials")).isDirectory(), true);
+  assert.equal(fs.statSync(path.join(home, "runs/by-project")).isDirectory(), true);
+  assert.equal(fs.statSync(installedSkill).isFile(), true);
+  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
+  assert.deepEqual(parsed.codexSkill, {
+    requested: true,
+    action: "installed",
+    path: installedSkill,
+  });
+});
+
+test("init preserves existing Codex skill unless force is set", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-init-preserve-"));
+  const home = path.join(tmp, "refinery-home");
+  const codexHome = path.join(tmp, "codex-home");
+  const installedSkill = path.join(codexHome, "skills/refinery/SKILL.md");
+  fs.mkdirSync(path.dirname(installedSkill), { recursive: true });
+  fs.writeFileSync(installedSkill, "custom local skill\n");
+
+  const preserved = runCli(["init", "--home", home, "--codex-home", codexHome, "--json"]);
+  const preservedJson = parseJson(preserved.stdout);
+  assert.equal(preserved.status, 0, preserved.stderr || preserved.stdout);
+  assert.equal(fs.readFileSync(installedSkill, "utf8"), "custom local skill\n");
+  assert.equal((preservedJson.codexSkill as { action?: string }).action, "preserved");
+
+  const forced = runCli(["init", "--home", home, "--codex-home", codexHome, "--force", "--json"]);
+  const forcedJson = parseJson(forced.stdout);
+  assert.equal(forced.status, 0, forced.stderr || forced.stdout);
+  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
+  assert.equal((forcedJson.codexSkill as { action?: string }).action, "overwritten");
 });
 
 test("repo does not publish duplicate local Codex skill names", () => {

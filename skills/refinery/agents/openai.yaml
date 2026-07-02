@@ -1,0 +1,4 @@
+interface:
+  display_name: "Refinery"
+  short_description: "Run read-only memory reviews"
+  default_prompt: "Use $refinery to inspect a selected Codex memory slice and summarize proposed edits."

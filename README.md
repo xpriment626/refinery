@@ -11,11 +11,23 @@ surface.
 
 ## Requirements
 
-- Node.js >= 24.
+- Node.js >= 22.
 - Codex memories enabled and available under `~/.codex/memories`, or another
   explicitly provided directory named `memories`.
 - Model credentials for live review, usually `OPENROUTER_API_KEY` or
   `MODEL_API_KEY`.
+
+## Install
+
+```bash
+npm install -g @itsshadowai/refinery
+refinery init --json
+refinery doctor --json
+```
+
+`refinery init` creates global Refinery state under `~/.refinery` and installs
+the bundled `$refinery` Codex skill into `${CODEX_HOME:-~/.codex}/skills/refinery`.
+It preserves an existing installed skill unless `--force` is passed.
 
 ## Commands
 
@@ -177,7 +189,7 @@ available until interrupted.
 ## Development
 
 ```bash
-PATH="$HOME/.nvm/versions/node/v24.10.0/bin:$PATH" npm test
+npm test
 npm run build
 npm link
 refinery version --json

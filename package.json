@@ -1,9 +1,28 @@
 {
-  "name": "refinery",
-  "version": "0.0.1",
-  "private": true,
+  "name": "@itsshadowai/refinery",
+  "version": "0.1.0",
   "type": "module",
   "description": "Refinery — Codex-first memory review CLI.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xpriment626/refinery.git"
+  },
+  "homepage": "https://github.com/xpriment626/refinery#readme",
+  "bugs": {
+    "url": "https://github.com/xpriment626/refinery/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "coral",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
   "bin": {
     "refinery": "dist/cli.js"
   },
@@ -17,7 +36,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=22"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.67",

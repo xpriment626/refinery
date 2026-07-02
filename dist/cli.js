@@ -8,6 +8,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
     return path;
 };
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,6 +24,7 @@ import { parseReviewTopology } from "./coral/topology.js";
 const HELP = `refinery — Codex-first memory review CLI
 
 USAGE
+  refinery init [--home <dir>] [--codex-home <dir>] [--skip-codex-skill] [--force] [--json]
   refinery doctor [--memory-home <dir>] [--json]
   refinery version [--json]
   refinery review [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
@@ -32,9 +34,38 @@ USAGE
 
 Refinery reads bounded Codex memory files, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
 It does not approve, apply, or write durable memory. Runtime state defaults to ~/.refinery/runs/by-project/<project-key>.
+Run init once to create ~/.refinery and install the bundled $refinery Codex skill.
 Use console run for local Coral Console trials that seed a live session without writing run artifacts.`;
 function stableJson(value) {
     return JSON.stringify(value, null, 2) + "\n";
+}
+function packageRoot() {
+    return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+}
+function bundledCodexSkillDir() {
+    return path.join(packageRoot(), "skills", "refinery");
+}
+function bundledCodexSkillPath() {
+    return path.join(bundledCodexSkillDir(), "SKILL.md");
+}
+function resolveCodexHome(codexHome, env = process.env) {
+    return path.resolve(codexHome ?? env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
+}
+function installedCodexSkillPath(codexHome) {
+    return path.join(resolveCodexHome(codexHome), "skills", "refinery", "SKILL.md");
+}
+function copyDirectory(src, dest) {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const sourcePath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        if (entry.isDirectory()) {
+            copyDirectory(sourcePath, destPath);
+        }
+        else if (entry.isFile()) {
+            fs.copyFileSync(sourcePath, destPath);
+        }
+    }
 }
 function defaultRunId(prefix = "review") {
     return `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -123,6 +154,79 @@ function writeJsonFailure(argv, error) {
     };
     process.stdout.write(stableJson(output));
 }
+function installCodexSkill(options = {}) {
+    const installPath = installedCodexSkillPath(options.codexHome);
+    if (options.skip) {
+        return { requested: false, action: "skipped", path: installPath };
+    }
+    const sourceDir = bundledCodexSkillDir();
+    if (!fs.existsSync(bundledCodexSkillPath())) {
+        throw new RefineryError("SKILL_BUNDLE_NOT_FOUND", `Bundled Codex skill not found: ${sourceDir}`, {
+            phase: "init",
+        });
+    }
+    const destDir = path.dirname(installPath);
+    if (fs.existsSync(installPath) && !options.force) {
+        return { requested: true, action: "preserved", path: installPath };
+    }
+    const action = fs.existsSync(installPath) ? "overwritten" : "installed";
+    if (options.force && fs.existsSync(destDir)) {
+        fs.rmSync(destDir, { recursive: true, force: true });
+    }
+    copyDirectory(sourceDir, destDir);
+    return { requested: true, action, path: installPath };
+}
+async function cmdInit(rest) {
+    const values = parseOptionArgs(rest, {
+        home: { type: "string" },
+        "codex-home": { type: "string" },
+        "skip-codex-skill": { type: "boolean", default: false },
+        force: { type: "boolean", default: false },
+        json: { type: "boolean", default: false },
+    });
+    const paths = resolveRefineryPaths({
+        home: typeof values.home === "string" ? values.home : undefined,
+        cwd: process.cwd(),
+    });
+    const dirs = [
+        paths.configDir,
+        paths.credentialsDir,
+        path.join(paths.runsRootDir, "by-project"),
+        paths.runsDir,
+    ];
+    const createdDirs = [];
+    for (const dir of dirs) {
+        if (!fs.existsSync(dir))
+            createdDirs.push(dir);
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    const codexSkill = installCodexSkill({
+        codexHome: typeof values["codex-home"] === "string" ? values["codex-home"] : undefined,
+        force: Boolean(values.force),
+        skip: Boolean(values["skip-codex-skill"]),
+    });
+    const memoryHome = resolveCodexMemoryHome();
+    process.stdout.write(stableJson({
+        ok: true,
+        command: "init",
+        home: paths.home,
+        createdDirs,
+        codexSkill,
+        doctor: {
+            memoryHome,
+            memoryHomeExists: fs.existsSync(memoryHome),
+            bundledCodexSkill: {
+                path: bundledCodexSkillPath(),
+                exists: fs.existsSync(bundledCodexSkillPath()),
+            },
+            installedCodexSkill: {
+                path: codexSkill.path,
+                exists: fs.existsSync(codexSkill.path),
+            },
+        },
+    }));
+    return 0;
+}
 function isMainModule() {
     if (!process.argv[1])
         return false;
@@ -159,6 +263,8 @@ async function cmdDoctor(rest) {
         return 1;
     }
     const probe = await probeMemoryStoreAdapter(adapter, { scope: "project", limit: 3 });
+    const refineryPaths = resolveRefineryPaths();
+    const installedSkillPath = installedCodexSkillPath();
     const output = {
         ok: probe.valid,
         command: "doctor",
@@ -169,6 +275,18 @@ async function cmdDoctor(rest) {
         adapter: { name: adapter.name },
         sourceCount: probe.sourceCount,
         activeMemoryCount: probe.activeMemoryCount,
+        refineryHome: {
+            home: refineryPaths.home,
+            exists: fs.existsSync(refineryPaths.home),
+        },
+        bundledCodexSkill: {
+            path: bundledCodexSkillPath(),
+            exists: fs.existsSync(bundledCodexSkillPath()),
+        },
+        installedCodexSkill: {
+            path: installedSkillPath,
+            exists: fs.existsSync(installedSkillPath),
+        },
         errors: probe.errors,
     };
     if (!probe.valid) {
@@ -522,6 +640,8 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (command === "doctor")
         return cmdDoctor(argv.slice(1));
+    if (command === "init")
+        return cmdInit(argv.slice(1));
     if (command === "version")
         return cmdVersion(argv.slice(1));
     if (command === "trial")
