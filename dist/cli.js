@@ -16,8 +16,10 @@ import { probeMemoryStoreAdapter, refineryReviewSchemaVersion, validateMemorySto
 import { asRefineryError, RefineryError, serializeRefineryError, } from "./core/errors.js";
 import { inspectReviewRun } from "./core/artifacts.js";
 import { resolveRefineryPaths } from "./core/paths.js";
+import { resolveModelApiKey, storedAuthStatus, writeStoredAuth } from "./core/credentials.js";
 import { parseReviewIntent } from "./core/intents.js";
 import {} from "./core/review.js";
+import { loadLocalEnv } from "./env.js";
 import { createCodexMemoryAdapter, resolveCodexMemoryHome } from "./adapters/codex-memory.js";
 import { runCoralReview, startCoralConsoleRun } from "./coral/review-conductor.js";
 import { parseReviewTopology } from "./coral/topology.js";
@@ -25,6 +27,7 @@ const HELP = `refinery — Codex-first memory review CLI
 
 USAGE
   refinery init [--home <dir>] [--codex-home <dir>] [--skip-codex-skill] [--force] [--json]
+  refinery set auth coral [--home <dir>] [--value-stdin] [--json]
   refinery doctor [--memory-home <dir>] [--json]
   refinery version [--json]
   refinery review [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
@@ -35,6 +38,7 @@ USAGE
 Refinery reads bounded Codex memory files, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
 It does not approve, apply, or write durable memory. Runtime state defaults to ~/.refinery/runs/by-project/<project-key>.
 Run init once to create ~/.refinery and install the bundled $refinery Codex skill.
+Run set auth coral once to store a Coral API key for live specialist model calls.
 Use console run for local Coral Console trials that seed a live session without writing run artifacts.`;
 function stableJson(value) {
     return JSON.stringify(value, null, 2) + "\n";
@@ -138,6 +142,8 @@ function inferCommand(argv) {
         return "console run";
     if (argv[0] === "dev" && argv[1] === "fixture")
         return "dev fixture";
+    if (argv[0] === "set" && argv[1] === "auth")
+        return "set auth";
     return argv[0] ?? "unknown";
 }
 function wantsJson(argv) {
@@ -227,6 +233,94 @@ async function cmdInit(rest) {
     }));
     return 0;
 }
+async function readAllStdin() {
+    let value = "";
+    process.stdin.setEncoding("utf8");
+    for await (const chunk of process.stdin)
+        value += chunk;
+    return value;
+}
+async function readSecretFromTty(prompt) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
+        throw new RefineryError("AUTH_INPUT_REQUIRED", "Use an interactive terminal or pass --value-stdin to read the secret from stdin.", { phase: "auth" });
+    }
+    return await new Promise((resolve, reject) => {
+        const stdin = process.stdin;
+        const stdout = process.stdout;
+        const previousRaw = stdin.isRaw;
+        let value = "";
+        const cleanup = () => {
+            stdin.off("data", onData);
+            stdin.setRawMode(previousRaw);
+            stdin.pause();
+        };
+        const finish = () => {
+            cleanup();
+            stdout.write("\n");
+            resolve(value);
+        };
+        const fail = (error) => {
+            cleanup();
+            stdout.write("\n");
+            reject(error);
+        };
+        const onData = (chunk) => {
+            const input = chunk.toString("utf8");
+            for (const char of input) {
+                if (char === "\u0003") {
+                    fail(new RefineryError("AUTH_INPUT_CANCELLED", "Auth input cancelled.", { phase: "auth" }));
+                    return;
+                }
+                if (char === "\r" || char === "\n") {
+                    finish();
+                    return;
+                }
+                if (char === "\u007f" || char === "\b") {
+                    value = value.slice(0, -1);
+                    continue;
+                }
+                value += char;
+            }
+        };
+        stdout.write(prompt);
+        stdin.setRawMode(true);
+        stdin.resume();
+        stdin.on("data", onData);
+    });
+}
+async function cmdSet(rest) {
+    const sub = rest[0];
+    const provider = rest[1];
+    if (sub !== "auth" || provider !== "coral") {
+        throw new RefineryError("INVALID_OPTION", "Unknown set command. Use: refinery set auth coral", { phase: "args" });
+    }
+    const values = parseOptionArgs(rest.slice(2), {
+        home: { type: "string" },
+        "value-stdin": { type: "boolean", default: false },
+        json: { type: "boolean", default: false },
+    });
+    const home = typeof values.home === "string" ? values.home : undefined;
+    const value = Boolean(values["value-stdin"])
+        ? await readAllStdin()
+        : await readSecretFromTty("Coral API key: ");
+    const credential = writeStoredAuth("coral", value, { home });
+    process.stdout.write(stableJson({
+        ok: true,
+        command: "set auth",
+        provider: "coral",
+        credential: {
+            present: credential.present,
+            path: credential.path,
+            source: credential.source,
+            mode: "0600",
+        },
+        next: [
+            "refinery doctor --json",
+            "refinery review --json",
+        ],
+    }));
+    return 0;
+}
 function isMainModule() {
     if (!process.argv[1])
         return false;
@@ -265,6 +359,13 @@ async function cmdDoctor(rest) {
     const probe = await probeMemoryStoreAdapter(adapter, { scope: "project", limit: 3 });
     const refineryPaths = resolveRefineryPaths();
     const installedSkillPath = installedCodexSkillPath();
+    const localEnv = loadLocalEnv(process.cwd());
+    const modelAuth = resolveModelApiKey({
+        env: process.env,
+        localEnv,
+        cwd: process.cwd(),
+    }).status;
+    const coralAuth = storedAuthStatus("coral");
     const output = {
         ok: probe.valid,
         command: "doctor",
@@ -272,6 +373,19 @@ async function cmdDoctor(rest) {
         memoryHomeSafe: path.basename(memoryHome) === "memories",
         memoryHomeExists: true,
         authRequired: false,
+        modelAuth: {
+            requiredForLiveReview: true,
+            present: modelAuth.present,
+            source: modelAuth.source,
+            provider: modelAuth.provider,
+            ...(modelAuth.credentialPath ? { credentialPath: modelAuth.credentialPath } : {}),
+        },
+        storedAuth: {
+            coral: {
+                present: coralAuth.present,
+                path: coralAuth.path,
+            },
+        },
         adapter: { name: adapter.name },
         sourceCount: probe.sourceCount,
         activeMemoryCount: probe.activeMemoryCount,
@@ -642,6 +756,8 @@ export async function main(argv = process.argv.slice(2)) {
         return cmdDoctor(argv.slice(1));
     if (command === "init")
         return cmdInit(argv.slice(1));
+    if (command === "set")
+        return cmdSet(argv.slice(1));
     if (command === "version")
         return cmdVersion(argv.slice(1));
     if (command === "trial")

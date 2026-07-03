@@ -1,0 +1,31 @@
+export type AuthProvider = "coral";
+export interface StoredAuthOptions {
+    home?: string;
+    env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+    cwd?: string;
+}
+export interface StoredAuthStatus {
+    provider: AuthProvider;
+    present: boolean;
+    path: string;
+    source: "credentials" | "missing";
+}
+export interface ModelAuthStatus {
+    present: boolean;
+    source: "env:MODEL_API_KEY" | "env:CORAL_API_KEY" | "env:OPENROUTER_API_KEY" | "credentials:coral" | "missing";
+    provider: AuthProvider | "model" | "openrouter" | null;
+    credentialPath?: string;
+}
+export declare function storedAuthPath(providerInput: string, options?: StoredAuthOptions): string;
+export declare function writeStoredAuth(providerInput: string, value: string, options?: StoredAuthOptions): StoredAuthStatus;
+export declare function readStoredAuth(providerInput: string, options?: StoredAuthOptions): string;
+export declare function storedAuthStatus(providerInput: string, options?: StoredAuthOptions): StoredAuthStatus;
+export declare function resolveModelApiKey(args: {
+    env: NodeJS.ProcessEnv | Record<string, string | undefined>;
+    localEnv?: Record<string, string | undefined>;
+    home?: string;
+    cwd?: string;
+}): {
+    apiKey: string;
+    status: ModelAuthStatus;
+};

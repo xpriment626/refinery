@@ -1,6 +1,6 @@
 {
   "name": "@itsshadowai/refinery",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Refinery — Codex-first memory review CLI.",
   "license": "MIT",
@@ -19,6 +19,7 @@
     "dist",
     "coral",
     "skills",
+    "scripts/postinstall.mjs",
     "README.md",
     "LICENSE",
     "package.json"
@@ -32,6 +33,7 @@
     "mcp": "node src/mcp.ts",
     "coral:worker": "node src/coral/worker.ts",
     "coral:smoke": "node src/coral/smoke.ts",
+    "postinstall": "node scripts/postinstall.mjs",
     "test": "node --test $(find src -name '*.test.ts' -print)",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

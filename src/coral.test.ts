@@ -19,7 +19,7 @@ import {
   getCoralAgentBySpecialistName,
 } from "./coral/definitions.ts";
 import { defaultReviewTopology, parseReviewTopology } from "./coral/topology.ts";
-import { buildLiveReviewEnvelope, expectedReviewAgent, isCoralWaitTimeout } from "./coral/worker.ts";
+import { buildLiveReviewEnvelope, expectedReviewAgent, isCoralWaitTimeout, loadWorkerModelConfig } from "./coral/worker.ts";
 
 const repoRoot = process.cwd();
 
@@ -59,8 +59,8 @@ test("each Coral manifest points to the shared worker and matching specialist ar
     const manifest = fs.readFileSync(manifestPath, "utf8");
     assert.match(manifest, new RegExp(`name = "${agent.agentName}"`));
     assert.match(manifest, new RegExp(`version = "${refineryCoralAgentVersion}"`));
-    assert.match(manifest, /MODEL_NAME = \{ type = "string", default = "deepseek\/deepseek-v4-pro" \}/);
-    assert.match(manifest, /MODEL_BASE_URL = \{ type = "string", default = "https:\/\/openrouter\.ai\/api\/v1" \}/);
+    assert.match(manifest, /MODEL_NAME = \{ type = "string", default = "deepseek-v4-pro" \}/);
+    assert.match(manifest, /MODEL_BASE_URL = \{ type = "string", default = "https:\/\/llm\.coralcloud\.ai\/deepseek\/v1" \}/);
     assert.match(manifest, /path = "\.\.\/run-worker\.sh"/);
     assert.match(manifest, new RegExp(`arguments = \\["--specialist", "${agent.specialistName}"\\]`));
   }
@@ -92,6 +92,35 @@ test("Coral session request contains executable specialists in a single group", 
 test("Coral review topology defaults to debate critique", () => {
   assert.equal(defaultReviewTopology, "debate-critique");
   assert.equal(parseReviewTopology(undefined), "debate-critique");
+});
+
+test("Coral worker model config defaults to Coral DeepSeek proxy with CORAL_API_KEY", () => {
+  const previous = {
+    CORAL_API_KEY: process.env.CORAL_API_KEY,
+    MODEL_API_KEY: process.env.MODEL_API_KEY,
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+    MODEL_PROVIDER: process.env.MODEL_PROVIDER,
+    REFINERY_MODEL_PROVIDER: process.env.REFINERY_MODEL_PROVIDER,
+    MODEL_BASE_URL: process.env.MODEL_BASE_URL,
+    REFINERY_MODEL_BASE_URL: process.env.REFINERY_MODEL_BASE_URL,
+    MODEL_NAME: process.env.MODEL_NAME,
+    REFINERY_MODEL_NAME: process.env.REFINERY_MODEL_NAME,
+  };
+  for (const key of Object.keys(previous) as Array<keyof typeof previous>) delete process.env[key];
+  process.env.CORAL_API_KEY = "coral-secret";
+  try {
+    const model = loadWorkerModelConfig(path.join(repoRoot, "does-not-exist"));
+    assert.equal(model.provider, "coral");
+    assert.equal(model.baseUrl, refineryCoralModelDefaults.baseUrl);
+    assert.equal(model.modelName, "deepseek-v4-pro");
+    assert.equal(model.apiKey, "coral-secret");
+    assert.equal(model.apiKeyPresent, true);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test("debate critique reviews use an extended default live timeout", () => {
@@ -308,6 +337,89 @@ test("Coral worker marks debate critique intake as a preflight critique phase", 
   assert.match(calls[0].system, /Evidence\/Provenance Auditor local critique thread/);
   assert.match(calls[0].user, /claim_cards/);
   assert.match(calls[0].user, /active_memory_candidates/);
+});
+
+test("Coral worker sends Proposal Editor compact cartography context", async () => {
+  const calls: Array<{ system: string; user: string }> = [];
+  const envelope = await buildLiveReviewEnvelope({
+    specialistName: "proposal-editor",
+    agentName: "refinery-proposal-editor",
+    envelope: {
+      type: "refinery-review-output",
+      topology: "debate-critique",
+      phase: "memory-cartography",
+      runId: "run-compact-proposal-editor",
+      context: {
+        review_intent: "general-review",
+        active_memory_hints: [
+          { id: "memory:referenced", body: "Referenced active memory.", provenance: { originKind: "memory-index" } },
+          { id: "memory:unrelated", body: "Unrelated active memory.", provenance: { originKind: "memory-index" } },
+        ],
+        claim_candidates: [
+          {
+            claim: "The current memory is already represented.",
+            source_refs: [{ source_id: "source:1" }],
+            why_future_useful: "Useful only if novel.",
+          },
+        ],
+      },
+      output: {
+        findings: [
+          {
+            body: "The current memory is already represented.",
+            relation: "duplicate",
+            target_memory_id: "memory:referenced",
+            confidence: 0.95,
+            rationale: "Existing memory covers it.",
+            source_refs: [{ source_id: "source:1" }],
+            memory_refs: [{ memory_id: "memory:referenced", provenance_kind: "memory-index" }],
+          },
+        ],
+      },
+    },
+    message: {
+      id: "message-proposal",
+      senderName: "refinery-memory-cartographer",
+      mentionNames: ["refinery-proposal-editor"],
+      threadId: "thread-proposal",
+    },
+    model: {
+      provider: "openrouter",
+      baseUrl: "https://openrouter.invalid/api/v1",
+      modelName: "deepseek/deepseek-v4-pro",
+      apiKey: "secret-key",
+      reasoningEffort: "low",
+      apiKeyPresent: true,
+    },
+    callModel: async ({ system, user }) => {
+      calls.push({ system, user });
+      return {
+        content: JSON.stringify({ typed: [] }),
+        metadata: {
+          provider: "openrouter",
+          baseUrl: "https://openrouter.invalid/api/v1",
+          modelName: "deepseek/deepseek-v4-pro",
+          status: 200,
+          responseId: "or-worker-proposal-compact",
+          responseModel: "deepseek/deepseek-v4-pro",
+          finishReason: "stop",
+          usage: null,
+        },
+      };
+    },
+  });
+
+  assert.equal(envelope.status, "succeeded");
+  const payload = JSON.parse(
+    calls[0].user.replace(/^Process this Refinery live review payload using your specialist contract\.\n\n/, ""),
+  ) as Record<string, unknown>;
+  assert.equal("memory_map" in payload, false);
+  assert.deepEqual(
+    (payload.active_memory_hints as Array<{ id: string }>).map((memory) => memory.id),
+    ["memory:referenced"],
+  );
+  assert.equal(JSON.stringify(payload).includes("memory:unrelated"), false);
+  assert.match(calls[0].system, /emit \{"typed":\[\]\}/);
 });
 
 test("Coral worker marks debate merge as proposal synthesis for decision synthesizer", async () => {

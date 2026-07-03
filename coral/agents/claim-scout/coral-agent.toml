@@ -12,8 +12,8 @@ type = "spdx"
 expression = "MIT"
 
 [options]
-MODEL_NAME = { type = "string", default = "deepseek/deepseek-v4-pro" }
-MODEL_BASE_URL = { type = "string", default = "https://openrouter.ai/api/v1" }
+MODEL_NAME = { type = "string", default = "deepseek-v4-pro" }
+MODEL_BASE_URL = { type = "string", default = "https://llm.coralcloud.ai/deepseek/v1" }
 REASONING_EFFORT = { type = "string", default = "low" }
 REFINERY_CORAL_MAX_TURNS = { type = "string", default = "1" }
 

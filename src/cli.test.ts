@@ -11,10 +11,11 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const bundledSkillPath = path.join(repoRoot, "skills/refinery/SKILL.md");
 const bundledSkillOpenAiPath = path.join(repoRoot, "skills/refinery/agents/openai.yaml");
 
-function runCli(args: string[], options: { cwd?: string; env?: Record<string, string | undefined> } = {}) {
+function runCli(args: string[], options: { cwd?: string; env?: Record<string, string | undefined>; input?: string } = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: options.cwd ?? path.resolve(import.meta.dirname, ".."),
     encoding: "utf8",
+    input: options.input,
     env: {
       ...process.env,
       ...options.env,
@@ -71,6 +72,7 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /refinery init/);
+  assert.match(result.stdout, /refinery set auth coral/);
   assert.match(result.stdout, /refinery doctor/);
   assert.match(result.stdout, /refinery version/);
   assert.match(result.stdout, /refinery review/);
@@ -100,14 +102,15 @@ test("package surface does not publish legacy SQLite or experiment commands", ()
   };
 
   assert.equal(pkg.name, "@itsshadowai/refinery");
-  assert.equal(pkg.version, "0.1.0");
+  assert.equal(pkg.version, "0.1.1");
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.license, "MIT");
   assert.deepEqual(pkg.publishConfig, { access: "public" });
-  assert.deepEqual(pkg.files, ["dist", "coral", "skills", "README.md", "LICENSE", "package.json"]);
+  assert.deepEqual(pkg.files, ["dist", "coral", "skills", "scripts/postinstall.mjs", "README.md", "LICENSE", "package.json"]);
   assert.deepEqual(Object.keys(pkg.bin ?? {}).sort(), ["refinery"]);
   assert.equal(pkg.bin?.refinery, "dist/cli.js");
   assert.match(pkg.scripts?.build ?? "", /tsc/);
+  assert.equal(pkg.scripts?.postinstall, "node scripts/postinstall.mjs");
   const serialized = JSON.stringify({
     scripts: pkg.scripts ?? {},
     dependencies: pkg.dependencies ?? {},
@@ -134,6 +137,7 @@ test("npm pack allowlist contains runtime files only", () => {
     "coral/refinery-config.toml",
     "dist/cli.js",
     "package.json",
+    "scripts/postinstall.mjs",
     "skills/refinery/SKILL.md",
     "skills/refinery/agents/openai.yaml",
   ]) {
@@ -162,8 +166,16 @@ test("doctor validates the bounded Codex memory home without model credentials",
   const memoryHome = seedCodexMemoryHome();
   const codexHome = path.dirname(memoryHome);
   const refineryHome = path.join(os.tmpdir(), `refinery-doctor-home-${Date.now()}`);
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-doctor-cwd-"));
   const result = runCli(["doctor", "--memory-home", memoryHome, "--json"], {
-    env: { CODEX_HOME: codexHome, REFINERY_HOME: refineryHome },
+    cwd,
+    env: {
+      CODEX_HOME: codexHome,
+      REFINERY_HOME: refineryHome,
+      MODEL_API_KEY: undefined,
+      CORAL_API_KEY: undefined,
+      OPENROUTER_API_KEY: undefined,
+    },
   });
   const parsed = parseJson(result.stdout);
 
@@ -174,6 +186,19 @@ test("doctor validates the bounded Codex memory home without model credentials",
   assert.equal(parsed.memoryHomeSafe, true);
   assert.equal(parsed.memoryHomeExists, true);
   assert.equal(parsed.authRequired, false);
+  assert.deepEqual(parsed.modelAuth, {
+    requiredForLiveReview: true,
+    present: false,
+    source: "missing",
+    provider: null,
+    credentialPath: path.join(refineryHome, "credentials", "coral-api-key"),
+  });
+  assert.deepEqual(parsed.storedAuth, {
+    coral: {
+      present: false,
+      path: path.join(refineryHome, "credentials", "coral-api-key"),
+    },
+  });
   assert.equal(parsed.sourceCount, 3);
   assert.equal(Number(parsed.activeMemoryCount) > 0, true);
   assert.deepEqual(parsed.refineryHome, {
@@ -188,6 +213,32 @@ test("doctor validates the bounded Codex memory home without model credentials",
     path: path.join(codexHome, "skills/refinery/SKILL.md"),
     exists: false,
   });
+});
+
+test("set auth coral stores a redacted Coral credential under Refinery home", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-set-auth-"));
+  const home = path.join(tmp, "refinery-home");
+  const result = runCli(["set", "auth", "coral", "--home", home, "--value-stdin", "--json"], {
+    input: "coral-test-secret\n",
+  });
+  const parsed = parseJson(result.stdout);
+  const credentialPath = path.join(home, "credentials", "coral-api-key");
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.command, "set auth");
+  assert.equal(parsed.provider, "coral");
+  assert.deepEqual(parsed.credential, {
+    present: true,
+    path: credentialPath,
+    source: "credentials",
+    mode: "0600",
+  });
+  assert.equal(fs.readFileSync(credentialPath, "utf8"), "coral-test-secret\n");
+  assert.doesNotMatch(result.stdout, /coral-test-secret/);
+  if (process.platform !== "win32") {
+    assert.equal((fs.statSync(credentialPath).mode & 0o777).toString(8), "600");
+  }
 });
 
 test("legacy commands return structured JSON failures", () => {

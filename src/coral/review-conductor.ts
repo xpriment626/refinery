@@ -297,7 +297,7 @@ function resolveConfiguredModel(coral: CoralReviewRuntimeOptions): {
   const localEnv = loadLocalEnv(repoRoot);
   const readConfig = (name: string): string | undefined => process.env[name] ?? localEnv[name];
   return {
-    provider: readConfig("MODEL_PROVIDER") ?? readConfig("REFINERY_MODEL_PROVIDER") ?? "openrouter",
+    provider: readConfig("MODEL_PROVIDER") ?? readConfig("REFINERY_MODEL_PROVIDER") ?? "coral",
     baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
     modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
     reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,

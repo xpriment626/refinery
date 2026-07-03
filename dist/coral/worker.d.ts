@@ -1,6 +1,6 @@
 import { type ModelConfig } from "../env.ts";
 import type { SpecialistName } from "../core/specialists/types.ts";
-import { type OpenRouterCallMetadata } from "../core/model-client.ts";
+import { type ModelCallMetadata } from "../core/model-client.ts";
 interface WorkerModelConfig extends ModelConfig {
     modelName: string;
     baseUrl: string;
@@ -13,7 +13,7 @@ type WorkerModelCaller = (request: {
     user: string;
 }) => Promise<{
     content: string;
-    metadata?: OpenRouterCallMetadata;
+    metadata?: ModelCallMetadata;
 }>;
 export declare function loadWorkerModelConfig(cwd?: string): WorkerModelConfig;
 export declare function isCoralWaitTimeout(error: unknown): boolean;

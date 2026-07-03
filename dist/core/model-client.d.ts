@@ -1,6 +1,6 @@
 import { type ModelConfig } from "../env.ts";
-export interface OpenRouterCallMetadata {
-    provider: "openrouter";
+export interface ModelCallMetadata {
+    provider: string;
     baseUrl: string;
     modelName: string;
     status: number;
@@ -9,11 +9,11 @@ export interface OpenRouterCallMetadata {
     finishReason: string | null;
     usage: unknown;
 }
-export declare function callOpenRouterChatWithMetadata(request: {
+export declare function callOpenAiCompatibleChatWithMetadata(request: {
     model: ModelConfig;
     system: string;
     user: string;
 }): Promise<{
     content: string;
-    metadata: OpenRouterCallMetadata;
+    metadata: ModelCallMetadata;
 }>;

@@ -1,3 +1,4 @@
+import { defaultModelBaseUrl, defaultModelName } from "../env.ts";
 import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
 import { orderedSpecialists } from "../core/specialists/harness.ts";
 import path from "node:path";
@@ -9,8 +10,8 @@ export const refineryCoralConfigPath = "coral/refinery-config.toml";
 export const refineryCoralAgentGlob = "coral/agents/*";
 
 export const refineryCoralModelDefaults = {
-  modelName: "deepseek/deepseek-v4-pro",
-  baseUrl: "https://openrouter.ai/api/v1",
+  modelName: defaultModelName,
+  baseUrl: defaultModelBaseUrl,
   reasoningEffort: "low",
 } as const;
 

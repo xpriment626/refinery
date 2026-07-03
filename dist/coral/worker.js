@@ -3,7 +3,8 @@ import { parseModelMaxTokens } from "../env.js";
 import { parseClaimScout, parseDecisionSynthesizer, parseEvidenceFindings, parseProposalEditor, buildPrompt, redactModel, } from "../core/live-review.js";
 import { refineryReviewSchemaVersion } from "../core/adapter.js";
 import { claimScoutSpecialist, decisionSynthesizerSpecialist, evidenceAuditorSpecialist, memoryCartographerSpecialist, proposalEditorSpecialist, } from "../core/specialists/index.js";
-import { callOpenRouterChatWithMetadata } from "../core/model-client.js";
+import { callOpenAiCompatibleChatWithMetadata } from "../core/model-client.js";
+import { resolveModelApiKey } from "../core/credentials.js";
 import { getCoralAgentBySpecialistName, getSpecialistNameArg, refineryCoralAgentNames, refineryCoralModelDefaults, } from "./definitions.js";
 import { connectCoralMcp, parseWaitForMentionResult, readCoralState } from "./mcp.js";
 import { defaultReviewTopology, isReviewTopology } from "./topology.js";
@@ -13,15 +14,19 @@ function readEnv(name, localEnv) {
 }
 export function loadWorkerModelConfig(cwd = process.cwd()) {
     const localEnv = loadLocalEnv(cwd);
-    const apiKey = readEnv("MODEL_API_KEY", localEnv) ?? readEnv("OPENROUTER_API_KEY", localEnv);
+    const modelAuth = resolveModelApiKey({
+        env: process.env,
+        localEnv,
+        cwd,
+    });
     return {
-        provider: readEnv("MODEL_PROVIDER", localEnv) ?? readEnv("REFINERY_MODEL_PROVIDER", localEnv) ?? "openrouter",
+        provider: readEnv("MODEL_PROVIDER", localEnv) ?? readEnv("REFINERY_MODEL_PROVIDER", localEnv) ?? "coral",
         modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
         baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
-        apiKey: apiKey ?? "",
+        apiKey: modelAuth.apiKey,
         reasoningEffort: readEnv("REASONING_EFFORT", localEnv) ?? refineryCoralModelDefaults.reasoningEffort,
         maxTokens: parseModelMaxTokens(readEnv("MODEL_MAX_TOKENS", localEnv) ?? readEnv("REFINERY_MODEL_MAX_TOKENS", localEnv)),
-        apiKeyPresent: Boolean(apiKey),
+        apiKeyPresent: Boolean(modelAuth.apiKey),
     };
 }
 function log(agentName, message) {
@@ -250,7 +255,7 @@ function topologyInstructionForSpecialist(args) {
         case "preflight-critique":
             return "Topology guidance: this is the Evidence/Provenance Auditor local critique thread. Treat claim_cards as the deliberation unit. For each claim card, make one small structured move using the findings JSON shape: novel is an endorsement; duplicate, too_weak, contradiction, refinement, and supersession are challenges. Ground each challenge in source or active-memory evidence and avoid broad global debate.";
         case "typed-proposal":
-            return "Topology guidance: this is the Proposal Editor phase. Turn surviving claims and cartography into typed proposal packets. Preserve evidence so final challenges can target the claim precisely.";
+            return "Topology guidance: this is the Proposal Editor phase. Turn surviving claims and cartography into typed proposal packets. Preserve evidence so final challenges can target the claim precisely. If cartography shows every claim is duplicate or too_weak, emit {\"typed\":[]} rather than restating rejected claims.";
         case "proposal-synthesis":
             return "Topology guidance: this is the Decision Synthesizer merge point. Synthesize typed claims together with debate_critique.claim_cards and debate_critique.challenge_ledger. Final proposal or rejection rationale must explicitly account for relevant challenges, endorsements, or unresolved questions.";
         default:
@@ -291,6 +296,36 @@ function preflightMemoryCandidates(context) {
         proposal_body: isRecord(memory) && typeof memory.body === "string" ? memory.body : null,
         memories: [memory],
     }));
+}
+function referencedMemoryIds(findings) {
+    const ids = new Set();
+    for (const finding of findings) {
+        if (typeof finding.target_memory_id === "string" || typeof finding.target_memory_id === "number") {
+            ids.add(String(finding.target_memory_id));
+        }
+        if (!Array.isArray(finding.memory_refs))
+            continue;
+        for (const ref of finding.memory_refs) {
+            if (!isRecord(ref))
+                continue;
+            if (typeof ref.memory_id === "string" || typeof ref.memory_id === "number") {
+                ids.add(String(ref.memory_id));
+            }
+        }
+    }
+    return ids;
+}
+function referencedActiveMemoryHints(context, findings) {
+    const ids = referencedMemoryIds(findings);
+    if (ids.size === 0 || !Array.isArray(context.active_memory_hints))
+        return [];
+    return context.active_memory_hints.filter((memory) => {
+        if (!isRecord(memory))
+            return false;
+        if (typeof memory.id !== "string" && typeof memory.id !== "number")
+            return false;
+        return ids.has(String(memory.id));
+    });
 }
 function mergeProposalEditorOutput(envelope) {
     return isRecord(envelope.proposal_editor_output) ? envelope.proposal_editor_output : {};
@@ -348,15 +383,15 @@ function payloadForSpecialist(args) {
                 },
             };
         case "proposal-editor":
+            const findings = arrayFrom(previousOutput, "findings");
             return {
                 context,
                 payload: {
                     ...intentContext,
                     claim_cards: claimCards(context),
                     candidates: arrayFrom(context, "claim_candidates"),
-                    memory_map: previousOutput,
-                    cartography_findings: arrayFrom(previousOutput, "findings"),
-                    active_memory_hints: compactMemoryHints(context.active_memory_hints),
+                    cartography_findings: findings,
+                    active_memory_hints: referencedActiveMemoryHints(context, findings),
                     coral_thread_context: threadContext,
                 },
             };
@@ -471,7 +506,7 @@ export async function buildLiveReviewEnvelope(args) {
             agentName: args.agentName,
             receivedMessageId: args.message.id,
             code: "MODEL_CONFIG_MISSING",
-            message: "OPENROUTER_API_KEY or MODEL_API_KEY is required for live Coral specialist execution.",
+            message: "CORAL_API_KEY, OPENROUTER_API_KEY, or MODEL_API_KEY is required for live Coral specialist execution.",
             model: args.model,
             prompt,
         });
@@ -479,7 +514,7 @@ export async function buildLiveReviewEnvelope(args) {
     let rawOutput = "";
     let providerMetadata;
     try {
-        const callModel = args.callModel ?? callOpenRouterChatWithMetadata;
+        const callModel = args.callModel ?? callOpenAiCompatibleChatWithMetadata;
         const response = await callModel({
             model: args.model,
             system: prompt.system,

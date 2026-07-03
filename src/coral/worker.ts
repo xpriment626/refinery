@@ -17,7 +17,8 @@ import {
   proposalEditorSpecialist,
 } from "../core/specialists/index.ts";
 import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
-import { callOpenRouterChatWithMetadata, type OpenRouterCallMetadata } from "../core/model-client.ts";
+import { callOpenAiCompatibleChatWithMetadata, type ModelCallMetadata } from "../core/model-client.ts";
+import { resolveModelApiKey } from "../core/credentials.ts";
 import {
   getCoralAgentBySpecialistName,
   getSpecialistNameArg,
@@ -40,7 +41,7 @@ type WorkerModelCaller = (request: {
   model: ModelConfig;
   system: string;
   user: string;
-}) => Promise<{ content: string; metadata?: OpenRouterCallMetadata }>;
+}) => Promise<{ content: string; metadata?: ModelCallMetadata }>;
 
 function readEnv(name: string, localEnv: Record<string, string>): string | undefined {
   return process.env[name] ?? localEnv[name];
@@ -48,15 +49,19 @@ function readEnv(name: string, localEnv: Record<string, string>): string | undef
 
 export function loadWorkerModelConfig(cwd = process.cwd()): WorkerModelConfig {
   const localEnv = loadLocalEnv(cwd);
-  const apiKey = readEnv("MODEL_API_KEY", localEnv) ?? readEnv("OPENROUTER_API_KEY", localEnv);
+  const modelAuth = resolveModelApiKey({
+    env: process.env,
+    localEnv,
+    cwd,
+  });
   return {
-    provider: readEnv("MODEL_PROVIDER", localEnv) ?? readEnv("REFINERY_MODEL_PROVIDER", localEnv) ?? "openrouter",
+    provider: readEnv("MODEL_PROVIDER", localEnv) ?? readEnv("REFINERY_MODEL_PROVIDER", localEnv) ?? "coral",
     modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
     baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
-    apiKey: apiKey ?? "",
+    apiKey: modelAuth.apiKey,
     reasoningEffort: readEnv("REASONING_EFFORT", localEnv) ?? refineryCoralModelDefaults.reasoningEffort,
     maxTokens: parseModelMaxTokens(readEnv("MODEL_MAX_TOKENS", localEnv) ?? readEnv("REFINERY_MODEL_MAX_TOKENS", localEnv)),
-    apiKeyPresent: Boolean(apiKey),
+    apiKeyPresent: Boolean(modelAuth.apiKey),
   };
 }
 
@@ -306,7 +311,7 @@ function topologyInstructionForSpecialist(args: {
     case "preflight-critique":
       return "Topology guidance: this is the Evidence/Provenance Auditor local critique thread. Treat claim_cards as the deliberation unit. For each claim card, make one small structured move using the findings JSON shape: novel is an endorsement; duplicate, too_weak, contradiction, refinement, and supersession are challenges. Ground each challenge in source or active-memory evidence and avoid broad global debate.";
     case "typed-proposal":
-      return "Topology guidance: this is the Proposal Editor phase. Turn surviving claims and cartography into typed proposal packets. Preserve evidence so final challenges can target the claim precisely.";
+      return "Topology guidance: this is the Proposal Editor phase. Turn surviving claims and cartography into typed proposal packets. Preserve evidence so final challenges can target the claim precisely. If cartography shows every claim is duplicate or too_weak, emit {\"typed\":[]} rather than restating rejected claims.";
     case "proposal-synthesis":
       return "Topology guidance: this is the Decision Synthesizer merge point. Synthesize typed claims together with debate_critique.claim_cards and debate_critique.challenge_ledger. Final proposal or rejection rationale must explicitly account for relevant challenges, endorsements, or unresolved questions.";
     default:
@@ -350,6 +355,33 @@ function preflightMemoryCandidates(context: Record<string, unknown>): unknown[] 
     proposal_body: isRecord(memory) && typeof memory.body === "string" ? memory.body : null,
     memories: [memory],
   }));
+}
+
+function referencedMemoryIds(findings: Record<string, unknown>[]): Set<string> {
+  const ids = new Set<string>();
+  for (const finding of findings) {
+    if (typeof finding.target_memory_id === "string" || typeof finding.target_memory_id === "number") {
+      ids.add(String(finding.target_memory_id));
+    }
+    if (!Array.isArray(finding.memory_refs)) continue;
+    for (const ref of finding.memory_refs) {
+      if (!isRecord(ref)) continue;
+      if (typeof ref.memory_id === "string" || typeof ref.memory_id === "number") {
+        ids.add(String(ref.memory_id));
+      }
+    }
+  }
+  return ids;
+}
+
+function referencedActiveMemoryHints(context: Record<string, unknown>, findings: Record<string, unknown>[]): unknown[] {
+  const ids = referencedMemoryIds(findings);
+  if (ids.size === 0 || !Array.isArray(context.active_memory_hints)) return [];
+  return context.active_memory_hints.filter((memory) => {
+    if (!isRecord(memory)) return false;
+    if (typeof memory.id !== "string" && typeof memory.id !== "number") return false;
+    return ids.has(String(memory.id));
+  });
 }
 
 function mergeProposalEditorOutput(envelope: Record<string, unknown>): Record<string, unknown> {
@@ -417,15 +449,15 @@ function payloadForSpecialist(args: {
         },
       };
     case "proposal-editor":
+      const findings = arrayFrom(previousOutput, "findings");
       return {
         context,
         payload: {
           ...intentContext,
           claim_cards: claimCards(context),
           candidates: arrayFrom(context, "claim_candidates"),
-          memory_map: previousOutput,
-          cartography_findings: arrayFrom(previousOutput, "findings"),
-          active_memory_hints: compactMemoryHints(context.active_memory_hints),
+          cartography_findings: findings,
+          active_memory_hints: referencedActiveMemoryHints(context, findings),
           coral_thread_context: threadContext,
         },
       };
@@ -505,7 +537,7 @@ function failureEnvelope(args: {
   message: string;
   rawOutput?: string;
   model: WorkerModelConfig;
-  providerMetadata?: OpenRouterCallMetadata;
+  providerMetadata?: ModelCallMetadata;
   prompt?: { system: string; user: string };
 }): Record<string, unknown> {
   return {
@@ -564,16 +596,16 @@ export async function buildLiveReviewEnvelope(args: {
       agentName: args.agentName,
       receivedMessageId: args.message.id,
       code: "MODEL_CONFIG_MISSING",
-      message: "OPENROUTER_API_KEY or MODEL_API_KEY is required for live Coral specialist execution.",
+      message: "CORAL_API_KEY, OPENROUTER_API_KEY, or MODEL_API_KEY is required for live Coral specialist execution.",
       model: args.model,
       prompt,
     });
   }
 
   let rawOutput = "";
-  let providerMetadata: OpenRouterCallMetadata | undefined;
+  let providerMetadata: ModelCallMetadata | undefined;
   try {
-    const callModel = args.callModel ?? callOpenRouterChatWithMetadata;
+    const callModel = args.callModel ?? callOpenAiCompatibleChatWithMetadata;
     const response = await callModel({
       model: args.model,
       system: prompt.system,

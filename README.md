@@ -14,20 +14,24 @@ surface.
 - Node.js >= 22.
 - Codex memories enabled and available under `~/.codex/memories`, or another
   explicitly provided directory named `memories`.
-- Model credentials for live review, usually `OPENROUTER_API_KEY` or
-  `MODEL_API_KEY`.
+- A Coral API key for live specialist model calls. Use `refinery set auth coral`
+  for packaged installs, or set `CORAL_API_KEY`/`MODEL_API_KEY` in the
+  environment.
 
 ## Install
 
 ```bash
 npm i -g @itsshadowai/refinery
 refinery init --json
+refinery set auth coral
 refinery doctor --json
 ```
 
 `refinery init` creates global Refinery state under `~/.refinery` and installs
 the bundled `$refinery` Codex skill into `${CODEX_HOME:-~/.codex}/skills/refinery`.
 It preserves an existing installed skill unless `--force` is passed.
+`refinery set auth coral` stores the Coral API key under `~/.refinery` with
+file mode `0600` and does not print the secret.
 
 ## Commands
 
@@ -37,6 +41,9 @@ refinery doctor --json
 
 # Verify the installed CLI version.
 refinery version --json
+
+# Store the Coral API key used by live Refinery specialists.
+refinery set auth coral
 
 # Verify a non-default Codex memory directory.
 refinery doctor --memory-home /path/to/memories --json
@@ -128,6 +135,7 @@ Runtime state is globally organized by default:
 ~/.refinery/
   config/
   credentials/
+    coral-api-key
   runs/
     by-project/
       <project-key>/

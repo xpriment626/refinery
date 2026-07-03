@@ -1,3 +1,4 @@
+import { defaultModelBaseUrl, defaultModelName } from "../env.js";
 import { orderedSpecialists } from "../core/specialists/harness.js";
 import path from "node:path";
 export const refineryCoralAgentVersion = "0.1.0";
@@ -6,8 +7,8 @@ export const refineryCoralPort = 5555;
 export const refineryCoralConfigPath = "coral/refinery-config.toml";
 export const refineryCoralAgentGlob = "coral/agents/*";
 export const refineryCoralModelDefaults = {
-    modelName: "deepseek/deepseek-v4-pro",
-    baseUrl: "https://openrouter.ai/api/v1",
+    modelName: defaultModelName,
+    baseUrl: defaultModelBaseUrl,
     reasoningEffort: "low",
 };
 function agentNameForSpecialist(name) {

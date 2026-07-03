@@ -27,6 +27,17 @@ refinery init --json
 refinery doctor --json
 ```
 
+For packaged installs, the canonical Coral key setup is:
+
+```bash
+refinery set auth coral
+```
+
+Use this when `refinery doctor --json` reports `modelAuth.present: false` or
+when a live review fails with missing model auth. Do not ask the user to run
+Delve auth commands for Refinery, and do not print API keys in chat. Repo-local
+`.env` files with `CORAL_API_KEY` remain supported for development sessions.
+
 If `refinery` is not installed, install the package first:
 
 ```bash
