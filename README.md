@@ -1,22 +1,22 @@
 # refinery
 
-Refinery is a Codex-first memory review CLI. It reads bounded Codex memory
-files, runs a dry-run Coral-coordinated specialist review, and emits proposal
-artifacts that a coding agent or host app can inspect before applying changes
-elsewhere.
+Refinery is a Codex-first source review CLI. It builds a bounded, run-scoped
+`ReviewPacket` from Codex memories, Codex sessions, Codex skills, files, globs,
+or mixed source sets, then runs a dry-run Coral-coordinated specialist review.
+The output is a set of proposal artifacts for a coding agent or host app to
+inspect before applying changes elsewhere.
 
 Refinery does not approve proposals, apply edits, or own durable memory truth.
-For the first useful version, Codex memories are the only built-in memory
+Built-in target surfaces are `codex:memories` and `codex:skills`. Refinery can
+recommend memory proposals and skill candidates, but it does not write either
 surface.
 
 ## Requirements
 
-- Node.js >= 22.
-- Codex memories enabled and available under `~/.codex/memories`, or another
-  explicitly provided directory named `memories`.
-- A Coral API key for live specialist model calls. Use `refinery set auth coral`
-  for packaged installs, or set `CORAL_API_KEY`/`MODEL_API_KEY` in the
-  environment.
+- Node.js 22 or newer.
+- Codex memories enabled under `~/.codex/memories`, or an explicitly provided
+  directory named `memories`.
+- A Coral API key for live specialist model calls.
 
 ## Install
 
@@ -28,76 +28,137 @@ refinery doctor --json
 ```
 
 `refinery init` creates global Refinery state under `~/.refinery` and installs
-the bundled `$refinery` Codex skill into `${CODEX_HOME:-~/.codex}/skills/refinery`.
-It preserves an existing installed skill unless `--force` is passed.
-`refinery set auth coral` stores the Coral API key under `~/.refinery` with
-file mode `0600` and does not print the secret.
+the bundled `$refinery` Codex skill into
+`${CODEX_HOME:-~/.codex}/skills/refinery`. It preserves an existing installed
+skill unless `--force` is passed.
+
+To install or refresh only the Codex skill:
+
+```bash
+refinery skill install --json
+refinery skill install --force --json
+```
+
+`refinery set auth coral` stores the Coral API key under `~/.refinery` with file
+mode `0600` and does not print the secret. You can also provide
+`CORAL_API_KEY` in the environment for ephemeral sessions.
 
 ## Commands
 
 ```bash
-# Verify the local Codex memory source is readable.
+# Verify the CLI, memory source, installed skill, and Coral auth status.
 refinery doctor --json
 
 # Verify the installed CLI version.
 refinery version --json
 
-# Store the Coral API key used by live Refinery specialists.
-refinery set auth coral
+# Install or refresh the companion Codex skill.
+refinery skill install --json
 
-# Verify a non-default Codex memory directory.
-refinery doctor --memory-home /path/to/memories --json
+# Inspect source loading without invoking Coral.
+refinery sources inspect \
+  --source "codex:sessions?project=$PWD" \
+  --source codex:memories \
+  --json
 
-# Run a dry-run stale-memory audit over Codex memories.
+# Run a dry-run memory review over Codex memories.
 refinery review \
-  --project . \
+  --source codex:memories \
+  --target codex:memories \
+  --project "$PWD" \
   --intent stale-audit \
-  --request "Find Codex memories that may be stale after recent repo moves." \
+  --request "Find memories that may be stale after recent project changes." \
   --json
 
-# Seed a live Coral Console debate/critique session without writing run artifacts.
-refinery console run \
-  --project . \
-  --intent stale-audit \
+# Find recurring session topics worth memory.
+refinery review \
+  --source "codex:sessions?project=$PWD" \
+  --target codex:memories \
+  --intent session-recurrence \
   --json
 
-# Inspect an existing run without invoking Coral or a model.
+# Audit memories and workflows that should become custom skills.
+refinery review \
+  --source codex:memories \
+  --source codex:skills \
+  --target codex:skills \
+  --intent skill-promotion-audit \
+  --json
+
+# Compare recent global sessions against current memories.
+refinery review \
+  --source "codex:sessions?scope=global&days=30" \
+  --source codex:memories \
+  --target codex:memories \
+  --intent memory-gap-audit \
+  --json
+
+# Inspect an existing run without invoking Coral.
 refinery trial inspect --run-dir ~/.refinery/runs/by-project/<project-key>/<run-id> --json
 ```
 
-The CLI always emits structured JSON for these commands. Failures use
-`ok: false` with `error.code`, `error.message`, and `error.phase` when known.
-Secrets are not emitted.
+The CLI emits structured JSON. Failures use `ok: false` with `error.code`,
+`error.message`, and `error.phase` when known. Secrets are not emitted.
 
-## Memory Source
+## Sources And Targets
 
-The built-in Codex memory reader is intentionally bounded. It accepts only a
-directory named `memories`, normally `~/.codex/memories`, and does not crawl all
-of `~/.codex`.
+`refinery review` accepts repeatable `--source` and `--target` flags. If omitted,
+the defaults are `--source codex:memories --target codex:memories`.
 
-Indexed files:
+Supported source specs:
+
+```text
+codex:memories
+codex:sessions?project=/path/to/project
+codex:sessions?scope=global&days=30
+codex:skills
+file:/path/to/file.md
+glob:/path/to/**/*.md
+```
+
+Supported targets:
+
+```text
+codex:memories
+codex:skills
+```
+
+The Codex memory reader is bounded. It accepts only a directory named
+`memories`, normally `~/.codex/memories`, and does not crawl all of `~/.codex`.
+
+Indexed memory files:
 
 - `MEMORY.md`
 - `memory_summary.md`
 - `rollout_summaries/*.md`
 - `extensions/ad_hoc/**/*.md`
 
-Records use opaque IDs such as `codex-source:<hash>` and
-`codex-memory:<hash>`. Proposal targets should use those opaque IDs rather than
-database IDs or file offsets.
+The Codex session reader scans `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+It keeps session id, cwd, timestamps, user prompts, assistant finals/summaries,
+and compact tool/action summaries. It deliberately ignores base instructions and
+does not dump full transcripts into prompts.
+
+The Codex skill reader scans `~/.codex/skills/**/SKILL.md` and
+`~/.agents/skills/**/SKILL.md`. It does not scan plugin-cache skills by default.
+
+Each review writes the canonical packet to `input.json`. The prompt-facing
+`source_chunks` and `active_memory_hints` fields are derived from that packet
+and are not the canonical input contract.
 
 ## Review
 
 `refinery review` is dry-run only. It starts or targets Coral, creates bounded
 proposal and critique threads, runs the five Refinery specialists, writes a run
-directory, and returns proposed memory-maintenance actions.
+directory, and returns proposed memory-maintenance actions or skill candidates.
 
-The default workflow is debate/critique. Claim Scout extracts candidate memory
-claims, Memory Cartographer maps nearby active memories, Evidence Auditor checks
-support and provenance, Proposal Editor turns surviving claims into typed
-proposal packets, and Decision Synthesizer resolves challenges into final
-proposals, rejected candidates, and unresolved questions. Each specialist
-message is persisted under that step's `messages/` artifact directory.
+The default workflow is debate/critique:
+
+- Claim Scout extracts candidate memory claims.
+- Memory Cartographer maps nearby active memories.
+- Evidence Auditor checks support and provenance.
+- Proposal Editor turns surviving claims into typed proposal packets.
+- Decision Synthesizer resolves challenges into final proposals, rejected
+  candidates, and unresolved questions.
 
 Supported review intents:
 
@@ -108,6 +169,9 @@ forget-candidates
 update-candidates
 conflict-audit
 scope-audit
+session-recurrence
+memory-gap-audit
+skill-promotion-audit
 ```
 
 Proposal actions:
@@ -117,19 +181,28 @@ create, update, supersede, merge, archive, retag, quarantine,
 promote, demote, ttl_update, contradiction_review
 ```
 
-Proposal lifecycle states:
-
-```text
-proposed, needs_review, accepted, rejected, deferred,
-applied_externally, superseded, archived_for_audit
-```
-
 New proposals default to `lifecycle: "proposed"`. Applying or rejecting them is
 owned by the caller.
 
-## Trial Artifacts
+When a run targets `codex:skills`, `review.json` and `skillCandidates.json` may
+include:
 
-Runtime state is globally organized by default:
+```text
+skillCandidates.candidates[].name
+skillCandidates.candidates[].trigger
+skillCandidates.candidates[].evidenceRefs
+skillCandidates.candidates[].existingSkillRefs
+skillCandidates.candidates[].skillMdOutline
+skillCandidates.candidates[].skillMdDraft
+skillCandidates.candidates[].rationale
+skillCandidates.candidates[].confidence
+skillCandidates.rejected[]
+skillCandidates.unresolved[]
+```
+
+## Run Artifacts
+
+Runtime state is global by default:
 
 ```text
 ~/.refinery/
@@ -141,10 +214,12 @@ Runtime state is globally organized by default:
       <project-key>/
         <run-id>/
           input.json
+          source-counts.json
           manifest.json
           metadata.json
           proposals.json
           rejected.json
+          skillCandidates.json
           claims.json
           challenge-ledger.json
           deliberation.json
@@ -152,11 +227,6 @@ Runtime state is globally organized by default:
           coral.json
           transcript.json
           steps/
-            claim-scout/{input.json,output.raw.md,output.parsed.json}
-            memory-cartographer/{input.json,output.raw.md,output.parsed.json}
-            evidence-auditor/{input.json,output.raw.md,output.parsed.json}
-            proposal-editor/{input.json,output.raw.md,output.parsed.json}
-            decision-synthesizer/{input.json,output.raw.md,output.parsed.json}
 ```
 
 Failed reviews that reach a run directory write `status.json`, failed
@@ -164,14 +234,17 @@ Failed reviews that reach a run directory write `status.json`, failed
 stable summary instead of scraping file paths.
 
 Use `--home ./.refinery` only when you intentionally want project-local
-Refinery state. The default keeps run artifacts and future credentials/config
-global while grouping runs by project key.
+Refinery state. The default keeps run artifacts and credentials/config global
+while grouping runs by project key.
 
 ## Coral Runtime
 
-The default runtime is Coral. Refinery owns local executable agent manifests
-under `coral/agents/*` and a repo-local config at `coral/refinery-config.toml`.
-The CLI can also attach to an existing Coral server:
+The default runtime is Coral. Refinery ships executable Coral agent manifests
+under `coral/agents/*` and a packaged Coral config under
+`coral/refinery-config.toml`. The default model route is Coral's
+OpenAI-compatible endpoint with `gpt-5.4-nano`.
+
+To attach to an existing Coral server:
 
 ```bash
 refinery review \
@@ -182,34 +255,9 @@ refinery review \
 
 Caller-owned Coral sessions and threads are not torn down by Refinery.
 
-## Console Mode
+## Codex Skill
 
-`refinery console run` is a local development command for Coral Console
-inspection. It reads the bounded Codex memory source, starts Coral when
-`--coral-url` is not provided, creates a session and thread set, seeds the
-default debate/critique workflow, prints the console URL and session
-identifiers, and does not write run artifacts.
-
-The default console topology is `debate-critique`. When Refinery starts the
-Coral server, the command stays in the foreground so the Console remains
-available until interrupted.
-
-## Development
-
-```bash
-npm test
-npm run build
-npm link
-refinery version --json
-```
-
-The test suite covers the Codex memory adapter, Codex-first CLI contract, Coral
-worker/conductor helpers, artifact inspection, model client, intents, MCP
-specialist prompt tools, and specialist contracts.
-
-### Codex Skill
-
-Use one Codex skill for Refinery memory work:
+Use one Codex skill for Refinery source review work:
 
 ```text
 $refinery
@@ -218,7 +266,7 @@ $refinery
 Example prompt:
 
 ```text
-Use $refinery to inspect the current project Codex memories with intent update-candidates, source-limit 1, source-char-limit 2500, and summarize the proposed edits.
+Use $refinery to inspect current project Codex sessions plus memories with intent memory-gap-audit, source-limit 2, source-char-limit 6000, and summarize the proposed edits.
 ```
 
 The companion skill should be installed once in the Codex global skill root:
@@ -227,10 +275,7 @@ The companion skill should be installed once in the Codex global skill root:
 ~/.codex/skills/refinery/SKILL.md
 ```
 
-Do not keep repo-local alternate copies of the Refinery skill; they create
-duplicate suggestions and teach agents old invocation names. `$refinery`
-defaults to live `refinery review`. For deterministic rehearsal only:
-
-```bash
-refinery dev fixture memory-proposal --json
-```
+Use `refinery skill install --force --json` to refresh the installed skill from
+the package. `$refinery` defaults to live `refinery review` and uses fixture mode
+only when the user explicitly asks for mock, fixture, deterministic, no-Coral,
+or rehearsal output.
