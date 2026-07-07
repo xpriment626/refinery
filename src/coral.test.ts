@@ -8,7 +8,7 @@ import {
   parsePingEnvelope,
   type CoralMessage,
 } from "./coral/client.ts";
-import { defaultCoralReviewTimeoutMs } from "./coral/review-conductor.ts";
+import { defaultCoralReviewTimeoutMs, resolveRuntimeCoralConfigPath } from "./coral/review-conductor.ts";
 import {
   refineryCoralAgentGlob,
   refineryCoralAgentNames,
@@ -47,10 +47,20 @@ test("repo Coral config uses local agent glob without global Coral home dependen
   assert.match(config, /keys = \["refinery-dev"\]/);
   assert.match(config, /include_coral_home_agents = false/);
   assert.equal(refineryCoralAgentGlob, "coral/agents/*");
+  assert.match(config, /local_agents = \["coral\/agents\/\*"\]/);
+  assert.equal(refineryCoralAgentGlobForRepo(repoRoot), path.join(repoRoot, "coral/agents/*"));
+});
+
+test("runtime Coral config materializes an absolute packaged agent glob", () => {
+  const runtimeConfigPath = resolveRuntimeCoralConfigPath("coral/refinery-config.toml");
+  const config = fs.readFileSync(runtimeConfigPath, "utf8");
+
+  assert.match(config, /include_coral_home_agents = false/);
   assert.match(
     config,
     new RegExp(`local_agents = \\["${refineryCoralAgentGlobForRepo(repoRoot).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\]`),
   );
+  fs.rmSync(path.dirname(runtimeConfigPath), { recursive: true, force: true });
 });
 
 test("each Coral manifest points to the shared worker and matching specialist argument", () => {
@@ -59,8 +69,8 @@ test("each Coral manifest points to the shared worker and matching specialist ar
     const manifest = fs.readFileSync(manifestPath, "utf8");
     assert.match(manifest, new RegExp(`name = "${agent.agentName}"`));
     assert.match(manifest, new RegExp(`version = "${refineryCoralAgentVersion}"`));
-    assert.match(manifest, /MODEL_NAME = \{ type = "string", default = "deepseek-v4-pro" \}/);
-    assert.match(manifest, /MODEL_BASE_URL = \{ type = "string", default = "https:\/\/llm\.coralcloud\.ai\/deepseek\/v1" \}/);
+    assert.match(manifest, /MODEL_NAME = \{ type = "string", default = "gpt-5.4-nano" \}/);
+    assert.match(manifest, /MODEL_BASE_URL = \{ type = "string", default = "https:\/\/llm\.coralcloud\.ai\/openai\/v1" \}/);
     assert.match(manifest, /path = "\.\.\/run-worker\.sh"/);
     assert.match(manifest, new RegExp(`arguments = \\["--specialist", "${agent.specialistName}"\\]`));
   }
@@ -94,13 +104,9 @@ test("Coral review topology defaults to debate critique", () => {
   assert.equal(parseReviewTopology(undefined), "debate-critique");
 });
 
-test("Coral worker model config defaults to Coral DeepSeek proxy with CORAL_API_KEY", () => {
+test("Coral worker model config defaults to Coral model proxy with CORAL_API_KEY", () => {
   const previous = {
     CORAL_API_KEY: process.env.CORAL_API_KEY,
-    MODEL_API_KEY: process.env.MODEL_API_KEY,
-    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
-    MODEL_PROVIDER: process.env.MODEL_PROVIDER,
-    REFINERY_MODEL_PROVIDER: process.env.REFINERY_MODEL_PROVIDER,
     MODEL_BASE_URL: process.env.MODEL_BASE_URL,
     REFINERY_MODEL_BASE_URL: process.env.REFINERY_MODEL_BASE_URL,
     MODEL_NAME: process.env.MODEL_NAME,
@@ -112,7 +118,7 @@ test("Coral worker model config defaults to Coral DeepSeek proxy with CORAL_API_
     const model = loadWorkerModelConfig(path.join(repoRoot, "does-not-exist"));
     assert.equal(model.provider, "coral");
     assert.equal(model.baseUrl, refineryCoralModelDefaults.baseUrl);
-    assert.equal(model.modelName, "deepseek-v4-pro");
+    assert.equal(model.modelName, "gpt-5.4-nano");
     assert.equal(model.apiKey, "coral-secret");
     assert.equal(model.apiKeyPresent, true);
   } finally {
@@ -169,9 +175,9 @@ test("Coral worker live envelope uses injected model output and redacts secrets"
       threadId: "thread-1",
     },
     model: {
-      provider: "openrouter",
-      baseUrl: "https://openrouter.invalid/api/v1",
-      modelName: "deepseek/deepseek-v4-pro",
+      provider: "coral",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      modelName: "gpt-5.4-nano",
       apiKey: "secret-key",
       reasoningEffort: "low",
       apiKeyPresent: true,
@@ -189,12 +195,12 @@ test("Coral worker live envelope uses injected model output and redacts secrets"
           ],
         }),
         metadata: {
-          provider: "openrouter",
-          baseUrl: "https://openrouter.invalid/api/v1",
-          modelName: "deepseek/deepseek-v4-pro",
+          provider: "coral",
+          baseUrl: "https://llm.coralcloud.ai/openai/v1",
+          modelName: "gpt-5.4-nano",
           status: 200,
-          responseId: "or-worker-1",
-          responseModel: "deepseek/deepseek-v4-pro",
+          responseId: "coral-worker-1",
+          responseModel: "gpt-5.4-nano",
           finishReason: "stop",
           usage: { prompt_tokens: 20, completion_tokens: 10 },
         },
@@ -211,7 +217,7 @@ test("Coral worker live envelope uses injected model output and redacts secrets"
   assert.match(calls[0].user, /source_chunks/);
   assert.match(calls[0].user, /review_intent/);
   assert.equal((envelope.output as { candidates: unknown[] }).candidates.length, 1);
-  assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "or-worker-1");
+  assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "coral-worker-1");
   assert.equal("apiKey" in (envelope.model as Record<string, unknown>), false);
 });
 
@@ -232,9 +238,9 @@ test("Coral worker live envelope reports invalid model JSON without fallback", a
       threadId: "thread-1",
     },
     model: {
-      provider: "openrouter",
-      baseUrl: "https://openrouter.invalid/api/v1",
-      modelName: "deepseek/deepseek-v4-pro",
+      provider: "coral",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      modelName: "gpt-5.4-nano",
       apiKey: "secret-key",
       reasoningEffort: "low",
       apiKeyPresent: true,
@@ -242,12 +248,12 @@ test("Coral worker live envelope reports invalid model JSON without fallback", a
     callModel: async () => ({
       content: "not json",
       metadata: {
-        provider: "openrouter",
-        baseUrl: "https://openrouter.invalid/api/v1",
-        modelName: "deepseek/deepseek-v4-pro",
+        provider: "coral",
+        baseUrl: "https://llm.coralcloud.ai/openai/v1",
+        modelName: "gpt-5.4-nano",
         status: 200,
-        responseId: "or-worker-bad-json",
-        responseModel: "deepseek/deepseek-v4-pro",
+        responseId: "coral-worker-bad-json",
+        responseModel: "gpt-5.4-nano",
         finishReason: "stop",
         usage: null,
       },
@@ -257,7 +263,7 @@ test("Coral worker live envelope reports invalid model JSON without fallback", a
   assert.equal(envelope.status, "failed");
   assert.equal((envelope.error as { code: string }).code, "MODEL_OUTPUT_INVALID");
   assert.equal(envelope.rawOutput, "not json");
-  assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "or-worker-bad-json");
+  assert.equal((envelope.providerMetadata as { responseId: string }).responseId, "coral-worker-bad-json");
 });
 
 test("Coral worker marks debate critique intake as a preflight critique phase", async () => {
@@ -294,9 +300,9 @@ test("Coral worker marks debate critique intake as a preflight critique phase", 
       threadId: "thread-critique",
     },
     model: {
-      provider: "openrouter",
-      baseUrl: "https://openrouter.invalid/api/v1",
-      modelName: "deepseek/deepseek-v4-pro",
+      provider: "coral",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      modelName: "gpt-5.4-nano",
       apiKey: "secret-key",
       reasoningEffort: "low",
       apiKeyPresent: true,
@@ -318,12 +324,12 @@ test("Coral worker marks debate critique intake as a preflight critique phase", 
           ],
         }),
         metadata: {
-          provider: "openrouter",
-          baseUrl: "https://openrouter.invalid/api/v1",
-          modelName: "deepseek/deepseek-v4-pro",
+          provider: "coral",
+          baseUrl: "https://llm.coralcloud.ai/openai/v1",
+          modelName: "gpt-5.4-nano",
           status: 200,
-          responseId: "or-worker-critique",
-          responseModel: "deepseek/deepseek-v4-pro",
+          responseId: "coral-worker-critique",
+          responseModel: "gpt-5.4-nano",
           finishReason: "stop",
           usage: null,
         },
@@ -384,9 +390,9 @@ test("Coral worker sends Proposal Editor compact cartography context", async () 
       threadId: "thread-proposal",
     },
     model: {
-      provider: "openrouter",
-      baseUrl: "https://openrouter.invalid/api/v1",
-      modelName: "deepseek/deepseek-v4-pro",
+      provider: "coral",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      modelName: "gpt-5.4-nano",
       apiKey: "secret-key",
       reasoningEffort: "low",
       apiKeyPresent: true,
@@ -396,12 +402,12 @@ test("Coral worker sends Proposal Editor compact cartography context", async () 
       return {
         content: JSON.stringify({ typed: [] }),
         metadata: {
-          provider: "openrouter",
-          baseUrl: "https://openrouter.invalid/api/v1",
-          modelName: "deepseek/deepseek-v4-pro",
+          provider: "coral",
+          baseUrl: "https://llm.coralcloud.ai/openai/v1",
+          modelName: "gpt-5.4-nano",
           status: 200,
-          responseId: "or-worker-proposal-compact",
-          responseModel: "deepseek/deepseek-v4-pro",
+          responseId: "coral-worker-proposal-compact",
+          responseModel: "gpt-5.4-nano",
           finishReason: "stop",
           usage: null,
         },
@@ -467,9 +473,9 @@ test("Coral worker marks debate merge as proposal synthesis for decision synthes
       threadId: "thread-proposal",
     },
     model: {
-      provider: "openrouter",
-      baseUrl: "https://openrouter.invalid/api/v1",
-      modelName: "deepseek/deepseek-v4-pro",
+      provider: "coral",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      modelName: "gpt-5.4-nano",
       apiKey: "secret-key",
       reasoningEffort: "low",
       apiKeyPresent: true,
@@ -500,12 +506,12 @@ test("Coral worker marks debate merge as proposal synthesis for decision synthes
           rejected: [],
         }),
         metadata: {
-          provider: "openrouter",
-          baseUrl: "https://openrouter.invalid/api/v1",
-          modelName: "deepseek/deepseek-v4-pro",
+          provider: "coral",
+          baseUrl: "https://llm.coralcloud.ai/openai/v1",
+          modelName: "gpt-5.4-nano",
           status: 200,
-          responseId: "or-worker-merge",
-          responseModel: "deepseek/deepseek-v4-pro",
+          responseId: "coral-worker-merge",
+          responseModel: "gpt-5.4-nano",
           finishReason: "stop",
           usage: null,
         },
@@ -518,6 +524,74 @@ test("Coral worker marks debate merge as proposal synthesis for decision synthes
   assert.equal(envelope.phase, "proposal-synthesis");
   assert.match(calls[0].system, /merge point/);
   assert.match(calls[0].user, /debate_critique/);
+});
+
+test("Coral worker preserves decision synthesizer skill candidates", async () => {
+  const envelope = await buildLiveReviewEnvelope({
+    specialistName: "decision-synthesizer",
+    agentName: "refinery-decision-synthesizer",
+    envelope: {
+      type: "refinery-review-merge",
+      topology: "debate-critique",
+      phase: "proposal-synthesis-intake",
+      runId: "run-skill-candidate-worker",
+      context: {
+        target_surfaces: ["codex:skills"],
+        source_sets: [{ id: "skills", role: "codex-skills" }],
+      },
+      proposal_editor_output: { typed: [] },
+    },
+    message: {
+      id: "message-skill-merge",
+      senderName: "refinery-proposal-editor",
+      mentionNames: ["refinery-decision-synthesizer"],
+      threadId: "thread-proposal",
+    },
+    model: {
+      provider: "coral",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      modelName: "gpt-5.4-nano",
+      apiKey: "secret-key",
+      reasoningEffort: "low",
+      apiKeyPresent: true,
+    },
+    callModel: async () => ({
+      content: JSON.stringify({
+        proposals: [],
+        rejected: [],
+        skillCandidates: {
+          candidates: [
+            {
+              name: "release-check",
+              trigger: "Use when preparing a Refinery release.",
+              evidenceRefs: [{ source_id: "source:1" }],
+              existingSkillRefs: [],
+              skillMdOutline: ["frontmatter", "release workflow"],
+              skillMdDraft: "---\nname: release-check\ndescription: Use when preparing a Refinery release.\n---\n# Release Check\n",
+              rationale: "The workflow recurs across sessions.",
+              confidence: 0.84,
+            },
+          ],
+          rejected: [],
+          unresolved: [],
+        },
+      }),
+      metadata: {
+        provider: "coral",
+        baseUrl: "https://llm.coralcloud.ai/openai/v1",
+        modelName: "gpt-5.4-nano",
+        status: 200,
+        responseId: "coral-worker-skill-candidate",
+        responseModel: "gpt-5.4-nano",
+        finishReason: "stop",
+        usage: null,
+      },
+    }),
+  });
+
+  assert.equal(envelope.status, "succeeded");
+  const output = envelope.output as { skillCandidates?: { candidates?: Array<{ name?: string }> } };
+  assert.equal(output.skillCandidates?.candidates?.[0]?.name, "release-check");
 });
 
 test("Coral worker treats wait_for_mention timeouts as idle waits", () => {

@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createCodexMemoryAdapter, resolveCodexMemoryHome } from "./codex-memory.ts";
+import {
+  listCodexActiveMemories,
+  listCodexMemorySourceDocuments,
+  resolveCodexMemoryHome,
+} from "./codex-memories.ts";
 
 function seedCodexMemoryHome(): string {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-codex-memory-"));
@@ -73,52 +77,45 @@ test("resolveCodexMemoryHome defaults to the user's bounded memories directory",
   assert.equal(resolveCodexMemoryHome(), path.join(os.homedir(), ".codex", "memories"));
 });
 
-test("Codex memory adapter parses memory index, summaries, rollout metadata, and ad hoc notes", async () => {
+test("Codex memory source reader parses memory index, summaries, rollout metadata, and ad hoc notes", () => {
   const memoryHome = seedCodexMemoryHome();
-  const adapter = createCodexMemoryAdapter({ memoryHome });
+  const sources = listCodexMemorySourceDocuments({ memoryHome, limit: 10 });
+  const memories = listCodexActiveMemories({ memoryHome, limit: 10 });
 
-  const sources = await adapter.listSourceEvidence({ scope: "project", limit: 10 });
-  const memories = await adapter.listActiveMemories({ scope: "project", limit: 10 });
-
-  assert.equal(adapter.name, "codex-memory");
   assert.equal(sources.length, 4);
   assert.equal(memories.length >= 4, true);
   assert.equal(sources.every((source) => source.id.startsWith("codex-source:")), true);
   assert.equal(memories.every((memory) => memory.id.startsWith("codex-memory:")), true);
   assert.equal(memories.every((memory) => memory.status === "active"), true);
 
-  const memoryIndex = sources.find((source) => source.path === "MEMORY.md");
+  const memoryIndex = sources.find((source) => source.relPath === "MEMORY.md");
   assert.ok(memoryIndex);
-  assert.equal(memoryIndex.kind, "codex-memory-index");
-  assert.equal(memoryIndex.metadata?.originKind, "memory-index");
+  assert.equal(memoryIndex.role, "codex-memory-index");
+  assert.equal(memoryIndex.metadata.originKind, "memory-index");
 
-  const rollout = sources.find((source) => source.kind === "codex-rollout-summary");
+  const rollout = sources.find((source) => source.role === "codex-rollout-summary");
   assert.ok(rollout);
-  assert.equal(rollout.metadata?.threadId, "019eb1a7-4054-7f51-9cea-484e208390f9");
-  assert.equal(rollout.metadata?.updatedAt, "2026-06-14T14:24:07+00:00");
+  assert.equal(rollout.metadata.threadId, "019eb1a7-4054-7f51-9cea-484e208390f9");
+  assert.equal(rollout.metadata.updatedAt, "2026-06-14T14:24:07+00:00");
 
   const preference = memories.find((memory) => memory.body.includes("prefer machine-readable contracts"));
   assert.ok(preference);
   assert.equal(preference.type, "operational");
   assert.equal(preference.scope, "project");
   assert.equal(preference.provenance?.originKind, "memory-index");
-
-  const found = await adapter.searchActiveMemories({ scope: "project", query: "manifest", limit: 5 });
-  assert.equal(found.some((memory) => memory.body.includes("manifest.json")), true);
-  assert.deepEqual(await adapter.getActiveMemory({ scope: "project", id: preference.id }), preference);
+  assert.equal(memories.some((memory) => memory.body.includes("manifest.json")), true);
 });
 
-test("Codex memory adapter rejects missing or unsafe memory homes", async () => {
-  const missing = createCodexMemoryAdapter({
-    memoryHome: path.join(os.tmpdir(), "refinery-missing-codex-memory", "memories"),
-  });
-  await assert.rejects(
-    () => missing.listSourceEvidence({ scope: "project" }),
+test("Codex memory source reader rejects missing or unsafe memory homes", () => {
+  assert.throws(
+    () => listCodexMemorySourceDocuments({
+      memoryHome: path.join(os.tmpdir(), "refinery-missing-codex-memory", "memories"),
+    }),
     /Codex memory home does not exist/,
   );
 
   assert.throws(
-    () => createCodexMemoryAdapter({ memoryHome: path.join(os.tmpdir(), "refinery-not-codex") }),
+    () => listCodexMemorySourceDocuments({ memoryHome: path.join(os.tmpdir(), "refinery-not-codex") }),
     /memoryHome must point to a directory named memories/,
   );
 });

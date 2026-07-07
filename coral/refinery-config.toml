@@ -13,4 +13,4 @@ include_debug_agents = false
 export_debug_agents = false
 watch_local_agents = true
 local_agent_rescan_timer = "10s"
-local_agents = ["/Users/bambozlor/Lab/Research-Desk/refinery/coral/agents/*"]
+local_agents = ["coral/agents/*"]

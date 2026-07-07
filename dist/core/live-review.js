@@ -1,4 +1,4 @@
-import { memoryMaintenanceActions } from "./adapter.js";
+import { memoryMaintenanceActions } from "./types.js";
 export function extractJson(raw) {
     const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
     const candidate = fenced ? fenced[1] : raw;
@@ -17,8 +17,8 @@ export function redactModel(config) {
         apiKeyPresent: Boolean(config.apiKey),
     };
 }
-function parseAction(value, legacyValue, label) {
-    const action = value ?? legacyValue;
+function parseAction(value, label) {
+    const action = value;
     if (!memoryMaintenanceActions.includes(action)) {
         throw new Error(`${label} has invalid action.`);
     }
@@ -113,7 +113,7 @@ export function parseProposalEditor(raw) {
             if (typeof t.proposed_scope !== "string" || !t.proposed_scope.trim()) {
                 throw new Error(`Typed item ${index} missing proposed_scope.`);
             }
-            const action = parseAction(t.action, t.mutation_op, `Typed item ${index}`);
+            const action = parseAction(t.action, `Typed item ${index}`);
             const record = item;
             const target = parseTargetMemoryIds(record.target_memory_ids ?? record.target_memory_id, `Typed item ${index}`);
             if (!Array.isArray(t.source_refs))
@@ -142,7 +142,7 @@ export function parseDecisionSynthesizer(raw) {
     if (!Array.isArray(parsed.proposals) || !Array.isArray(parsed.rejected)) {
         throw new Error("Decision Synthesizer output must contain proposals and rejected arrays.");
     }
-    return {
+    const output = {
         proposals: parsed.proposals.map((item, index) => {
             if (!item || typeof item !== "object")
                 throw new Error(`Proposal ${index} must be an object.`);
@@ -161,7 +161,7 @@ export function parseDecisionSynthesizer(raw) {
                 throw new Error(`Proposal ${index} missing rationale.`);
             if (!Array.isArray(p.source_refs))
                 throw new Error(`Proposal ${index} missing source_refs array.`);
-            const action = parseAction(p.action, p.mutation_op, `Proposal ${index}`);
+            const action = parseAction(p.action, `Proposal ${index}`);
             const record = item;
             const target = parseTargetMemoryIds(record.target_memory_ids ?? record.target_memory_id, `Proposal ${index}`);
             return {
@@ -202,6 +202,11 @@ export function parseDecisionSynthesizer(raw) {
             return { body: typeof r.body === "string" ? r.body : undefined, reason };
         }),
     };
+    if (parsed.skillCandidates !== undefined)
+        output.skillCandidates = parsed.skillCandidates;
+    if (parsed.skill_candidates !== undefined)
+        output.skill_candidates = parsed.skill_candidates;
+    return output;
 }
 export function parseEvidenceFindings(raw) {
     const parsed = extractJson(raw);

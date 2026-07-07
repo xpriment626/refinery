@@ -20,6 +20,7 @@ import {
   type SessionIdentifier,
 } from "./client.ts";
 import {
+  refineryCoralAgentGlobForRepo,
   refineryCoralAgentNames,
   refineryCoralAuthKey,
   refineryCoralConfigPath,
@@ -30,12 +31,14 @@ import { defaultReviewTopology, type ReviewTopology } from "./topology.ts";
 import {
   memoryMaintenanceActions,
   refineryReviewSchemaVersion,
-  type ActiveMemory,
   type MemoryMaintenanceAction,
   type MemoryProposal,
-  type MemoryStoreAdapter,
-  type SourceEvidence,
-} from "../core/adapter.ts";
+  type ReviewPacket,
+  type SkillCandidate,
+  type SkillCandidateArtifact,
+  type SkillCandidateRejection,
+  type SkillCandidateUnresolved,
+} from "../core/types.ts";
 import { loadLocalEnv, parseModelMaxTokens } from "../env.ts";
 import {
   applyErrorContext,
@@ -60,8 +63,6 @@ import {
 } from "../core/review.ts";
 import { defaultReviewIntent, describeReviewIntent, type ReviewIntent } from "../core/intents.ts";
 
-const DEFAULT_SOURCE_LIMIT = 3;
-const DEFAULT_SOURCE_CHAR_LIMIT = 6000;
 const DEFAULT_PIPELINE_WAIT_TIMEOUT_MS = 180_000;
 const DEFAULT_DEBATE_CRITIQUE_WAIT_TIMEOUT_MS = 600_000;
 const DEFAULT_WAIT_INTERVAL_MS = 1_500;
@@ -89,27 +90,20 @@ export interface CoralReviewRuntimeOptions {
 }
 
 export interface CoralReviewRunOptions {
-  adapter: MemoryStoreAdapter;
-  project: string;
-  source: "codex-memory";
-  target: "codex-memory";
-  scope: string;
+  packet: ReviewPacket;
   runId: string;
   outputDir: string;
-  intent?: ReviewIntent;
-  request?: string | null;
   sink?: ReviewSinkOptions;
-  sourceLimit?: number;
-  sourceCharLimit?: number;
   coral?: CoralReviewRuntimeOptions;
 }
 
 export interface CoralReviewRunResult extends ReviewRunResult {
   mode: "coral";
-  source: "codex-memory";
-  target: "codex-memory";
+  sourceSets: ReviewPacket["sourceSets"];
+  targets: ReviewPacket["targets"];
   project: string;
   evidenceReview: unknown;
+  skillCandidates?: SkillCandidateArtifact;
   coral: {
     namespace: string;
     sessionId: string;
@@ -121,16 +115,8 @@ export interface CoralReviewRunResult extends ReviewRunResult {
 }
 
 export interface CoralConsoleRunOptions {
-  adapter: MemoryStoreAdapter;
-  project: string;
-  source: "codex-memory";
-  target: "codex-memory";
-  scope: string;
+  packet: ReviewPacket;
   runId: string;
-  intent?: ReviewIntent;
-  request?: string | null;
-  sourceLimit?: number;
-  sourceCharLimit?: number;
   coral?: CoralReviewRuntimeOptions;
 }
 
@@ -139,10 +125,9 @@ export interface CoralConsoleRunResult {
   schemaVersion: typeof refineryReviewSchemaVersion;
   command: "console run";
   mode: "coral-console";
-  source: "codex-memory";
-  target: "codex-memory";
+  sourceSets: ReviewPacket["sourceSets"];
+  targets: ReviewPacket["targets"];
   project: string;
-  adapter: { name: string };
   scope: string;
   dryRun: true;
   archive: false;
@@ -152,8 +137,9 @@ export interface CoralConsoleRunResult {
   consoleUrl: string;
   schemaUrl: string;
   counts: {
-    sources: number;
-    activeMemories: number;
+    sourceSets: number;
+    documents: number;
+    activeMemoryHints: number;
     seededMessages: number;
   };
   coral: {
@@ -243,38 +229,6 @@ function compactText(text: string, max = MAX_EXCERPT_CHARS): string {
   return `${compact.slice(0, max - 3).trimEnd()}...`;
 }
 
-function sourceRefs(source: SourceEvidence): unknown[] {
-  if (source.refs && source.refs.length > 0) return source.refs;
-  return [{ source_id: source.id, source_path: source.path ?? null, kind: source.kind }];
-}
-
-function toSourceChunks(sources: SourceEvidence[], charLimit: number): unknown[] {
-  let remaining = charLimit;
-  return sources
-    .map((source) => {
-      const text = compactText(source.text, Math.max(0, remaining));
-      remaining -= text.length;
-      return {
-        id: source.id,
-        kind: source.kind,
-        path: source.path ?? null,
-        text,
-        refs: sourceRefs(source),
-      };
-    })
-    .filter((source) => source.text.length > 0);
-}
-
-function memoryHints(memories: ActiveMemory[], limit = 12): unknown[] {
-  return memories.slice(0, limit).map((memory) => ({
-    id: memory.id,
-    type: memory.type,
-    scope: memory.scope,
-    body: compactText(memory.body, 360),
-    provenance: memory.provenance ?? null,
-  }));
-}
-
 function buildConsoleUrl(apiUrl: string, pathname: string): string {
   try {
     const url = new URL(apiUrl);
@@ -288,7 +242,7 @@ function buildConsoleUrl(apiUrl: string, pathname: string): string {
 }
 
 function resolveConfiguredModel(coral: CoralReviewRuntimeOptions): {
-  provider: string;
+  provider: "coral";
   baseUrl: string;
   modelName: string;
   reasoningEffort: string;
@@ -297,7 +251,7 @@ function resolveConfiguredModel(coral: CoralReviewRuntimeOptions): {
   const localEnv = loadLocalEnv(repoRoot);
   const readConfig = (name: string): string | undefined => process.env[name] ?? localEnv[name];
   return {
-    provider: readConfig("MODEL_PROVIDER") ?? readConfig("REFINERY_MODEL_PROVIDER") ?? "coral",
+    provider: "coral",
     baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
     modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
     reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,
@@ -307,39 +261,33 @@ function resolveConfiguredModel(coral: CoralReviewRuntimeOptions): {
 
 function buildReviewIntake(args: {
   runId: string;
-  project: string;
-  source: "codex-memory";
-  target: "codex-memory";
-  adapterName: string;
-  scope: string;
+  packet: ReviewPacket;
   intent: ReviewIntent;
   request: string | null;
   topology: ReviewTopology;
-  sourceLimit: number;
-  sourceCharLimit: number;
-  sourceChunks: unknown[];
-  activeMemoryHints: unknown[];
 }): Record<string, unknown> {
   return {
     schemaVersion: refineryReviewSchemaVersion,
     type: "refinery-review-intake",
     runId: args.runId,
-    project: args.project,
-    source: args.source,
-    target: args.target,
-    adapter: args.adapterName,
-    scope: args.scope,
+    project: args.packet.objective.project,
+    sourceSets: args.packet.sourceSets,
+    targets: args.packet.targets,
+    scope: args.packet.objective.scope,
     intent: args.intent,
     request: args.request,
     intentDescription: describeReviewIntent(args.intent),
+    review_packet: args.packet,
     noApply: true,
     dryRun: true,
     topology: args.topology,
     phase: args.topology === "debate-critique" ? "proposal-intake" : "pipeline",
-    sourceLimit: args.sourceLimit,
-    sourceCharLimit: args.sourceCharLimit,
-    source_chunks: args.sourceChunks,
-    active_memory_hints: args.activeMemoryHints,
+    sourceLimit: args.packet.limits.sourceLimit,
+    sourceCharLimit: args.packet.limits.sourceCharLimit,
+    source_chunks: args.packet.derivedViews.source_chunks,
+    active_memory_hints: args.packet.derivedViews.active_memory_hints,
+    target_surfaces: args.packet.targets,
+    source_sets: args.packet.sourceSets,
     proposal_schema: {
       schemaVersion: refineryReviewSchemaVersion,
       lifecycle: "proposed",
@@ -359,6 +307,7 @@ function buildReviewIntake(args: {
       "Coordinate over this intake and emit proposal-shaped outputs only.",
       `Review intent: ${args.intent}. ${describeReviewIntent(args.intent)}`,
       args.request ? `User request: ${args.request}` : "No additional user request.",
+      `Target surfaces: ${args.packet.targets.join(", ")}.`,
       "Do not activate, approve, or write memory.",
       args.topology === "debate-critique"
         ? "Use debate/critique topology: proposal work and critique work happen in separate Coral threads before final synthesis."
@@ -483,6 +432,10 @@ function asRecords(value: unknown, label: string): Record<string, unknown>[] {
   });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 function requiredString(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string" || !value.trim()) throw new Error(`${field} must be a non-empty string.`);
@@ -517,6 +470,7 @@ function optionalStringArray(record: Record<string, unknown>, field: string): st
 function parseDecisionSynthesizerOutput(runId: string, output: Record<string, unknown>): {
   proposals: MemoryProposal[];
   rejected: ReviewRejected[];
+  skillCandidates: SkillCandidateArtifact;
 } {
   const proposalRows = asRecords(output.proposals, "decision-synthesizer.proposals");
   const rejectedRows = asRecords(output.rejected ?? [], "decision-synthesizer.rejected");
@@ -552,9 +506,73 @@ function parseDecisionSynthesizerOutput(runId: string, output: Record<string, un
         ? row.reason
         : typeof row.rationale === "string" && row.rationale.trim()
           ? row.rationale
-          : typeof row.type_rationale === "string" && row.type_rationale.trim()
-            ? row.type_rationale
-            : requiredString(row, "update_reason"),
+        : typeof row.type_rationale === "string" && row.type_rationale.trim()
+          ? row.type_rationale
+          : requiredString(row, "update_reason"),
+    })),
+    skillCandidates: parseSkillCandidateArtifact(runId, output),
+  };
+}
+
+function skillBundle(output: Record<string, unknown>): Record<string, unknown> {
+  const camel = output.skillCandidates;
+  const snake = output.skill_candidates;
+  if (isRecord(camel)) return camel;
+  if (isRecord(snake)) return snake;
+  return {};
+}
+
+function skillRows(output: Record<string, unknown>, camel: string, snake: string): Record<string, unknown>[] {
+  const bundle = skillBundle(output);
+  const bundled = bundle[camel] ?? bundle[snake];
+  const direct = output[`skill${camel[0].toUpperCase()}${camel.slice(1)}`] ?? output[`skill_${snake}`];
+  const value = bundled ?? direct ?? [];
+  return asRecords(value, `decision-synthesizer.${camel}`);
+}
+
+function stringArrayFrom(record: Record<string, unknown>, camel: string, snake: string): string[] {
+  const value = record[camel] ?? record[snake];
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (typeof value === "string" && value.trim()) return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return [];
+}
+
+function refsFrom(record: Record<string, unknown>, camel: string, snake: string): unknown[] {
+  const value = record[camel] ?? record[snake];
+  return Array.isArray(value) ? value : [];
+}
+
+function parseSkillCandidateArtifact(runId: string, output: Record<string, unknown>): SkillCandidateArtifact {
+  const candidateRows = skillRows(output, "candidates", "candidates");
+  const rejectedRows = skillRows(output, "rejected", "rejected");
+  const unresolvedRows = skillRows(output, "unresolved", "unresolved");
+  return {
+    candidates: candidateRows.map((row) => ({
+      name: requiredString(row, "name"),
+      trigger: requiredString(row, "trigger"),
+      evidenceRefs: refsFrom(row, "evidenceRefs", "evidence_refs"),
+      existingSkillRefs: refsFrom(row, "existingSkillRefs", "existing_skill_refs"),
+      skillMdOutline: stringArrayFrom(row, "skillMdOutline", "skill_md_outline"),
+      skillMdDraft: String(row.skillMdDraft ?? row.skill_md_draft ?? row["SKILL.md"] ?? ""),
+      rationale: requiredString(row, "rationale"),
+      confidence: requiredNumber(row, "confidence"),
+    })),
+    rejected: rejectedRows.map((row, index): SkillCandidateRejection => ({
+      sourceId: typeof row.sourceId === "string"
+        ? row.sourceId
+        : typeof row.source_id === "string"
+          ? row.source_id
+          : `skill-rejected:${runId}:${index + 1}`,
+      reason: typeof row.reason === "string" && row.reason.trim() ? row.reason : requiredString(row, "rationale"),
+    })),
+    unresolved: unresolvedRows.map((row, index): SkillCandidateUnresolved => ({
+      sourceId: typeof row.sourceId === "string"
+        ? row.sourceId
+        : typeof row.source_id === "string"
+          ? row.source_id
+          : `skill-unresolved:${runId}:${index + 1}`,
+      question: typeof row.question === "string" && row.question.trim() ? row.question : requiredString(row, "reason"),
+      evidenceRefs: refsFrom(row, "evidenceRefs", "evidence_refs"),
     })),
   };
 }
@@ -626,6 +644,38 @@ function startCoralServer(args: {
   child.stderr.on("data", (chunk: Buffer) => appendLogLines(args.logs, "coral:stderr", chunk));
   child.on("exit", (code, signal) => args.logs.push(`[coral:exit] code=${code ?? "null"} signal=${signal ?? "null"}`));
   return child;
+}
+
+function defaultRuntimeCoralConfig(): string {
+  return [
+    "[network]",
+    'bind_address = "127.0.0.1"',
+    'external_address = "127.0.0.1"',
+    `bind_port = ${refineryCoralPort}`,
+    "allow_any_host = true",
+    "",
+    "[auth]",
+    `keys = ["${refineryCoralAuthKey}"]`,
+    "",
+    "[registry]",
+    "include_coral_home_agents = false",
+    "include_debug_agents = false",
+    "export_debug_agents = false",
+    "watch_local_agents = true",
+    'local_agent_rescan_timer = "10s"',
+    `local_agents = [${JSON.stringify(refineryCoralAgentGlobForRepo(repoRoot))}]`,
+    "",
+  ].join("\n");
+}
+
+export function resolveRuntimeCoralConfigPath(configPath: string): string {
+  if (configPath !== refineryCoralConfigPath) {
+    return path.isAbsolute(configPath) ? configPath : path.resolve(repoRoot, configPath);
+  }
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-coral-config-"));
+  const runtimeConfigPath = path.join(configDir, "refinery-config.toml");
+  fs.writeFileSync(runtimeConfigPath, defaultRuntimeCoralConfig());
+  return runtimeConfigPath;
 }
 
 async function stopStartedServer(child: ChildProcessWithoutNullStreams | null): Promise<void> {
@@ -813,15 +863,13 @@ function failedSpecialistError(args: {
 }
 
 export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Promise<CoralConsoleRunSession> {
-  const intent = options.intent ?? defaultReviewIntent;
-  const request = options.request ?? null;
-  const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? DEFAULT_SOURCE_LIMIT, 10));
-  const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? DEFAULT_SOURCE_CHAR_LIMIT, 24_000));
+  const intent = options.packet.objective.intent as ReviewIntent;
+  const request = options.packet.objective.request;
   const coral = options.coral ?? {};
   const topology = coral.topology ?? defaultReviewTopology;
   const apiUrl = coral.apiUrl ?? `http://localhost:${refineryCoralPort}`;
   const authKey = coral.authKey ?? refineryCoralAuthKey;
-  const configPath = coral.configPath ?? refineryCoralConfigPath;
+  const configPath = resolveRuntimeCoralConfigPath(coral.configPath ?? refineryCoralConfigPath);
   const startServer = coral.startServer ?? !coral.apiUrl;
   const serverMode = startServer ? "managed" : "attached";
   const namespace = coral.namespace ?? `refinery-${options.runId}`;
@@ -836,26 +884,12 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
   let closed = false;
 
   try {
-    const [sources, activeMemories] = await Promise.all([
-      options.adapter.listSourceEvidence({ scope: options.scope, limit: sourceLimit }),
-      options.adapter.listActiveMemories({ scope: options.scope, limit: 50 }),
-    ]);
-    const sourceChunks = toSourceChunks(sources, sourceCharLimit);
-    const activeMemoryHints = memoryHints(activeMemories);
     const intake = buildReviewIntake({
       runId: options.runId,
-      project: options.project,
-      source: options.source,
-      target: options.target,
-      adapterName: options.adapter.name,
-      scope: options.scope,
+      packet: options.packet,
       intent,
       request,
       topology,
-      sourceLimit,
-      sourceCharLimit,
-      sourceChunks,
-      activeMemoryHints,
     });
 
     if (startServer && !(await isServerReady(apiUrl, authKey))) {
@@ -1034,11 +1068,10 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
         schemaVersion: refineryReviewSchemaVersion,
         command: "console run",
         mode: "coral-console",
-        source: options.source,
-        target: options.target,
-        project: options.project,
-        adapter: { name: options.adapter.name },
-        scope: options.scope,
+        sourceSets: options.packet.sourceSets,
+        targets: options.packet.targets,
+        project: options.packet.objective.project,
+        scope: options.packet.objective.scope,
         dryRun: true,
         archive: false,
         artifactDir: null,
@@ -1047,8 +1080,9 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
         consoleUrl: buildConsoleUrl(apiUrl, "/ui/console"),
         schemaUrl: buildConsoleUrl(apiUrl, "/api_v1.json"),
         counts: {
-          sources: sources.length,
-          activeMemories: activeMemories.length,
+          sourceSets: options.packet.counts.sourceSets,
+          documents: options.packet.counts.documents,
+          activeMemoryHints: options.packet.counts.activeMemoryHints,
           seededMessages: seededMessages.length,
         },
         coral: {
@@ -1083,15 +1117,13 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
 export async function runCoralReview(options: CoralReviewRunOptions): Promise<CoralReviewRunResult> {
   const runDir = path.join(options.outputDir, options.runId);
   const createdAt = new Date().toISOString();
-  const intent = options.intent ?? defaultReviewIntent;
-  const request = options.request ?? null;
-  const sourceLimit = Math.max(1, Math.min(options.sourceLimit ?? DEFAULT_SOURCE_LIMIT, 10));
-  const sourceCharLimit = Math.max(500, Math.min(options.sourceCharLimit ?? DEFAULT_SOURCE_CHAR_LIMIT, 24_000));
+  const intent = options.packet.objective.intent as ReviewIntent;
+  const request = options.packet.objective.request;
   const coral = options.coral ?? {};
   const topology = coral.topology ?? defaultReviewTopology;
   const apiUrl = coral.apiUrl ?? `http://localhost:${refineryCoralPort}`;
   const authKey = coral.authKey ?? refineryCoralAuthKey;
-  const configPath = coral.configPath ?? refineryCoralConfigPath;
+  const configPath = resolveRuntimeCoralConfigPath(coral.configPath ?? refineryCoralConfigPath);
   const startServer = coral.startServer ?? !coral.apiUrl;
   const serverMode = startServer ? "managed" : "attached";
   const namespace = coral.namespace ?? `refinery-${options.runId}`;
@@ -1112,28 +1144,25 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
 
   fs.mkdirSync(runDir, { recursive: true });
   try {
-    const [sources, activeMemories] = await Promise.all([
-      options.adapter.listSourceEvidence({ scope: options.scope, limit: sourceLimit }),
-      options.adapter.listActiveMemories({ scope: options.scope, limit: 50 }),
-    ]);
-    const sourceChunks = toSourceChunks(sources, sourceCharLimit);
-    const activeMemoryHints = memoryHints(activeMemories);
     const intake = buildReviewIntake({
       runId: options.runId,
-      project: options.project,
-      source: options.source,
-      target: options.target,
-      adapterName: options.adapter.name,
-      scope: options.scope,
+      packet: options.packet,
       intent,
       request,
       topology,
-      sourceLimit,
-      sourceCharLimit,
-      sourceChunks,
-      activeMemoryHints,
     });
-    writeJson(path.join(runDir, "input.json"), intake);
+    writeJson(path.join(runDir, "input.json"), options.packet);
+    writeJson(path.join(runDir, "source-counts.json"), {
+      runId: options.runId,
+      sourceSets: options.packet.sourceSets.map((sourceSet) => ({
+        id: sourceSet.id,
+        spec: sourceSet.spec,
+        role: sourceSet.role,
+        documents: options.packet.documents.filter((doc) => doc.sourceSet === sourceSet.id).length,
+      })),
+      counts: options.packet.counts,
+      warnings: options.packet.warnings,
+    });
 
     if (startServer && !(await isServerReady(apiUrl, authKey))) {
       child = startCoralServer({
@@ -1291,8 +1320,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
             phase: "critique-intake",
             claim_cards: claimCards,
             context: {
-              source_chunks: sourceChunks,
-              active_memory_hints: activeMemoryHints,
+              source_chunks: options.packet.derivedViews.source_chunks,
+              active_memory_hints: options.packet.derivedViews.active_memory_hints,
               review_intent: intent,
               review_request: request,
               intent_description: describeReviewIntent(intent),
@@ -1380,16 +1409,15 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
         topology,
         phase: "proposal-synthesis-intake",
         runId: options.runId,
-        project: options.project,
-        source: options.source,
-        target: options.target,
-        adapter: options.adapter.name,
-        scope: options.scope,
+        project: options.packet.objective.project,
+        sourceSets: options.packet.sourceSets,
+        targets: options.packet.targets,
+        scope: options.packet.objective.scope,
         intent,
         request,
         context: {
-          source_chunks: sourceChunks,
-          active_memory_hints: activeMemoryHints,
+          source_chunks: options.packet.derivedViews.source_chunks,
+          active_memory_hints: options.packet.derivedViews.active_memory_hints,
           review_intent: intent,
           review_request: request,
           intent_description: describeReviewIntent(intent),
@@ -1504,6 +1532,14 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     writeJson(path.join(runDir, "deliberation.json"), deliberation);
     writeJson(path.join(runDir, "proposals.json"), parsedDecision.proposals);
     writeJson(path.join(runDir, "rejected.json"), parsedDecision.rejected);
+    const shouldWriteSkillCandidates =
+      options.packet.targets.includes("codex:skills") ||
+      parsedDecision.skillCandidates.candidates.length > 0 ||
+      parsedDecision.skillCandidates.rejected.length > 0 ||
+      parsedDecision.skillCandidates.unresolved.length > 0;
+    if (shouldWriteSkillCandidates) {
+      writeJson(path.join(runDir, "skillCandidates.json"), parsedDecision.skillCandidates);
+    }
 
     const transcript = transcriptFromSnapshot(finalSnapshot, threadIds);
     const runtime = {
@@ -1526,6 +1562,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       threadCreated,
       noTeardown: Boolean(coral.noTeardown),
       model: configuredModel,
+      sourceSets: options.packet.sourceSets,
+      targets: options.packet.targets,
     };
     const coralArtifact = {
       schemaVersion: "refinery.coral-review.v1",
@@ -1544,6 +1582,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       sessionCreated,
       threadCreated,
       model: configuredModel,
+      sourceSets: options.packet.sourceSets,
+      targets: options.packet.targets,
       readinessSnapshots,
       specialistMessages,
       deliberation,
@@ -1556,8 +1596,9 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     const metadata: ReviewRunMetadata = {
       schemaVersion: refineryReviewSchemaVersion,
       runId: options.runId,
-      adapter: options.adapter.name,
-      scope: options.scope,
+      sourceSets: options.packet.sourceSets,
+      targets: options.packet.targets,
+      scope: options.packet.objective.scope,
       dryRun: true,
       mode: "coral",
       createdAt,
@@ -1574,8 +1615,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
           "proposal:decision-synthesizer",
         ]
         : reviewStepOrder,
-      sourceLimit,
-      sourceCharLimit,
+      sourceLimit: options.packet.limits.sourceLimit,
+      sourceCharLimit: options.packet.limits.sourceCharLimit,
       intent,
       request,
     };
@@ -1585,19 +1626,22 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       schemaVersion: refineryReviewSchemaVersion,
       command: "review",
       mode: "coral",
-      source: options.source,
-      target: options.target,
-      project: options.project,
-      adapter: { name: options.adapter.name },
-      scope: options.scope,
+      sourceSets: options.packet.sourceSets,
+      targets: options.packet.targets,
+      project: options.packet.objective.project,
+      scope: options.packet.objective.scope,
       dryRun: true,
       runId: options.runId,
       runDir,
       counts: {
-        sources: sources.length,
-        activeMemories: activeMemories.length,
+        sourceSets: options.packet.counts.sourceSets,
+        documents: options.packet.counts.documents,
+        activeMemoryHints: options.packet.counts.activeMemoryHints,
         proposals: parsedDecision.proposals.length,
         rejected: parsedDecision.rejected.length,
+        skillCandidates: parsedDecision.skillCandidates.candidates.length,
+        skillCandidateRejected: parsedDecision.skillCandidates.rejected.length,
+        skillCandidateUnresolved: parsedDecision.skillCandidates.unresolved.length,
         claims: deliberation.summary.claims,
         challenges: deliberation.summary.challenges,
         deliberationMoves: deliberation.summary.moves,
@@ -1605,6 +1649,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       proposals: parsedDecision.proposals,
       rejected: parsedDecision.rejected,
       evidenceReview,
+      ...(shouldWriteSkillCandidates ? { skillCandidates: parsedDecision.skillCandidates } : {}),
       coral: {
         namespace: session.namespace,
         sessionId: session.sessionId,
@@ -1619,8 +1664,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     writeReviewArtifactManifest({
       runDir,
       runId: options.runId,
-      adapterName: options.adapter.name,
-      scope: options.scope,
+      scope: options.packet.objective.scope,
       mode: "coral",
       status: "succeeded",
       createdAt,
@@ -1638,8 +1682,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     writeReviewArtifactManifest({
       runDir,
       runId: options.runId,
-      adapterName: options.adapter.name,
-      scope: options.scope,
+      scope: options.packet.objective.scope,
       mode: "coral",
       status: "succeeded",
       createdAt,
@@ -1670,6 +1713,8 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       critiqueThreadId,
       agents: refineryCoralAgentNames,
       model: configuredModel,
+      sourceSets: options.packet.sourceSets,
+      targets: options.packet.targets,
       intent,
       request,
       readinessSnapshots,
@@ -1685,8 +1730,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     writeReviewFailureStatus({
       runDir,
       runId: options.runId,
-      adapterName: options.adapter.name,
-      scope: options.scope,
+      scope: options.packet.objective.scope,
       mode: "coral",
       createdAt,
       error: refineryError,

@@ -19,8 +19,8 @@ export interface StoredAuthStatus {
 
 export interface ModelAuthStatus {
   present: boolean;
-  source: "env:MODEL_API_KEY" | "env:CORAL_API_KEY" | "env:OPENROUTER_API_KEY" | "credentials:coral" | "missing";
-  provider: AuthProvider | "model" | "openrouter" | null;
+  source: "env:CORAL_API_KEY" | "credentials:coral" | "missing";
+  provider: AuthProvider | null;
   credentialPath?: string;
 }
 
@@ -93,23 +93,16 @@ export function resolveModelApiKey(args: {
 }): { apiKey: string; status: ModelAuthStatus } {
   const localEnv = args.localEnv ?? {};
   const read = (name: string): string => args.env[name] ?? localEnv[name] ?? "";
-  const envSources: Array<["MODEL_API_KEY" | "CORAL_API_KEY" | "OPENROUTER_API_KEY", ModelAuthStatus["provider"]]> = [
-    ["MODEL_API_KEY", "model"],
-    ["CORAL_API_KEY", "coral"],
-    ["OPENROUTER_API_KEY", "openrouter"],
-  ];
-  for (const [name, provider] of envSources) {
-    const value = read(name);
-    if (value) {
-      return {
-        apiKey: value,
-        status: {
-          present: true,
-          source: `env:${name}` as ModelAuthStatus["source"],
-          provider,
-        },
-      };
-    }
+  const envCoral = read("CORAL_API_KEY");
+  if (envCoral) {
+    return {
+      apiKey: envCoral,
+      status: {
+        present: true,
+        source: "env:CORAL_API_KEY",
+        provider: "coral",
+      },
+    };
   }
   const credentialPath = storedAuthPath("coral", {
     home: args.home,

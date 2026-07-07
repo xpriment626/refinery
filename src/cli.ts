@@ -4,11 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  probeMemoryStoreAdapter,
-  refineryReviewSchemaVersion,
-  validateMemoryStoreAdapter,
-} from "./core/adapter.ts";
+import { refineryReviewSchemaVersion } from "./core/types.ts";
 import {
   asRefineryError,
   RefineryError,
@@ -18,9 +14,10 @@ import { inspectReviewRun } from "./core/artifacts.ts";
 import { resolveRefineryPaths } from "./core/paths.ts";
 import { resolveModelApiKey, storedAuthStatus, writeStoredAuth } from "./core/credentials.ts";
 import { parseReviewIntent } from "./core/intents.ts";
+import { buildReviewPacket, inspectSources, parseSourceSpecs, parseTargetSurfaces } from "./core/packets.ts";
 import { type ReviewSinkOptions } from "./core/review.ts";
 import { loadLocalEnv } from "./env.ts";
-import { createCodexMemoryAdapter, resolveCodexMemoryHome } from "./adapters/codex-memory.ts";
+import { resolveCodexMemoryHome } from "./sources/codex-memories.ts";
 import { runCoralReview, startCoralConsoleRun, type CoralConsoleRunSession } from "./coral/review-conductor.ts";
 import { parseReviewTopology } from "./coral/topology.ts";
 
@@ -28,17 +25,20 @@ const HELP = `refinery — Codex-first memory review CLI
 
 USAGE
   refinery init [--home <dir>] [--codex-home <dir>] [--skip-codex-skill] [--force] [--json]
+  refinery skill install [--codex-home <dir>] [--force] [--json]
   refinery set auth coral [--home <dir>] [--value-stdin] [--json]
   refinery doctor [--memory-home <dir>] [--json]
   refinery version [--json]
-  refinery review [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
-  refinery console run [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--run-id <id>] [--coral-url <url>] [--json]
+  refinery sources inspect --source <spec>... [--project <dir>] [--memory-home <dir>] [--json]
+  refinery review --source <spec>... --target <surface>... [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
+  refinery console run [--source <spec>...] [--target <surface>...] [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--run-id <id>] [--coral-url <url>] [--json]
   refinery dev fixture memory-proposal [--json]
   refinery trial inspect --run-dir <dir> [--json]
 
-Refinery reads bounded Codex memory files, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
+Refinery builds a bounded ReviewPacket from source specs, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
 It does not approve, apply, or write durable memory. Runtime state defaults to ~/.refinery/runs/by-project/<project-key>.
 Run init once to create ~/.refinery and install the bundled $refinery Codex skill.
+Run skill install when you only want to install or refresh the bundled Codex skill.
 Run set auth coral once to store a Coral API key for live specialist model calls.
 Use console run for local Coral Console trials that seed a live session without writing run artifacts.`;
 
@@ -169,8 +169,10 @@ function ensureRunDirInside(outputDir: string, runId: string): void {
 function inferCommand(argv: string[]): string {
   if (argv[0] === "trial" && argv[1] === "inspect") return "trial inspect";
   if (argv[0] === "console" && argv[1] === "run") return "console run";
+  if (argv[0] === "sources" && argv[1] === "inspect") return "sources inspect";
   if (argv[0] === "dev" && argv[1] === "fixture") return "dev fixture";
   if (argv[0] === "set" && argv[1] === "auth") return "set auth";
+  if (argv[0] === "skill" && argv[1] === "install") return "skill install";
   return argv[0] ?? "unknown";
 }
 
@@ -269,6 +271,32 @@ async function cmdInit(rest: string[]): Promise<number> {
         path: codexSkill.path,
         exists: fs.existsSync(codexSkill.path),
       },
+    },
+  }));
+  return 0;
+}
+
+async function cmdSkill(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub !== "install") {
+    throw new RefineryError("INVALID_OPTION", "Unknown skill command. Use: refinery skill install", { phase: "args" });
+  }
+  const values = parseOptionArgs(rest.slice(1), {
+    "codex-home": { type: "string" },
+    force: { type: "boolean", default: false },
+    json: { type: "boolean", default: false },
+  });
+  const codexSkill = installCodexSkill({
+    codexHome: typeof values["codex-home"] === "string" ? values["codex-home"] : undefined,
+    force: Boolean(values.force),
+  });
+  process.stdout.write(stableJson({
+    ok: true,
+    command: "skill install",
+    codexSkill,
+    bundledCodexSkill: {
+      path: bundledCodexSkillPath(),
+      exists: fs.existsSync(bundledCodexSkillPath()),
     },
   }));
   return 0;
@@ -385,26 +413,13 @@ async function cmdDoctor(rest: string[]): Promise<number> {
   const memoryHome = resolveCodexMemoryHome(
     typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
   );
-  const adapter = createCodexMemoryAdapter({ memoryHome });
-  const validation = validateMemoryStoreAdapter(adapter);
-  if (!validation.valid) {
-    process.stdout.write(stableJson({
-      ok: false,
-      command: "doctor",
-      memoryHome,
-      memoryHomeSafe: path.basename(memoryHome) === "memories",
-      memoryHomeExists: false,
-      authRequired: false,
-      error: {
-        code: "ADAPTER_INVALID",
-        message: validation.errors.join("; "),
-        phase: "adapter",
-        details: validation.errors,
-      },
-    }));
-    return 1;
-  }
-  const probe = await probeMemoryStoreAdapter(adapter, { scope: "project", limit: 3 });
+  const sourceInspection = await inspectSources({
+    sourceSpecs: parseSourceSpecs(["codex:memories"]),
+    project: process.cwd(),
+    scope: "project",
+    memoryHome,
+    sourceLimit: 3,
+  });
   const refineryPaths = resolveRefineryPaths();
   const installedSkillPath = installedCodexSkillPath();
   const localEnv = loadLocalEnv(process.cwd());
@@ -415,11 +430,11 @@ async function cmdDoctor(rest: string[]): Promise<number> {
   }).status;
   const coralAuth = storedAuthStatus("coral");
   const output = {
-    ok: probe.valid,
+    ok: true,
     command: "doctor",
     memoryHome,
     memoryHomeSafe: path.basename(memoryHome) === "memories",
-    memoryHomeExists: true,
+    memoryHomeExists: fs.existsSync(memoryHome),
     authRequired: false,
     modelAuth: {
       requiredForLiveReview: true,
@@ -434,9 +449,9 @@ async function cmdDoctor(rest: string[]): Promise<number> {
         path: coralAuth.path,
       },
     },
-    adapter: { name: adapter.name },
-    sourceCount: probe.sourceCount,
-    activeMemoryCount: probe.activeMemoryCount,
+    sourceReader: { source: "codex:memories" },
+    sourceCount: sourceInspection.counts.documents,
+    activeMemoryCount: sourceInspection.counts.activeMemories,
     refineryHome: {
       home: refineryPaths.home,
       exists: fs.existsSync(refineryPaths.home),
@@ -449,20 +464,8 @@ async function cmdDoctor(rest: string[]): Promise<number> {
       path: installedSkillPath,
       exists: fs.existsSync(installedSkillPath),
     },
-    errors: probe.errors,
+    errors: sourceInspection.warnings,
   };
-  if (!probe.valid) {
-    process.stdout.write(stableJson({
-      ...output,
-      error: {
-        code: "DOCTOR_FAILED",
-        message: probe.errors.join("; "),
-        phase: "doctor",
-        details: probe.errors,
-      },
-    }));
-    return 1;
-  }
   process.stdout.write(stableJson(output));
   return 0;
 }
@@ -503,6 +506,35 @@ async function cmdTrial(rest: string[]): Promise<number> {
   return 0;
 }
 
+async function cmdSources(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub !== "inspect") {
+    throw new RefineryError("INVALID_OPTION", "Unknown sources command. Use: refinery sources inspect", { phase: "args" });
+  }
+  const values = parseOptionArgs(rest.slice(1), {
+    source: { type: "string", multiple: true },
+    project: { type: "string" },
+    scope: { type: "string", default: "project" },
+    "memory-home": { type: "string" },
+    "source-limit": { type: "string" },
+    "source-char-limit": { type: "string" },
+    json: { type: "boolean", default: false },
+  });
+  const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
+  const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
+  const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
+  const result = await inspectSources({
+    sourceSpecs: parseSourceSpecs(values.source),
+    project,
+    scope: String(values.scope ?? "project"),
+    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+    sourceLimit,
+    sourceCharLimit,
+  });
+  process.stdout.write(stableJson(result));
+  return 0;
+}
+
 function memoryProposalFixture(): Record<string, unknown> {
   const runId = "fixture-memory-proposal";
   const proposal = {
@@ -532,7 +564,6 @@ function memoryProposalFixture(): Record<string, unknown> {
     command: "review",
     mode: "fixture",
     fixture: "memory-proposal",
-    adapter: { name: "fixture" },
     scope: "project",
     dryRun: true,
     writesAttempted: false,
@@ -558,7 +589,6 @@ function memoryProposalFixture(): Record<string, unknown> {
     metadata: {
       schemaVersion: refineryReviewSchemaVersion,
       runId,
-      adapter: "fixture",
       scope: "project",
       dryRun: true,
       mode: "fixture",
@@ -632,6 +662,8 @@ async function cmdConsole(rest: string[]): Promise<number> {
     throw new RefineryError("INVALID_OPTION", "Unknown console command. Use: refinery console run", { phase: "args" });
   }
   const values = parseOptionArgs(rest.slice(1), {
+    source: { type: "string", multiple: true },
+    target: { type: "string", multiple: true },
     project: { type: "string" },
     intent: { type: "string" },
     request: { type: "string" },
@@ -666,28 +698,21 @@ async function cmdConsole(rest: string[]): Promise<number> {
     throw new RefineryError("INVALID_OPTION", "--coral-thread-id requires --coral-session-id", { phase: "args" });
   }
   const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
-  const adapter = createCodexMemoryAdapter({
-    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
-  });
-  const validation = validateMemoryStoreAdapter(adapter);
-  if (!validation.valid) {
-    throw new RefineryError("ADAPTER_INVALID", validation.errors.join("; "), {
-      phase: "adapter",
-      details: validation.errors,
-    });
-  }
-
-  const session = await startCoralConsoleRun({
-    adapter,
+  const packet = await buildReviewPacket({
+    sourceSpecs: parseSourceSpecs(values.source),
+    targets: parseTargetSurfaces(values.target),
     project,
-    source: "codex-memory",
-    target: "codex-memory",
     scope: String(values.scope ?? "project"),
-    runId,
     intent,
     request,
+    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
     sourceLimit,
     sourceCharLimit,
+  });
+
+  const session = await startCoralConsoleRun({
+    packet,
+    runId,
     coral: {
       apiUrl: typeof values["coral-url"] === "string" ? values["coral-url"] : undefined,
       authKey: typeof values["coral-auth-key"] === "string" ? values["coral-auth-key"] : undefined,
@@ -713,6 +738,8 @@ async function cmdConsole(rest: string[]): Promise<number> {
 
 async function cmdReview(rest: string[]): Promise<number> {
   const values = parseOptionArgs(rest, {
+    source: { type: "string", multiple: true },
+    target: { type: "string", multiple: true },
     project: { type: "string" },
     intent: { type: "string" },
     request: { type: "string" },
@@ -767,30 +794,23 @@ async function cmdReview(rest: string[]): Promise<number> {
   if (typeof values["coral-thread-id"] === "string" && typeof values["coral-session-id"] !== "string") {
     throw new RefineryError("INVALID_OPTION", "--coral-thread-id requires --coral-session-id", { phase: "args" });
   }
-  const adapter = createCodexMemoryAdapter({
-    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
-  });
-  const validation = validateMemoryStoreAdapter(adapter);
-  if (!validation.valid) {
-    throw new RefineryError("ADAPTER_INVALID", validation.errors.join("; "), {
-      phase: "adapter",
-      details: validation.errors,
-    });
-  }
-
-  const result = await runCoralReview({
-    adapter,
+  const packet = await buildReviewPacket({
+    sourceSpecs: parseSourceSpecs(values.source),
+    targets: parseTargetSurfaces(values.target),
     project,
-    source: "codex-memory",
-    target: "codex-memory",
     scope: String(values.scope ?? "project"),
-    runId,
-    outputDir,
     intent,
     request,
-    sink,
+    memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
     sourceLimit,
     sourceCharLimit,
+  });
+
+  const result = await runCoralReview({
+    packet,
+    runId,
+    outputDir,
+    sink,
     coral: {
       apiUrl: typeof values["coral-url"] === "string" ? values["coral-url"] : undefined,
       authKey: typeof values["coral-auth-key"] === "string" ? values["coral-auth-key"] : undefined,
@@ -818,7 +838,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (command === "doctor") return cmdDoctor(argv.slice(1));
   if (command === "init") return cmdInit(argv.slice(1));
   if (command === "set") return cmdSet(argv.slice(1));
+  if (command === "skill") return cmdSkill(argv.slice(1));
   if (command === "version") return cmdVersion(argv.slice(1));
+  if (command === "sources") return cmdSources(argv.slice(1));
   if (command === "trial") return cmdTrial(argv.slice(1));
   if (command === "console") return cmdConsole(argv.slice(1));
   if (command === "dev") return cmdDev(argv.slice(1));

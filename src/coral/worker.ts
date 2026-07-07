@@ -8,7 +8,7 @@ import {
   buildPrompt,
   redactModel,
 } from "../core/live-review.ts";
-import { refineryReviewSchemaVersion } from "../core/adapter.ts";
+import { refineryReviewSchemaVersion } from "../core/types.ts";
 import {
   claimScoutSpecialist,
   decisionSynthesizerSpecialist,
@@ -17,7 +17,7 @@ import {
   proposalEditorSpecialist,
 } from "../core/specialists/index.ts";
 import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
-import { callOpenAiCompatibleChatWithMetadata, type ModelCallMetadata } from "../core/model-client.ts";
+import { callCoralChatWithMetadata, type ModelCallMetadata } from "../core/model-client.ts";
 import { resolveModelApiKey } from "../core/credentials.ts";
 import {
   getCoralAgentBySpecialistName,
@@ -55,7 +55,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()): WorkerModelConfig {
     cwd,
   });
   return {
-    provider: readEnv("MODEL_PROVIDER", localEnv) ?? readEnv("REFINERY_MODEL_PROVIDER", localEnv) ?? "coral",
+    provider: "coral",
     modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
     baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
     apiKey: modelAuth.apiKey,
@@ -154,6 +154,8 @@ function contextFrom(envelope: Record<string, unknown>): Record<string, unknown>
     : {
     source_chunks: Array.isArray(envelope.source_chunks) ? envelope.source_chunks : [],
     active_memory_hints: Array.isArray(envelope.active_memory_hints) ? envelope.active_memory_hints : [],
+    target_surfaces: Array.isArray(envelope.target_surfaces) ? envelope.target_surfaces : [],
+    source_sets: Array.isArray(envelope.source_sets) ? envelope.source_sets : [],
   };
   return {
     ...base,
@@ -181,6 +183,16 @@ function contextFrom(envelope: Record<string, unknown>): Record<string, unknown>
       ? envelope.claim_cards
       : Array.isArray(base.claim_cards)
         ? base.claim_cards
+        : [],
+    target_surfaces: Array.isArray(envelope.target_surfaces)
+      ? envelope.target_surfaces
+      : Array.isArray(base.target_surfaces)
+        ? base.target_surfaces
+        : [],
+    source_sets: Array.isArray(envelope.source_sets)
+      ? envelope.source_sets
+      : Array.isArray(base.source_sets)
+        ? base.source_sets
         : [],
   };
 }
@@ -255,7 +267,7 @@ function outputShapeForSpecialist(name: SpecialistName): string {
     case "proposal-editor":
       return `{"typed":[{"body":"...","memory_type":"semantic","primary_type":"semantic","secondary_type":null,"type_confidence":0.8,"type_rationale":"...","ambiguities":[],"durability":"durable","ttl":null,"proposed_scope":"project","action":"create","target_memory_id":null,"target_memory_ids":[],"source_refs":[]}]}`;
     case "decision-synthesizer":
-      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null,"target_memory_ids":[],"staleness_reason":null,"forget_reason":null,"update_reason":null,"conflict_reason":null,"scope_reason":null,"replacement_body":null,"ambiguities":[]}],"rejected":[{"body":"...","reason":"..."}]}`;
+      return `{"proposals":[{"memory_type":"semantic","proposed_scope":"project","body":"...","confidence":0.8,"rationale":"...","source_refs":[],"action":"create","target_memory_id":null,"target_memory_ids":[],"staleness_reason":null,"forget_reason":null,"update_reason":null,"conflict_reason":null,"scope_reason":null,"replacement_body":null,"ambiguities":[]}],"rejected":[{"body":"...","reason":"..."}],"skillCandidates":{"candidates":[{"name":"example-skill","trigger":"Use when ...","evidenceRefs":[],"existingSkillRefs":[],"skillMdOutline":["frontmatter","workflow"],"skillMdDraft":"---\\nname: example-skill\\ndescription: Use when ...\\n---\\n# Example Skill\\n","rationale":"...","confidence":0.8}],"rejected":[],"unresolved":[]}}`;
   }
 }
 
@@ -268,9 +280,9 @@ function instructionForSpecialist(name: SpecialistName): string {
     case "evidence-auditor":
       return "Audit each claim card exactly once. Prefer challenge relations for duplicate, weak, stale, unsupported, or scope-risk claims; use novel only when the evidence and memory context justify endorsement.";
     case "proposal-editor":
-      return "Use project scope for this slice. Set memory_type equal to primary_type. Use canonical action, not mutation_op. Preserve source_refs and target_memory_id from cartography when applicable. For merge or supersede across multiple memories, set target_memory_id to the primary target and target_memory_ids to the full list.";
+      return "Use project scope for this slice. Set memory_type equal to primary_type. Preserve source_refs and target_memory_id from cartography when applicable. For merge or supersede across multiple memories, set target_memory_id to the primary target and target_memory_ids to the full list.";
     case "decision-synthesizer":
-      return "Emit proposal-shaped records only for durable future-useful candidates that survive critique. Include rejected[] for filtered candidates and every rejected item must include reason. Use canonical action enum values only; include intent-specific rationale fields when relevant and null otherwise. For multi-target merge or supersede proposals, preserve target_memory_ids and put the primary target in target_memory_id.";
+      return "Emit proposal-shaped records only for durable future-useful candidates that survive critique. Include rejected[] for filtered memory candidates and every rejected item must include reason. Use canonical action enum values only; include intent-specific rationale fields when relevant and null otherwise. For multi-target merge or supersede proposals, preserve target_memory_ids and put the primary target in target_memory_id. When target_surfaces includes codex:skills or the intent is skill-promotion-audit, also emit skillCandidates with candidates, rejected, and unresolved arrays.";
   }
 }
 
@@ -292,6 +304,12 @@ function intentInstruction(context: Record<string, unknown>): string {
       return `Intent guidance: identify memories whose scope is too broad, too narrow, or attached to the wrong project/user/org context. Prefer retag, update, demote, or promote with scope_reason.${request}`;
     case "general-review":
       return `Intent guidance: perform a general dry-run memory review and emit only evidence-backed proposals.${request}`;
+    case "session-recurrence":
+      return `Intent guidance: identify recurring Codex session topics, workflows, failures, or preferences that are durable enough to propose as memory. Prefer create/update memory proposals grounded in session summaries; reject one-off transcript noise.${request}`;
+    case "memory-gap-audit":
+      return `Intent guidance: compare session summaries and current memories. Propose memory updates or creates only for gaps that are clearly supported by session evidence and absent or under-specified in active_memory_hints.${request}`;
+    case "skill-promotion-audit":
+      return `Intent guidance: identify repeated workflows or memory clusters that should become reusable Codex skills. Emit skillCandidates.candidates with name, trigger, evidenceRefs, existingSkillRefs, skillMdOutline, skillMdDraft, rationale, and confidence. Use memory proposals only for durable memory changes; use skillCandidates.rejected and skillCandidates.unresolved for weak or ambiguous skill ideas.${request}`;
     default:
       return `Intent guidance: perform a dry-run memory review for intent ${intent} and emit only evidence-backed proposals.${request}`;
   }
@@ -421,6 +439,8 @@ function payloadForSpecialist(args: {
     intent_description: context.intent_description,
     topology,
     phase,
+    target_surfaces: context.target_surfaces,
+    source_sets: context.source_sets,
   };
   const previousOutput = isRecord(args.envelope.output) ? args.envelope.output : {};
   const threadContext = coralThreadContext({ message: args.message, envelope: args.envelope });
@@ -432,6 +452,8 @@ function payloadForSpecialist(args: {
           ...intentContext,
           source_chunks: Array.isArray(context.source_chunks) ? context.source_chunks : [],
           active_memory_hints: compactMemoryHints(context.active_memory_hints),
+          target_surfaces: context.target_surfaces,
+          source_sets: context.source_sets,
           coral_thread_context: threadContext,
         },
       };
@@ -445,6 +467,8 @@ function payloadForSpecialist(args: {
           ...intentContext,
           candidates: arrayFrom(previousOutput, "candidates"),
           active_memory_hints: compactMemoryHints(context.active_memory_hints),
+          target_surfaces: context.target_surfaces,
+          source_sets: context.source_sets,
           coral_thread_context: threadContext,
         },
       };
@@ -458,6 +482,8 @@ function payloadForSpecialist(args: {
           candidates: arrayFrom(context, "claim_candidates"),
           cartography_findings: findings,
           active_memory_hints: referencedActiveMemoryHints(context, findings),
+          target_surfaces: context.target_surfaces,
+          source_sets: context.source_sets,
           coral_thread_context: threadContext,
         },
       };
@@ -473,6 +499,8 @@ function payloadForSpecialist(args: {
             typed: arrayFrom(mergeProposalEditorOutput(args.envelope), "typed"),
             debate_critique: critiqueBundle(args.envelope, context),
             claim_cards: claimCards(context),
+            target_surfaces: context.target_surfaces,
+            source_sets: context.source_sets,
             coral_thread_context: threadContext,
           },
         };
@@ -482,6 +510,8 @@ function payloadForSpecialist(args: {
         payload: {
           ...intentContext,
           typed: arrayFrom(previousOutput, "typed"),
+          target_surfaces: context.target_surfaces,
+          source_sets: context.source_sets,
           coral_thread_context: threadContext,
         },
       };
@@ -494,6 +524,8 @@ function payloadForSpecialist(args: {
             claim_cards: claimCards(context),
             source_chunks: Array.isArray(context.source_chunks) ? context.source_chunks : [],
             active_memory_candidates: preflightMemoryCandidates(context),
+            target_surfaces: context.target_surfaces,
+            source_sets: context.source_sets,
             coral_thread_context: threadContext,
           },
         };
@@ -506,6 +538,8 @@ function payloadForSpecialist(args: {
           active_memory_candidates: activeMemoryCandidates(context, previousOutput),
           debate_critique: critiqueBundle(args.envelope, context),
           claim_cards: claimCards(context),
+          target_surfaces: context.target_surfaces,
+          source_sets: context.source_sets,
           coral_thread_context: threadContext,
         },
       };
@@ -596,7 +630,7 @@ export async function buildLiveReviewEnvelope(args: {
       agentName: args.agentName,
       receivedMessageId: args.message.id,
       code: "MODEL_CONFIG_MISSING",
-      message: "CORAL_API_KEY, OPENROUTER_API_KEY, or MODEL_API_KEY is required for live Coral specialist execution.",
+      message: "CORAL_API_KEY or stored Coral auth is required for live Coral specialist execution.",
       model: args.model,
       prompt,
     });
@@ -605,7 +639,7 @@ export async function buildLiveReviewEnvelope(args: {
   let rawOutput = "";
   let providerMetadata: ModelCallMetadata | undefined;
   try {
-    const callModel = args.callModel ?? callOpenAiCompatibleChatWithMetadata;
+    const callModel = args.callModel ?? callCoralChatWithMetadata;
     const response = await callModel({
       model: args.model,
       system: prompt.system,

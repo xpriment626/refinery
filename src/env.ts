@@ -3,7 +3,7 @@ import path from "node:path";
 import { resolveModelApiKey } from "./core/credentials.ts";
 
 export interface ModelConfig {
-  provider: string;
+  provider: "coral";
   baseUrl: string;
   modelName: string;
   apiKey: string;
@@ -11,9 +11,8 @@ export interface ModelConfig {
 }
 
 export const defaultModelMaxTokens = 8000;
-export const defaultModelProvider = "coral";
-export const defaultModelBaseUrl = "https://llm.coralcloud.ai/deepseek/v1";
-export const defaultModelName = "deepseek-v4-pro";
+export const defaultModelBaseUrl = "https://llm.coralcloud.ai/openai/v1";
+export const defaultModelName = "gpt-5.4-nano";
 
 function parseDotEnv(contents: string): Record<string, string> {
   const values: Record<string, string> = {};
@@ -53,7 +52,6 @@ export function parseModelMaxTokens(value: string | undefined, fallback = defaul
 export function loadModelConfig(cwd = process.cwd()): ModelConfig {
   const local = loadLocalEnv(cwd);
   const read = (key: string) => process.env[key] ?? local[key] ?? "";
-  const provider = read("REFINERY_MODEL_PROVIDER") || defaultModelProvider;
   const baseUrl = read("REFINERY_MODEL_BASE_URL") || defaultModelBaseUrl;
   const modelAuth = resolveModelApiKey({
     env: process.env,
@@ -61,14 +59,14 @@ export function loadModelConfig(cwd = process.cwd()): ModelConfig {
     cwd,
   });
   const config = {
-    provider,
+    provider: "coral" as const,
     baseUrl,
     modelName: read("REFINERY_MODEL_NAME") || defaultModelName,
     apiKey: modelAuth.apiKey,
     maxTokens: parseModelMaxTokens(read("REFINERY_MODEL_MAX_TOKENS") || read("MODEL_MAX_TOKENS") || undefined),
   };
   if (!config.apiKey) {
-    throw new Error("CORAL_API_KEY, MODEL_API_KEY, or OPENROUTER_API_KEY is required in environment or .env");
+    throw new Error("CORAL_API_KEY or stored Coral auth is required.");
   }
   return config;
 }

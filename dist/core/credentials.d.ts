@@ -12,8 +12,8 @@ export interface StoredAuthStatus {
 }
 export interface ModelAuthStatus {
     present: boolean;
-    source: "env:MODEL_API_KEY" | "env:CORAL_API_KEY" | "env:OPENROUTER_API_KEY" | "credentials:coral" | "missing";
-    provider: AuthProvider | "model" | "openrouter" | null;
+    source: "env:CORAL_API_KEY" | "credentials:coral" | "missing";
+    provider: AuthProvider | null;
     credentialPath?: string;
 }
 export declare function storedAuthPath(providerInput: string, options?: StoredAuthOptions): string;

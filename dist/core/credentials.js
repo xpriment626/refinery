@@ -64,23 +64,16 @@ export function storedAuthStatus(providerInput, options = {}) {
 export function resolveModelApiKey(args) {
     const localEnv = args.localEnv ?? {};
     const read = (name) => args.env[name] ?? localEnv[name] ?? "";
-    const envSources = [
-        ["MODEL_API_KEY", "model"],
-        ["CORAL_API_KEY", "coral"],
-        ["OPENROUTER_API_KEY", "openrouter"],
-    ];
-    for (const [name, provider] of envSources) {
-        const value = read(name);
-        if (value) {
-            return {
-                apiKey: value,
-                status: {
-                    present: true,
-                    source: `env:${name}`,
-                    provider,
-                },
-            };
-        }
+    const envCoral = read("CORAL_API_KEY");
+    if (envCoral) {
+        return {
+            apiKey: envCoral,
+            status: {
+                present: true,
+                source: "env:CORAL_API_KEY",
+                provider: "coral",
+            },
+        };
     }
     const credentialPath = storedAuthPath("coral", {
         home: args.home,

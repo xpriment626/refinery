@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { refineryReviewSchemaVersion } from "./adapter.js";
+import { refineryReviewSchemaVersion } from "./types.js";
 function isRecord(value) {
     return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

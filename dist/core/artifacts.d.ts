@@ -1,4 +1,4 @@
-import { refineryReviewSchemaVersion } from "./adapter.ts";
+import { refineryReviewSchemaVersion } from "./types.ts";
 import { type ReviewIntent } from "./intents.ts";
 export declare const reviewStepOrder: string[];
 export type ReviewRunMode = "coral";
@@ -15,7 +15,6 @@ export interface ReviewArtifactManifest {
     runId: string;
     runDir: string;
     mode: ReviewRunMode;
-    adapter: string | null;
     scope: string;
     intent?: ReviewIntent;
     request?: string | null;
@@ -31,6 +30,7 @@ export interface ReviewArtifactManifest {
     artifacts: {
         manifest: string;
         input?: string;
+        sourceCounts?: string;
         metadata?: string;
         review?: string;
         proposals?: string;
@@ -42,6 +42,7 @@ export interface ReviewArtifactManifest {
         sink?: string;
         coral?: string;
         transcript?: string;
+        skillCandidates?: string;
         steps: Record<string, ReviewStepArtifactPaths>;
     };
     error?: Record<string, unknown>;
@@ -76,7 +77,6 @@ export interface TrialInspectSummary {
 export declare function writeReviewArtifactManifest(args: {
     runDir: string;
     runId: string;
-    adapterName: string | null;
     scope: string;
     mode: ReviewRunMode;
     status: ReviewRunStatus;

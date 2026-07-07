@@ -4,7 +4,8 @@ const message = `
 Refinery installed.
 
 Next steps:
-  refinery init
+  refinery init --json
+  refinery skill install --json
   refinery set auth coral
   refinery doctor --json
 `;

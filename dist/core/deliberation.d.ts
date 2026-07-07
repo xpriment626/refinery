@@ -1,4 +1,4 @@
-import { refineryReviewSchemaVersion } from "./adapter.ts";
+import { refineryReviewSchemaVersion } from "./types.ts";
 export type DeliberationMoveKind = "claim" | "question" | "challenge" | "handoff" | "endorsement";
 export type ChallengeKind = "duplicate" | "evidence_gap" | "conflict" | "scope_risk" | "staleness" | "open_question";
 export type ChallengeStatus = "open" | "answered" | "accepted" | "rejected" | "resolved";

@@ -1,4 +1,4 @@
-import { refineryReviewSchemaVersion, type MemoryProposal } from "./adapter.ts";
+import { refineryReviewSchemaVersion, type MemoryProposal, type SourceSet, type SkillCandidateArtifact, type TargetSurface } from "./types.ts";
 import { RefineryError } from "./errors.ts";
 import { type ReviewRunMode } from "./artifacts.ts";
 import { type ReviewIntent } from "./intents.ts";
@@ -22,31 +22,38 @@ export interface ReviewRunResult {
     ok: true;
     schemaVersion: typeof refineryReviewSchemaVersion;
     command: "review";
-    adapter: {
-        name: string;
-    };
+    sourceSets?: SourceSet[];
+    targets?: TargetSurface[];
     scope: string;
     dryRun: true;
     runId: string;
     runDir: string;
     counts: {
-        sources: number;
-        activeMemories: number;
+        sourceSets?: number;
+        documents?: number;
+        activeMemoryHints?: number;
+        sources?: number;
+        activeMemories?: number;
         proposals: number;
         rejected: number;
+        skillCandidates?: number;
+        skillCandidateRejected?: number;
+        skillCandidateUnresolved?: number;
         claims?: number;
         challenges?: number;
         deliberationMoves?: number;
     };
     proposals: MemoryProposal[];
     rejected: ReviewRejected[];
+    skillCandidates?: SkillCandidateArtifact;
     metadata: ReviewRunMetadata;
     sink?: ReviewSinkResult;
 }
 export interface ReviewRunMetadata {
     schemaVersion: typeof refineryReviewSchemaVersion;
     runId: string;
-    adapter: string;
+    sourceSets?: SourceSet[];
+    targets?: TargetSurface[];
     scope: string;
     dryRun: true;
     mode: ReviewRunMode;
@@ -68,7 +75,6 @@ export interface ReviewFailureStatus {
     status: "failed";
     runId: string;
     runDir: string;
-    adapter: string | null;
     scope: string;
     mode: ReviewRunMode;
     failedStep: string | null;
@@ -82,7 +88,6 @@ export interface ReviewFailureStatus {
 export declare function writeReviewFailureStatus(args: {
     runDir: string;
     runId: string;
-    adapterName?: string | null;
     scope: string;
     mode: ReviewRunMode;
     createdAt: string;

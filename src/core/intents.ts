@@ -7,6 +7,9 @@ export const reviewIntents = [
   "update-candidates",
   "conflict-audit",
   "scope-audit",
+  "session-recurrence",
+  "memory-gap-audit",
+  "skill-promotion-audit",
 ] as const;
 
 export type ReviewIntent = (typeof reviewIntents)[number];
@@ -39,5 +42,11 @@ export function describeReviewIntent(intent: ReviewIntent): string {
       return "Identify memories or source claims that contradict each other and need contradiction review.";
     case "scope-audit":
       return "Identify memories whose user/project/org scope appears too broad, too narrow, or attached to the wrong context.";
+    case "session-recurrence":
+      return "Identify recurring Codex session topics and workflows worth promoting into durable memory proposals.";
+    case "memory-gap-audit":
+      return "Compare Codex sessions against current memories and propose dry-run memory updates for supported gaps.";
+    case "skill-promotion-audit":
+      return "Identify repeated workflows or memory clusters that should become reusable Codex skill candidates.";
   }
 }

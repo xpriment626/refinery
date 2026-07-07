@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { refineryReviewSchemaVersion } from "./adapter.ts";
+import { refineryReviewSchemaVersion } from "./types.ts";
 import { RefineryError } from "./errors.ts";
 import { type ReviewIntent } from "./intents.ts";
 
@@ -29,7 +29,6 @@ export interface ReviewArtifactManifest {
   runId: string;
   runDir: string;
   mode: ReviewRunMode;
-  adapter: string | null;
   scope: string;
   intent?: ReviewIntent;
   request?: string | null;
@@ -45,6 +44,7 @@ export interface ReviewArtifactManifest {
   artifacts: {
     manifest: string;
     input?: string;
+    sourceCounts?: string;
     metadata?: string;
     review?: string;
     proposals?: string;
@@ -56,6 +56,7 @@ export interface ReviewArtifactManifest {
     sink?: string;
     coral?: string;
     transcript?: string;
+    skillCandidates?: string;
     steps: Record<string, ReviewStepArtifactPaths>;
   };
   error?: Record<string, unknown>;
@@ -131,6 +132,7 @@ function buildArtifactPaths(runDir: string): ReviewArtifactManifest["artifacts"]
   return {
     manifest: "manifest.json",
     input: existingRel(runDir, "input.json"),
+    sourceCounts: existingRel(runDir, "source-counts.json"),
     metadata: existingRel(runDir, "metadata.json"),
     review: existingRel(runDir, "review.json"),
     proposals: existingRel(runDir, "proposals.json"),
@@ -142,6 +144,7 @@ function buildArtifactPaths(runDir: string): ReviewArtifactManifest["artifacts"]
     sink: existingRel(runDir, "sink.json"),
     coral: existingRel(runDir, "coral.json"),
     transcript: existingRel(runDir, "transcript.json"),
+    skillCandidates: existingRel(runDir, "skillCandidates.json"),
     steps: buildStepArtifacts(runDir),
   };
 }
@@ -149,7 +152,6 @@ function buildArtifactPaths(runDir: string): ReviewArtifactManifest["artifacts"]
 export function writeReviewArtifactManifest(args: {
   runDir: string;
   runId: string;
-  adapterName: string | null;
   scope: string;
   mode: ReviewRunMode;
   status: ReviewRunStatus;
@@ -174,7 +176,6 @@ export function writeReviewArtifactManifest(args: {
     runId: args.runId,
     runDir: args.runDir,
     mode: args.mode,
-    adapter: args.adapterName,
     scope: args.scope,
     ...(args.intent ? { intent: args.intent } : {}),
     ...(args.request !== undefined ? { request: args.request } : {}),

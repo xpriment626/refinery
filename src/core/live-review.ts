@@ -1,5 +1,5 @@
 import type { ModelConfig } from "../env.ts";
-import { memoryMaintenanceActions, type MemoryMaintenanceAction } from "./adapter.ts";
+import { memoryMaintenanceActions, type MemoryMaintenanceAction } from "./types.ts";
 import type { LocalSpecialist } from "./specialists/types.ts";
 
 export interface ClaimScoutCandidate {
@@ -66,6 +66,8 @@ export interface RejectedCandidate {
 export interface DecisionSynthesizerOutput {
   proposals: MemoryProposalDraft[];
   rejected: RejectedCandidate[];
+  skillCandidates?: unknown;
+  skill_candidates?: unknown;
 }
 
 export interface RelationshipFinding {
@@ -103,8 +105,8 @@ export function redactModel(config: ModelConfig): Omit<ModelConfig, "apiKey"> & 
   };
 }
 
-function parseAction(value: unknown, legacyValue: unknown, label: string): MemoryMaintenanceAction {
-  const action = value ?? legacyValue;
+function parseAction(value: unknown, label: string): MemoryMaintenanceAction {
+  const action = value;
   if (!memoryMaintenanceActions.includes(action as MemoryMaintenanceAction)) {
     throw new Error(`${label} has invalid action.`);
   }
@@ -192,7 +194,7 @@ export function parseProposalEditor(raw: string): ProposalEditorOutput {
       if (typeof t.proposed_scope !== "string" || !t.proposed_scope.trim()) {
         throw new Error(`Typed item ${index} missing proposed_scope.`);
       }
-      const action = parseAction(t.action, (t as { mutation_op?: unknown }).mutation_op, `Typed item ${index}`);
+      const action = parseAction(t.action, `Typed item ${index}`);
       const record = item as Record<string, unknown>;
       const target = parseTargetMemoryIds(
         record.target_memory_ids ?? record.target_memory_id,
@@ -220,11 +222,16 @@ export function parseProposalEditor(raw: string): ProposalEditorOutput {
 }
 
 export function parseDecisionSynthesizer(raw: string): DecisionSynthesizerOutput {
-  const parsed = extractJson(raw) as { proposals?: unknown[]; rejected?: unknown[] };
+  const parsed = extractJson(raw) as {
+    proposals?: unknown[];
+    rejected?: unknown[];
+    skillCandidates?: unknown;
+    skill_candidates?: unknown;
+  };
   if (!Array.isArray(parsed.proposals) || !Array.isArray(parsed.rejected)) {
     throw new Error("Decision Synthesizer output must contain proposals and rejected arrays.");
   }
-  return {
+  const output: DecisionSynthesizerOutput = {
     proposals: parsed.proposals.map((item, index) => {
       if (!item || typeof item !== "object") throw new Error(`Proposal ${index} must be an object.`);
       const p = item as Partial<MemoryProposalDraft>;
@@ -238,7 +245,7 @@ export function parseDecisionSynthesizer(raw: string): DecisionSynthesizerOutput
       }
       if (typeof p.rationale !== "string" || !p.rationale.trim()) throw new Error(`Proposal ${index} missing rationale.`);
       if (!Array.isArray(p.source_refs)) throw new Error(`Proposal ${index} missing source_refs array.`);
-      const action = parseAction(p.action, (p as { mutation_op?: unknown }).mutation_op, `Proposal ${index}`);
+      const action = parseAction(p.action, `Proposal ${index}`);
       const record = item as Record<string, unknown>;
       const target = parseTargetMemoryIds(
         record.target_memory_ids ?? record.target_memory_id,
@@ -280,6 +287,9 @@ export function parseDecisionSynthesizer(raw: string): DecisionSynthesizerOutput
       return { body: typeof r.body === "string" ? r.body : undefined, reason };
     }),
   };
+  if (parsed.skillCandidates !== undefined) output.skillCandidates = parsed.skillCandidates;
+  if (parsed.skill_candidates !== undefined) output.skill_candidates = parsed.skill_candidates;
+  return output;
 }
 
 export function parseEvidenceFindings(raw: string): EvidenceFindingOutput {

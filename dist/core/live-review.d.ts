@@ -1,5 +1,5 @@
 import type { ModelConfig } from "../env.ts";
-import { type MemoryMaintenanceAction } from "./adapter.ts";
+import { type MemoryMaintenanceAction } from "./types.ts";
 import type { LocalSpecialist } from "./specialists/types.ts";
 export interface ClaimScoutCandidate {
     claim: string;
@@ -58,6 +58,8 @@ export interface RejectedCandidate {
 export interface DecisionSynthesizerOutput {
     proposals: MemoryProposalDraft[];
     rejected: RejectedCandidate[];
+    skillCandidates?: unknown;
+    skill_candidates?: unknown;
 }
 export interface RelationshipFinding {
     body: string;

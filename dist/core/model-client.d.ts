@@ -9,7 +9,7 @@ export interface ModelCallMetadata {
     finishReason: string | null;
     usage: unknown;
 }
-export declare function callOpenAiCompatibleChatWithMetadata(request: {
+export declare function callCoralChatWithMetadata(request: {
     model: ModelConfig;
     system: string;
     user: string;

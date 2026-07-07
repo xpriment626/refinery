@@ -5,8 +5,8 @@ export declare const refineryCoralPort = 5555;
 export declare const refineryCoralConfigPath = "coral/refinery-config.toml";
 export declare const refineryCoralAgentGlob = "coral/agents/*";
 export declare const refineryCoralModelDefaults: {
-    readonly modelName: "deepseek-v4-pro";
-    readonly baseUrl: "https://llm.coralcloud.ai/deepseek/v1";
+    readonly modelName: "gpt-5.4-nano";
+    readonly baseUrl: "https://llm.coralcloud.ai/openai/v1";
     readonly reasoningEffort: "low";
 };
 export interface RefineryCoralAgentDefinition {

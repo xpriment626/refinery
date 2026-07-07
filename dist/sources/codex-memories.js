@@ -20,12 +20,12 @@ function compactText(text, max = 4000) {
 }
 function assertSafeMemoryHome(memoryHome) {
     if (path.basename(memoryHome) !== "memories") {
-        throw new RefineryError("CODEX_MEMORY_HOME_UNSAFE", "memoryHome must point to a directory named memories, such as ~/.codex/memories.", { phase: "adapter", details: { memoryHome } });
+        throw new RefineryError("CODEX_MEMORY_HOME_UNSAFE", "memoryHome must point to a directory named memories, such as ~/.codex/memories.", { phase: "source", details: { memoryHome } });
     }
 }
 function ensureMemoryHome(memoryHome) {
     if (!fs.existsSync(memoryHome) || !fs.statSync(memoryHome).isDirectory()) {
-        throw new RefineryError("CODEX_MEMORY_HOME_NOT_FOUND", `Codex memory home does not exist: ${memoryHome}`, { phase: "adapter", details: { memoryHome } });
+        throw new RefineryError("CODEX_MEMORY_HOME_NOT_FOUND", `Codex memory home does not exist: ${memoryHome}`, { phase: "source", details: { memoryHome } });
     }
 }
 function readIfExists(memoryHome, relPath) {
@@ -138,7 +138,7 @@ function toDocument(memoryHome, absPath) {
         metadata: metadataFor(relPath, text, originKind),
     };
 }
-function loadDocuments(memoryHome) {
+function loadMarkdownDocuments(memoryHome) {
     assertSafeMemoryHome(memoryHome);
     ensureMemoryHome(memoryHome);
     const docs = [];
@@ -153,11 +153,12 @@ function loadDocuments(memoryHome) {
         docs.push(toDocument(memoryHome, abs));
     return docs;
 }
-function documentToSource(doc) {
+function toSourceDocument(doc) {
     return {
         id: hashId("codex-source", [doc.relPath, doc.text]),
-        kind: doc.sourceKind,
-        path: doc.relPath,
+        role: doc.sourceKind,
+        relPath: doc.relPath,
+        absPath: doc.absPath,
         text: compactText(doc.text, 8000),
         refs: [{ source_path: doc.relPath, origin_kind: doc.originKind }],
         metadata: doc.metadata,
@@ -227,38 +228,15 @@ function documentToMemories(doc) {
     }
     return records;
 }
-function filterByQuery(items, query) {
-    const q = query.toLowerCase();
-    return items.filter((item) => [item.body, item.text, item.path].some((value) => typeof value === "string" && value.toLowerCase().includes(q)));
-}
 function limitItems(items, limit) {
     return typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? items.slice(0, limit) : items;
 }
-export function createCodexMemoryAdapter(options = {}) {
+export function listCodexMemorySourceDocuments(options = {}) {
     const memoryHome = resolveCodexMemoryHome(options.memoryHome);
-    assertSafeMemoryHome(memoryHome);
-    const readSources = () => loadDocuments(memoryHome).map(documentToSource);
-    const readMemories = () => loadDocuments(memoryHome).flatMap(documentToMemories);
-    return {
-        name: "codex-memory",
-        async listSourceEvidence(input) {
-            return limitItems(readSources(), input.limit);
-        },
-        async searchSourceEvidence(input) {
-            return limitItems(filterByQuery(readSources(), input.query), input.limit);
-        },
-        async getSourceEvidence(input) {
-            return readSources().find((source) => source.id === input.id) ?? null;
-        },
-        async listActiveMemories(input) {
-            return limitItems(readMemories(), input.limit);
-        },
-        async searchActiveMemories(input) {
-            return limitItems(filterByQuery(readMemories(), input.query), input.limit);
-        },
-        async getActiveMemory(input) {
-            return readMemories().find((memory) => memory.id === input.id) ?? null;
-        },
-    };
+    return limitItems(loadMarkdownDocuments(memoryHome).map(toSourceDocument), options.limit);
 }
-//# sourceMappingURL=codex-memory.js.map
+export function listCodexActiveMemories(options = {}) {
+    const memoryHome = resolveCodexMemoryHome(options.memoryHome);
+    return limitItems(loadMarkdownDocuments(memoryHome).flatMap(documentToMemories), options.limit);
+}
+//# sourceMappingURL=codex-memories.js.map

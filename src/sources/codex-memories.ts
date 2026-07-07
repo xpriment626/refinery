@@ -2,11 +2,17 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ActiveMemory, MemoryStoreAdapter, SourceEvidence } from "../core/adapter.ts";
+import type { ActiveMemory } from "../core/types.ts";
 import { RefineryError } from "../core/errors.ts";
 
-export interface CodexMemoryAdapterOptions {
-  memoryHome?: string;
+export interface CodexMemorySourceDocument {
+  id: string;
+  role: string;
+  relPath: string;
+  absPath: string;
+  text: string;
+  refs: unknown[];
+  metadata: Record<string, unknown>;
 }
 
 interface CodexMarkdownDocument {
@@ -41,7 +47,7 @@ function assertSafeMemoryHome(memoryHome: string): void {
     throw new RefineryError(
       "CODEX_MEMORY_HOME_UNSAFE",
       "memoryHome must point to a directory named memories, such as ~/.codex/memories.",
-      { phase: "adapter", details: { memoryHome } },
+      { phase: "source", details: { memoryHome } },
     );
   }
 }
@@ -51,7 +57,7 @@ function ensureMemoryHome(memoryHome: string): void {
     throw new RefineryError(
       "CODEX_MEMORY_HOME_NOT_FOUND",
       `Codex memory home does not exist: ${memoryHome}`,
-      { phase: "adapter", details: { memoryHome } },
+      { phase: "source", details: { memoryHome } },
     );
   }
 }
@@ -158,7 +164,7 @@ function toDocument(memoryHome: string, absPath: string): CodexMarkdownDocument 
   };
 }
 
-function loadDocuments(memoryHome: string): CodexMarkdownDocument[] {
+function loadMarkdownDocuments(memoryHome: string): CodexMarkdownDocument[] {
   assertSafeMemoryHome(memoryHome);
   ensureMemoryHome(memoryHome);
   const docs: CodexMarkdownDocument[] = [];
@@ -171,11 +177,12 @@ function loadDocuments(memoryHome: string): CodexMarkdownDocument[] {
   return docs;
 }
 
-function documentToSource(doc: CodexMarkdownDocument): SourceEvidence {
+function toSourceDocument(doc: CodexMarkdownDocument): CodexMemorySourceDocument {
   return {
     id: hashId("codex-source", [doc.relPath, doc.text]),
-    kind: doc.sourceKind,
-    path: doc.relPath,
+    role: doc.sourceKind,
+    relPath: doc.relPath,
+    absPath: doc.absPath,
     text: compactText(doc.text, 8000),
     refs: [{ source_path: doc.relPath, origin_kind: doc.originKind }],
     metadata: doc.metadata,
@@ -243,43 +250,22 @@ function documentToMemories(doc: CodexMarkdownDocument): ActiveMemory[] {
   return records;
 }
 
-function filterByQuery<T extends { body?: string; text?: string; path?: string | null }>(items: T[], query: string): T[] {
-  const q = query.toLowerCase();
-  return items.filter((item) =>
-    [item.body, item.text, item.path].some((value) => typeof value === "string" && value.toLowerCase().includes(q))
-  );
-}
-
 function limitItems<T>(items: T[], limit?: number): T[] {
   return typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? items.slice(0, limit) : items;
 }
 
-export function createCodexMemoryAdapter(options: CodexMemoryAdapterOptions = {}): MemoryStoreAdapter {
+export function listCodexMemorySourceDocuments(options: {
+  memoryHome?: string;
+  limit?: number;
+} = {}): CodexMemorySourceDocument[] {
   const memoryHome = resolveCodexMemoryHome(options.memoryHome);
-  assertSafeMemoryHome(memoryHome);
+  return limitItems(loadMarkdownDocuments(memoryHome).map(toSourceDocument), options.limit);
+}
 
-  const readSources = () => loadDocuments(memoryHome).map(documentToSource);
-  const readMemories = () => loadDocuments(memoryHome).flatMap(documentToMemories);
-
-  return {
-    name: "codex-memory",
-    async listSourceEvidence(input) {
-      return limitItems(readSources(), input.limit);
-    },
-    async searchSourceEvidence(input) {
-      return limitItems(filterByQuery(readSources(), input.query), input.limit);
-    },
-    async getSourceEvidence(input) {
-      return readSources().find((source) => source.id === input.id) ?? null;
-    },
-    async listActiveMemories(input) {
-      return limitItems(readMemories(), input.limit);
-    },
-    async searchActiveMemories(input) {
-      return limitItems(filterByQuery(readMemories(), input.query), input.limit);
-    },
-    async getActiveMemory(input) {
-      return readMemories().find((memory) => memory.id === input.id) ?? null;
-    },
-  };
+export function listCodexActiveMemories(options: {
+  memoryHome?: string;
+  limit?: number;
+} = {}): ActiveMemory[] {
+  const memoryHome = resolveCodexMemoryHome(options.memoryHome);
+  return limitItems(loadMarkdownDocuments(memoryHome).flatMap(documentToMemories), options.limit);
 }

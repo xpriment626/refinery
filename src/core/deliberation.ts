@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { refineryReviewSchemaVersion } from "./adapter.ts";
+import { refineryReviewSchemaVersion } from "./types.ts";
 
 export type DeliberationMoveKind = "claim" | "question" | "challenge" | "handoff" | "endorsement";
 

@@ -1,8 +1,7 @@
 import { type ChildProcessWithoutNullStreams } from "node:child_process";
 import { type ReviewTopology } from "./topology.ts";
-import { refineryReviewSchemaVersion, type MemoryStoreAdapter } from "../core/adapter.ts";
+import { refineryReviewSchemaVersion, type ReviewPacket, type SkillCandidateArtifact } from "../core/types.ts";
 import { type ReviewRunResult, type ReviewSinkOptions, type ReviewSinkResult } from "../core/review.ts";
-import { type ReviewIntent } from "../core/intents.ts";
 export interface CoralReviewRuntimeOptions {
     apiUrl?: string;
     authKey?: string;
@@ -21,26 +20,19 @@ export interface CoralReviewRuntimeOptions {
     topology?: ReviewTopology;
 }
 export interface CoralReviewRunOptions {
-    adapter: MemoryStoreAdapter;
-    project: string;
-    source: "codex-memory";
-    target: "codex-memory";
-    scope: string;
+    packet: ReviewPacket;
     runId: string;
     outputDir: string;
-    intent?: ReviewIntent;
-    request?: string | null;
     sink?: ReviewSinkOptions;
-    sourceLimit?: number;
-    sourceCharLimit?: number;
     coral?: CoralReviewRuntimeOptions;
 }
 export interface CoralReviewRunResult extends ReviewRunResult {
     mode: "coral";
-    source: "codex-memory";
-    target: "codex-memory";
+    sourceSets: ReviewPacket["sourceSets"];
+    targets: ReviewPacket["targets"];
     project: string;
     evidenceReview: unknown;
+    skillCandidates?: SkillCandidateArtifact;
     coral: {
         namespace: string;
         sessionId: string;
@@ -51,16 +43,8 @@ export interface CoralReviewRunResult extends ReviewRunResult {
     sink?: ReviewSinkResult;
 }
 export interface CoralConsoleRunOptions {
-    adapter: MemoryStoreAdapter;
-    project: string;
-    source: "codex-memory";
-    target: "codex-memory";
-    scope: string;
+    packet: ReviewPacket;
     runId: string;
-    intent?: ReviewIntent;
-    request?: string | null;
-    sourceLimit?: number;
-    sourceCharLimit?: number;
     coral?: CoralReviewRuntimeOptions;
 }
 export interface CoralConsoleRunResult {
@@ -68,12 +52,9 @@ export interface CoralConsoleRunResult {
     schemaVersion: typeof refineryReviewSchemaVersion;
     command: "console run";
     mode: "coral-console";
-    source: "codex-memory";
-    target: "codex-memory";
+    sourceSets: ReviewPacket["sourceSets"];
+    targets: ReviewPacket["targets"];
     project: string;
-    adapter: {
-        name: string;
-    };
     scope: string;
     dryRun: true;
     archive: false;
@@ -83,8 +64,9 @@ export interface CoralConsoleRunResult {
     consoleUrl: string;
     schemaUrl: string;
     counts: {
-        sources: number;
-        activeMemories: number;
+        sourceSets: number;
+        documents: number;
+        activeMemoryHints: number;
         seededMessages: number;
     };
     coral: {
@@ -116,5 +98,6 @@ export interface CoralConsoleRunSession {
     close: () => Promise<void>;
 }
 export declare function defaultCoralReviewTimeoutMs(topology: ReviewTopology): number;
+export declare function resolveRuntimeCoralConfigPath(configPath: string): string;
 export declare function startCoralConsoleRun(options: CoralConsoleRunOptions): Promise<CoralConsoleRunSession>;
 export declare function runCoralReview(options: CoralReviewRunOptions): Promise<CoralReviewRunResult>;

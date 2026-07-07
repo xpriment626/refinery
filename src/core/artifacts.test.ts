@@ -27,7 +27,6 @@ test("trial inspect reports claim deliberation artifacts", () => {
   writeReviewArtifactManifest({
     runDir,
     runId: "run-1",
-    adapterName: "fixture",
     scope: "project",
     mode: "coral",
     status: "succeeded",

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { refineryReviewSchemaVersion } from "./adapter.js";
+import { refineryReviewSchemaVersion, } from "./types.js";
 import { serializeRefineryError, RefineryError } from "./errors.js";
 import { writeReviewArtifactManifest } from "./artifacts.js";
 import {} from "./intents.js";
@@ -19,7 +19,6 @@ export function writeReviewFailureStatus(args) {
         status: "failed",
         runId: args.runId,
         runDir: args.runDir,
-        adapter: args.adapterName ?? null,
         scope: args.scope,
         mode: args.mode,
         failedStep: args.error.failedStep ?? null,
@@ -35,7 +34,6 @@ export function writeReviewFailureStatus(args) {
     writeReviewArtifactManifest({
         runDir: args.runDir,
         runId: args.runId,
-        adapterName: args.adapterName ?? null,
         scope: args.scope,
         mode: args.mode,
         status: "failed",

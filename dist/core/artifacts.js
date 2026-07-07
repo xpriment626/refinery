@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { refineryReviewSchemaVersion } from "./adapter.js";
+import { refineryReviewSchemaVersion } from "./types.js";
 import { RefineryError } from "./errors.js";
 import {} from "./intents.js";
 export const reviewStepOrder = [
@@ -50,6 +50,7 @@ function buildArtifactPaths(runDir) {
     return {
         manifest: "manifest.json",
         input: existingRel(runDir, "input.json"),
+        sourceCounts: existingRel(runDir, "source-counts.json"),
         metadata: existingRel(runDir, "metadata.json"),
         review: existingRel(runDir, "review.json"),
         proposals: existingRel(runDir, "proposals.json"),
@@ -61,6 +62,7 @@ function buildArtifactPaths(runDir) {
         sink: existingRel(runDir, "sink.json"),
         coral: existingRel(runDir, "coral.json"),
         transcript: existingRel(runDir, "transcript.json"),
+        skillCandidates: existingRel(runDir, "skillCandidates.json"),
         steps: buildStepArtifacts(runDir),
     };
 }
@@ -76,7 +78,6 @@ export function writeReviewArtifactManifest(args) {
         runId: args.runId,
         runDir: args.runDir,
         mode: args.mode,
-        adapter: args.adapterName,
         scope: args.scope,
         ...(args.intent ? { intent: args.intent } : {}),
         ...(args.request !== undefined ? { request: args.request } : {}),

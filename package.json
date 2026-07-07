@@ -1,8 +1,8 @@
 {
   "name": "@itsshadowai/refinery",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Refinery — Codex-first memory review CLI.",
+  "description": "Refinery - Codex-first source review CLI.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -41,9 +41,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.67",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^4.4.3"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

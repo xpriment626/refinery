@@ -11,21 +11,12 @@ export interface ModelCallMetadata {
   usage: unknown;
 }
 
-function shouldStreamChat(model: ModelConfig): boolean {
-  if (model.provider.toLowerCase() === "coral") return true;
-  try {
-    return new URL(model.baseUrl).hostname.endsWith("coralcloud.ai");
-  } catch {
-    return model.baseUrl.includes("coralcloud.ai");
-  }
-}
-
 function chatRequestBody(request: {
   model: ModelConfig;
   system: string;
   user: string;
 }): Record<string, unknown> {
-  const stream = shouldStreamChat(request.model);
+  const tokenLimitField = request.model.modelName.startsWith("gpt-") ? "max_completion_tokens" : "max_tokens";
   return {
     model: request.model.modelName,
     messages: [
@@ -33,8 +24,9 @@ function chatRequestBody(request: {
       { role: "user", content: request.user },
     ],
     temperature: 0.1,
-    max_tokens: request.model.maxTokens ?? defaultModelMaxTokens,
-    ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+    [tokenLimitField]: request.model.maxTokens ?? defaultModelMaxTokens,
+    stream: true,
+    stream_options: { include_usage: true },
   };
 }
 
@@ -126,7 +118,7 @@ async function readStreamingChatResponse(response: Response, model: ModelConfig)
   };
 }
 
-export async function callOpenAiCompatibleChatWithMetadata(request: {
+export async function callCoralChatWithMetadata(request: {
   model: ModelConfig;
   system: string;
   user: string;
@@ -143,30 +135,5 @@ export async function callOpenAiCompatibleChatWithMetadata(request: {
     const body = await response.text();
     throw new Error(`${request.model.provider} request failed (${response.status}): ${body.slice(0, 500)}`);
   }
-  if (shouldStreamChat(request.model)) {
-    return readStreamingChatResponse(response, request.model);
-  }
-  const json = (await response.json()) as {
-    id?: string;
-    model?: string;
-    usage?: unknown;
-    choices?: { message?: { content?: string }; finish_reason?: string }[];
-  };
-  const content = json.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) {
-    throw new Error(`${request.model.provider} response did not include message content.`);
-  }
-  return {
-    content,
-    metadata: {
-      provider: request.model.provider,
-      baseUrl: request.model.baseUrl,
-      modelName: request.model.modelName,
-      status: response.status,
-      responseId: typeof json.id === "string" ? json.id : null,
-      responseModel: typeof json.model === "string" ? json.model : null,
-      finishReason: typeof json.choices?.[0]?.finish_reason === "string" ? json.choices[0].finish_reason : null,
-      usage: json.usage ?? null,
-    },
-  };
+  return readStreamingChatResponse(response, request.model);
 }

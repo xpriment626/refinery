@@ -10,9 +10,13 @@ test("review intent taxonomy includes pointed memory-maintenance requests", () =
     "update-candidates",
     "conflict-audit",
     "scope-audit",
+    "session-recurrence",
+    "memory-gap-audit",
+    "skill-promotion-audit",
   ]);
   assert.equal(defaultReviewIntent, "general-review");
   assert.equal(parseReviewIntent("stale-audit"), "stale-audit");
+  assert.equal(parseReviewIntent("session-recurrence"), "session-recurrence");
 });
 
 test("review intent parsing rejects non-taxonomy strings", () => {

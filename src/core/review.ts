@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { refineryReviewSchemaVersion, type MemoryProposal } from "./adapter.ts";
+import {
+  refineryReviewSchemaVersion,
+  type MemoryProposal,
+  type SourceSet,
+  type SkillCandidateArtifact,
+  type TargetSurface,
+} from "./types.ts";
 import { serializeRefineryError, RefineryError } from "./errors.ts";
 import { writeReviewArtifactManifest, type ReviewRunMode } from "./artifacts.ts";
 import { type ReviewIntent } from "./intents.ts";
@@ -32,22 +38,30 @@ export interface ReviewRunResult {
   ok: true;
   schemaVersion: typeof refineryReviewSchemaVersion;
   command: "review";
-  adapter: { name: string };
+  sourceSets?: SourceSet[];
+  targets?: TargetSurface[];
   scope: string;
   dryRun: true;
   runId: string;
   runDir: string;
   counts: {
-    sources: number;
-    activeMemories: number;
+    sourceSets?: number;
+    documents?: number;
+    activeMemoryHints?: number;
+    sources?: number;
+    activeMemories?: number;
     proposals: number;
     rejected: number;
+    skillCandidates?: number;
+    skillCandidateRejected?: number;
+    skillCandidateUnresolved?: number;
     claims?: number;
     challenges?: number;
     deliberationMoves?: number;
   };
   proposals: MemoryProposal[];
   rejected: ReviewRejected[];
+  skillCandidates?: SkillCandidateArtifact;
   metadata: ReviewRunMetadata;
   sink?: ReviewSinkResult;
 }
@@ -55,7 +69,8 @@ export interface ReviewRunResult {
 export interface ReviewRunMetadata {
   schemaVersion: typeof refineryReviewSchemaVersion;
   runId: string;
-  adapter: string;
+  sourceSets?: SourceSet[];
+  targets?: TargetSurface[];
   scope: string;
   dryRun: true;
   mode: ReviewRunMode;
@@ -78,7 +93,6 @@ export interface ReviewFailureStatus {
   status: "failed";
   runId: string;
   runDir: string;
-  adapter: string | null;
   scope: string;
   mode: ReviewRunMode;
   failedStep: string | null;
@@ -98,7 +112,6 @@ function writeJson(filePath: string, value: unknown): void {
 export function writeReviewFailureStatus(args: {
   runDir: string;
   runId: string;
-  adapterName?: string | null;
   scope: string;
   mode: ReviewRunMode;
   createdAt: string;
@@ -113,7 +126,6 @@ export function writeReviewFailureStatus(args: {
     status: "failed",
     runId: args.runId,
     runDir: args.runDir,
-    adapter: args.adapterName ?? null,
     scope: args.scope,
     mode: args.mode,
     failedStep: args.error.failedStep ?? null,
@@ -129,7 +141,6 @@ export function writeReviewFailureStatus(args: {
   writeReviewArtifactManifest({
     runDir: args.runDir,
     runId: args.runId,
-    adapterName: args.adapterName ?? null,
     scope: args.scope,
     mode: args.mode,
     status: "failed",
