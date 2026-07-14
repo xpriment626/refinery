@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -16,8 +17,20 @@ import { resolveModelApiKey, storedAuthStatus, writeStoredAuth } from "./core/cr
 import { parseReviewIntent } from "./core/intents.ts";
 import { buildReviewPacket, inspectSources, parseSourceSpecs, parseTargetSurfaces } from "./core/packets.ts";
 import { type ReviewSinkOptions } from "./core/review.ts";
+import { checkForUpdate, formatUpdateNotice } from "./core/update-check.ts";
+import {
+  getMemoryGraphNeighbors,
+  getMemoryGraphStatus,
+  inspectMemoryGraphNode,
+  planMemoryGraph,
+  prepareGraphReviewPacket,
+  syncCodexMemoryGraph,
+} from "./core/graph/service.ts";
+import { memoryGraphEdgeKinds, type GraphEdgeKind } from "./core/graph/sync.ts";
 import { loadLocalEnv } from "./env.ts";
 import { resolveCodexMemoryHome } from "./sources/codex-memories.ts";
+import { readUiConfig, writeUiConfig } from "./gateway/config.ts";
+import { gatewayStatus, notifyGatewayGraphSync, startGateway, stopGateway } from "./gateway/lifecycle.ts";
 import { runCoralReview, startCoralConsoleRun, type CoralConsoleRunSession } from "./coral/review-conductor.ts";
 import { parseReviewTopology } from "./coral/topology.ts";
 
@@ -30,8 +43,19 @@ USAGE
   refinery doctor [--memory-home <dir>] [--json]
   refinery version [--json]
   refinery sources inspect --source <spec>... [--project <dir>] [--memory-home <dir>] [--json]
-  refinery review --source <spec>... --target <surface>... [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--home <dir>] [--run-id <id>] [--output-dir <dir>] [--sink-url <url>] [--sink-timeout-ms <ms>] [--json]
-  refinery console run [--source <spec>...] [--target <surface>...] [--project <dir>] [--memory-home <dir>] [--intent <intent>] [--request <text>] [--run-id <id>] [--coral-url <url>] [--json]
+  refinery graph sync [--source <spec>...] [--project <dir>] [--memory-home <dir>] [--home <dir>] [--json]
+  refinery graph status [--project <dir>] [--home <dir>] [--json]
+  refinery graph inspect <node-id> [--project <dir>] [--home <dir>] [--json]
+  refinery graph neighbors <node-id> [--depth <n>] [--edge-kind <kind>...] [--project <dir>] [--home <dir>] [--json]
+  refinery graph plan --request <text> [--seed <node-id>...] [--max-nodes <n>] [--max-edges <n>] [--max-hops <n>] [--max-chars <n>] [--max-tokens <n>] [--project <dir>] [--home <dir>] [--json]
+  refinery gateway start [--project <dir>] [--home <dir>] [--port <n>] [--json]
+  refinery gateway status [--project <dir>] [--home <dir>] [--json]
+  refinery gateway stop [--project <dir>] [--home <dir>] [--json]
+  refinery ui url [--project <dir>] [--home <dir>] [--json]
+  refinery ui open [--project <dir>] [--home <dir>] [--json]
+  refinery ui config [--browser-open on|off] [--project <dir>] [--home <dir>] [--json]
+  refinery review --source <spec>... --target <surface>... [--project <dir>] [--intent <intent>] [--request <text>] [--hypothesis <text>] [--topology pipeline|debate-critique|sparse-blackboard] [--model <id>] [--coral-llm-proxy] [--model-provider <name>] [--coral-jar <path>] [--json]
+  refinery console run [--source <spec>...] [--target <surface>...] [--project <dir>] [--request <text>] [--topology pipeline|debate-critique|sparse-blackboard] [--model <id>] [--coral-llm-proxy] [--model-provider <name>] [--coral-jar <path>] [--coral-url <url>] [--json]
   refinery dev fixture memory-proposal [--json]
   refinery trial inspect --run-dir <dir> [--json]
 
@@ -40,7 +64,10 @@ It does not approve, apply, or write durable memory. Runtime state defaults to ~
 Run init once to create ~/.refinery and install the bundled $refinery Codex skill.
 Run skill install when you only want to install or refresh the bundled Codex skill.
 Run set auth coral once to store a Coral API key for live specialist model calls.
-Use console run for local Coral Console trials that seed a live session without writing run artifacts.`;
+Use console run for local Coral Console trials that seed a live session without writing run artifacts.
+Use --no-update-check to suppress the best-effort public version notice.`;
+
+const UPDATE_CHECK_FLAG = "--no-update-check";
 
 type ParseArgOptions = NonNullable<Parameters<typeof parseArgs>[0]>["options"];
 
@@ -136,6 +163,70 @@ function parsePositiveIntegerOption(value: unknown, label: string): number | und
   return parsed;
 }
 
+function parseNonNegativeIntegerOption(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value)) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a non-negative integer.`, { phase: "args" });
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a non-negative integer.`, { phase: "args" });
+  }
+  return parsed;
+}
+
+function parseUnitIntervalOption(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a number from 0 to 1.`, { phase: "args" });
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a number from 0 to 1.`, { phase: "args" });
+  }
+  return parsed;
+}
+
+function parseNonNegativeNumberOption(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a non-negative number.`, { phase: "args" });
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new RefineryError("INVALID_OPTION", `${label} must be a non-negative number.`, { phase: "args" });
+  }
+  return parsed;
+}
+
+function parseGraphEdgeKinds(value: unknown): GraphEdgeKind[] | undefined {
+  if (value === undefined) return undefined;
+  const values = Array.isArray(value) ? value : [value];
+  const parsed = values.map(String);
+  const invalid = parsed.filter((kind) => !memoryGraphEdgeKinds.includes(kind as GraphEdgeKind));
+  if (invalid.length > 0) {
+    throw new RefineryError(
+      "INVALID_OPTION",
+      `--edge-kind must be one of: ${memoryGraphEdgeKinds.join(", ")}. Invalid: ${invalid.join(", ")}`,
+      { phase: "args" },
+    );
+  }
+  return [...new Set(parsed as GraphEdgeKind[])];
+}
+
+function responsibilityPlanLimitsFromValues(values: Record<string, unknown>) {
+  return {
+    maxNodes: parsePositiveIntegerOption(values["max-nodes"], "--max-nodes"),
+    maxEdges: parseNonNegativeIntegerOption(values["max-edges"], "--max-edges"),
+    maxHops: parseNonNegativeIntegerOption(values["max-hops"], "--max-hops"),
+    maxChars: parsePositiveIntegerOption(values["max-chars"], "--max-chars"),
+    maxTokens: parsePositiveIntegerOption(values["max-tokens"], "--max-tokens"),
+    edgeKinds: parseGraphEdgeKinds(values["edge-kind"]),
+    minConfidence: parseUnitIntervalOption(values["min-confidence"], "--min-confidence"),
+    maxAgeDays: parseNonNegativeNumberOption(values["max-age-days"], "--max-age-days"),
+  };
+}
+
 function validateRunId(runId: string): string {
   if (
     !runId ||
@@ -170,6 +261,9 @@ function inferCommand(argv: string[]): string {
   if (argv[0] === "trial" && argv[1] === "inspect") return "trial inspect";
   if (argv[0] === "console" && argv[1] === "run") return "console run";
   if (argv[0] === "sources" && argv[1] === "inspect") return "sources inspect";
+  if (argv[0] === "graph" && argv[1]) return `graph ${argv[1]}`;
+  if (argv[0] === "gateway" && argv[1]) return `gateway ${argv[1]}`;
+  if (argv[0] === "ui" && argv[1]) return `ui ${argv[1]}`;
   if (argv[0] === "dev" && argv[1] === "fixture") return "dev fixture";
   if (argv[0] === "set" && argv[1] === "auth") return "set auth";
   if (argv[0] === "skill" && argv[1] === "install") return "skill install";
@@ -178,6 +272,39 @@ function inferCommand(argv: string[]): string {
 
 function wantsJson(argv: string[]): boolean {
   return argv.includes("--json");
+}
+
+function stripUpdateCheckFlag(argv: string[]): { args: string[]; disabled: boolean } {
+  const disabled = argv.includes(UPDATE_CHECK_FLAG);
+  return {
+    args: argv.filter((arg) => arg !== UPDATE_CHECK_FLAG),
+    disabled,
+  };
+}
+
+function updateCheckDisabled(flagDisabled: boolean): boolean {
+  return flagDisabled || process.env.REFINERY_NO_UPDATE_CHECK === "1" || process.env.CI === "1" || process.env.CI === "true";
+}
+
+function supportsUpdateCheck(command: string | undefined): boolean {
+  return ["doctor", "init", "set", "skill", "version", "sources", "graph", "gateway", "ui", "trial", "console", "dev", "review"].includes(command ?? "");
+}
+
+async function maybePrintUpdateNotice(flagDisabled: boolean): Promise<void> {
+  if (updateCheckDisabled(flagDisabled)) return;
+  try {
+    const metadata = packageMetadata();
+    const result = await checkForUpdate({
+      packageName: metadata.name,
+      currentVersion: metadata.version,
+      cachePath: path.join(resolveRefineryPaths().home, "cache", "update-check.json"),
+    });
+    if (result?.updateAvailable) {
+      process.stderr.write(`${formatUpdateNotice(metadata.name, result)}\n`);
+    }
+  } catch {
+    // Update notices are advisory and must never affect the requested command.
+  }
 }
 
 function writeJsonFailure(argv: string[], error: unknown): void {
@@ -240,8 +367,10 @@ async function cmdInit(rest: string[]): Promise<number> {
   const dirs = [
     paths.configDir,
     paths.credentialsDir,
+    paths.cataloguesDir,
     path.join(paths.runsRootDir, "by-project"),
     paths.runsDir,
+    paths.graphsDir,
   ];
   const createdDirs: string[] = [];
   for (const dir of dirs) {
@@ -514,6 +643,7 @@ async function cmdSources(rest: string[]): Promise<number> {
   const values = parseOptionArgs(rest.slice(1), {
     source: { type: "string", multiple: true },
     project: { type: "string" },
+    home: { type: "string" },
     scope: { type: "string", default: "project" },
     "memory-home": { type: "string" },
     "source-limit": { type: "string" },
@@ -527,12 +657,279 @@ async function cmdSources(rest: string[]): Promise<number> {
     sourceSpecs: parseSourceSpecs(values.source),
     project,
     scope: String(values.scope ?? "project"),
+    home: typeof values.home === "string" ? values.home : undefined,
     memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
     sourceLimit,
     sourceCharLimit,
   });
   process.stdout.write(stableJson(result));
   return 0;
+}
+
+function graphLocationOptions(values: Record<string, unknown>): {
+  project: string;
+  home?: string;
+  graphPath?: string;
+} {
+  return {
+    project: path.resolve(typeof values.project === "string" ? values.project : process.cwd()),
+    home: typeof values.home === "string" ? values.home : undefined,
+    graphPath: typeof values["graph-path"] === "string" ? values["graph-path"] : undefined,
+  };
+}
+
+async function cmdGraph(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (sub === "sync") {
+    const values = parseOptionArgs(rest.slice(1), {
+      source: { type: "string", multiple: true },
+      project: { type: "string" },
+      home: { type: "string" },
+      "graph-path": { type: "string" },
+      "memory-home": { type: "string" },
+      "source-limit": { type: "string" },
+      json: { type: "boolean", default: false },
+    });
+    const location = graphLocationOptions(values);
+    const result = await syncCodexMemoryGraph({
+      ...location,
+      sourceSpecs: parseSourceSpecs(values.source),
+      memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+      sourceLimit: parsePositiveIntegerOption(values["source-limit"], "--source-limit"),
+    });
+    const gatewayNotified = await notifyGatewayGraphSync({
+      home: location.home,
+      project: location.project,
+      payload: {
+        syncedAt: result.index.syncedAt,
+        changed: {
+          nodes: result.delta.createdNodeIds.length + result.delta.updatedNodeIds.length + result.delta.removedNodeIds.length,
+          edges: result.delta.createdEdgeIds.length + result.delta.updatedEdgeIds.length + result.delta.removedEdgeIds.length,
+        },
+      },
+    });
+    let browserOpened = false;
+    const warnings = [...result.warnings];
+    try {
+      if ((result.changedNodeIds.length > 0 || result.removedNodeIds.length > 0)
+        && readUiConfig(location).browserOpenOnSync) {
+        const gateway = await startGateway(location);
+        if (gateway.uiUrl) {
+          openExternalUrl(gateway.uiUrl);
+          browserOpened = true;
+        }
+      }
+    } catch (error) {
+      warnings.push(`Graph sync succeeded, but the optional UI open step failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    process.stdout.write(stableJson({
+      ok: true,
+      command: "graph sync",
+      graphPath: result.graphPath,
+      project: result.index.project,
+      schemaVersion: result.index.schemaVersion,
+      indexerVersion: result.index.indexerVersion,
+      syncedAt: result.index.syncedAt,
+      sourceSpecs: result.index.sourceSpecs,
+      summary: result.summary,
+      delta: result.delta,
+      changedNodeIds: result.changedNodeIds,
+      removedNodeIds: result.removedNodeIds,
+      warnings,
+      canonicalSourcesMutated: result.canonicalSourcesMutated,
+      sourceIsolation: result.sourceIsolation,
+      gatewayNotified,
+      browserOpened,
+    }));
+    return 0;
+  }
+
+  if (sub === "status") {
+    const values = parseOptionArgs(rest.slice(1), {
+      project: { type: "string" },
+      home: { type: "string" },
+      "graph-path": { type: "string" },
+      json: { type: "boolean", default: false },
+    });
+    process.stdout.write(stableJson(getMemoryGraphStatus(graphLocationOptions(values))));
+    return 0;
+  }
+
+  if (sub === "inspect") {
+    const nodeId = rest[1];
+    if (!nodeId || nodeId.startsWith("--")) {
+      throw new RefineryError("INVALID_OPTION", "graph inspect requires <node-id>.", { phase: "args" });
+    }
+    const values = parseOptionArgs(rest.slice(2), {
+      project: { type: "string" },
+      home: { type: "string" },
+      "graph-path": { type: "string" },
+      json: { type: "boolean", default: false },
+    });
+    process.stdout.write(stableJson(inspectMemoryGraphNode({ ...graphLocationOptions(values), nodeId })));
+    return 0;
+  }
+
+  if (sub === "neighbors") {
+    const nodeId = rest[1];
+    if (!nodeId || nodeId.startsWith("--")) {
+      throw new RefineryError("INVALID_OPTION", "graph neighbors requires <node-id>.", { phase: "args" });
+    }
+    const values = parseOptionArgs(rest.slice(2), {
+      project: { type: "string" },
+      home: { type: "string" },
+      "graph-path": { type: "string" },
+      depth: { type: "string" },
+      "max-nodes": { type: "string" },
+      "max-edges": { type: "string" },
+      "edge-kind": { type: "string", multiple: true },
+      "min-confidence": { type: "string" },
+      json: { type: "boolean", default: false },
+    });
+    process.stdout.write(stableJson(getMemoryGraphNeighbors({
+      ...graphLocationOptions(values),
+      nodeId,
+      depth: parseNonNegativeIntegerOption(values.depth, "--depth"),
+      maxNodes: parsePositiveIntegerOption(values["max-nodes"], "--max-nodes"),
+      maxEdges: parseNonNegativeIntegerOption(values["max-edges"], "--max-edges"),
+      edgeKinds: parseGraphEdgeKinds(values["edge-kind"]),
+      minConfidence: parseUnitIntervalOption(values["min-confidence"], "--min-confidence"),
+    })));
+    return 0;
+  }
+
+  if (sub === "plan") {
+    const values = parseOptionArgs(rest.slice(1), {
+      request: { type: "string" },
+      scope: { type: "string", default: "project" },
+      seed: { type: "string", multiple: true },
+      project: { type: "string" },
+      home: { type: "string" },
+      "graph-path": { type: "string" },
+      "max-nodes": { type: "string" },
+      "max-edges": { type: "string" },
+      "max-hops": { type: "string" },
+      "max-chars": { type: "string" },
+      "max-tokens": { type: "string" },
+      "edge-kind": { type: "string", multiple: true },
+      "min-confidence": { type: "string" },
+      "max-age-days": { type: "string" },
+      json: { type: "boolean", default: false },
+    });
+    const location = graphLocationOptions(values);
+    const planned = planMemoryGraph({
+      ...location,
+      request: typeof values.request === "string" ? values.request : null,
+      scope: String(values.scope ?? "project"),
+      explicitNodeIds: Array.isArray(values.seed) ? values.seed.map(String) : [],
+      limits: responsibilityPlanLimitsFromValues(values),
+    });
+    process.stdout.write(stableJson({
+      ok: true,
+      command: "graph plan",
+      graphPath: planned.graphPath,
+      retrieval: planned.retrieval,
+      plan: planned.plan,
+    }));
+    return 0;
+  }
+
+  throw new RefineryError(
+    "INVALID_OPTION",
+    "Unknown graph command. Use: refinery graph sync|status|inspect|neighbors|plan",
+    { phase: "args" },
+  );
+}
+
+function gatewayLocationValues(values: Record<string, unknown>): { home?: string; project: string } {
+  return {
+    home: typeof values.home === "string" ? values.home : undefined,
+    project: path.resolve(typeof values.project === "string" ? values.project : process.cwd()),
+  };
+}
+
+async function cmdGateway(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  const values = parseOptionArgs(rest.slice(1), {
+    project: { type: "string" },
+    home: { type: "string" },
+    port: { type: "string" },
+    json: { type: "boolean", default: false },
+  });
+  const location = gatewayLocationValues(values);
+  if (sub === "start") {
+    const port = parseNonNegativeIntegerOption(values.port, "--port");
+    if (port !== undefined && port > 65_535) throw new RefineryError("INVALID_OPTION", "--port must be from 0 to 65535.", { phase: "args" });
+    const result = await startGateway({ ...location, port });
+    process.stdout.write(stableJson({ ok: true, command: "gateway start", ...result }));
+    return 0;
+  }
+  if (sub === "status") {
+    const { uiUrl: _secretUrl, ...result } = await gatewayStatus(location);
+    process.stdout.write(stableJson({ ok: true, command: "gateway status", ...result }));
+    return 0;
+  }
+  if (sub === "stop") {
+    const { uiUrl: _secretUrl, ...result } = await stopGateway(location);
+    process.stdout.write(stableJson({ ok: true, command: "gateway stop", ...result }));
+    return 0;
+  }
+  throw new RefineryError("INVALID_OPTION", "Unknown gateway command. Use: refinery gateway start|status|stop", { phase: "args" });
+}
+
+function openExternalUrl(url: string): void {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  child.on("error", () => {
+    // The URL is still emitted so an agent or human can open it manually.
+  });
+  child.unref();
+}
+
+async function cmdUi(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  const values = parseOptionArgs(rest.slice(1), {
+    project: { type: "string" },
+    home: { type: "string" },
+    "browser-open": { type: "string" },
+    json: { type: "boolean", default: false },
+  });
+  const location = gatewayLocationValues(values);
+  if (sub === "config") {
+    const setting = values["browser-open"];
+    if (setting !== undefined && setting !== "on" && setting !== "off") {
+      throw new RefineryError("INVALID_OPTION", "--browser-open must be on or off.", { phase: "args" });
+    }
+    const config = setting === undefined
+      ? readUiConfig(location)
+      : writeUiConfig({ ...location, browserOpenOnSync: setting === "on" });
+    process.stdout.write(stableJson({
+      ok: true,
+      command: "ui config",
+      config,
+      behavior: config.browserOpenOnSync
+        ? "Refinery may open the local UI after graph changes."
+        : "Refinery will not open a browser automatically.",
+    }));
+    return 0;
+  }
+  if (sub === "url" || sub === "open") {
+    const result = await startGateway(location);
+    if (!result.uiUrl) throw new RefineryError("GATEWAY_URL_UNAVAILABLE", "Gateway started without a capability URL.", { phase: "gateway-lifecycle" });
+    if (sub === "open") openExternalUrl(result.uiUrl);
+    process.stdout.write(stableJson({
+      ok: true,
+      command: `ui ${sub}`,
+      url: result.uiUrl,
+      opened: sub === "open",
+      instruction: sub === "url"
+        ? "Open this local capability URL in the Codex browser or another browser."
+        : "The local UI open request was sent; use the URL if no browser appeared.",
+    }));
+    return 0;
+  }
+  throw new RefineryError("INVALID_OPTION", "Unknown UI command. Use: refinery ui url|open|config", { phase: "args" });
 }
 
 function memoryProposalFixture(): Record<string, unknown> {
@@ -668,10 +1065,22 @@ async function cmdConsole(rest: string[]): Promise<number> {
     intent: { type: "string" },
     request: { type: "string" },
     scope: { type: "string", default: "project" },
+    home: { type: "string" },
     "memory-home": { type: "string" },
     "run-id": { type: "string" },
     "source-limit": { type: "string" },
     "source-char-limit": { type: "string" },
+    "graph-source-limit": { type: "string" },
+    "no-graph": { type: "boolean", default: false },
+    seed: { type: "string", multiple: true },
+    "max-nodes": { type: "string" },
+    "max-edges": { type: "string" },
+    "max-hops": { type: "string" },
+    "max-chars": { type: "string" },
+    "max-tokens": { type: "string" },
+    "edge-kind": { type: "string", multiple: true },
+    "min-confidence": { type: "string" },
+    "max-age-days": { type: "string" },
     "coral-url": { type: "string" },
     "coral-auth-key": { type: "string" },
     "coral-config": { type: "string" },
@@ -679,6 +1088,11 @@ async function cmdConsole(rest: string[]): Promise<number> {
     "coral-session-id": { type: "string" },
     "coral-thread-id": { type: "string" },
     "coral-package": { type: "string" },
+    "coral-jar": { type: "string" },
+    "coral-llm-proxy": { type: "boolean", default: false },
+    model: { type: "string" },
+    "model-provider": { type: "string" },
+    "reasoning-effort": { type: "string" },
     "coral-timeout-ms": { type: "string" },
     "coral-no-start": { type: "boolean", default: false },
     "coral-no-teardown": { type: "boolean", default: false },
@@ -691,24 +1105,44 @@ async function cmdConsole(rest: string[]): Promise<number> {
   const request = typeof values.request === "string" && values.request.trim() ? values.request.trim() : null;
   const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
   const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
+  const graphSourceLimit = parsePositiveIntegerOption(values["graph-source-limit"], "--graph-source-limit");
   const coralTimeoutMs = parsePositiveIntegerOption(values["coral-timeout-ms"], "--coral-timeout-ms");
   const topology = parseReviewTopology(values.topology);
 
   if (typeof values["coral-thread-id"] === "string" && typeof values["coral-session-id"] !== "string") {
     throw new RefineryError("INVALID_OPTION", "--coral-thread-id requires --coral-session-id", { phase: "args" });
   }
+  if (typeof values["model-provider"] === "string" && !values["coral-llm-proxy"]) {
+    throw new RefineryError("INVALID_OPTION", "--model-provider requires --coral-llm-proxy", { phase: "args" });
+  }
+  if (typeof values["coral-jar"] === "string" && typeof values["coral-package"] === "string") {
+    throw new RefineryError("INVALID_OPTION", "Use only one of --coral-jar or --coral-package", { phase: "args" });
+  }
   const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
-  const packet = await buildReviewPacket({
-    sourceSpecs: parseSourceSpecs(values.source),
+  const sourceSpecs = parseSourceSpecs(values.source);
+  let packet = await buildReviewPacket({
+    sourceSpecs,
     targets: parseTargetSurfaces(values.target),
     project,
     scope: String(values.scope ?? "project"),
     intent,
     request,
+    home: typeof values.home === "string" ? values.home : undefined,
     memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
     sourceLimit,
     sourceCharLimit,
   });
+  if (!values["no-graph"]) {
+    packet = (await prepareGraphReviewPacket({
+      packet,
+      sourceSpecs,
+      memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+      home: typeof values.home === "string" ? values.home : undefined,
+      sourceLimit: graphSourceLimit,
+      explicitNodeIds: Array.isArray(values.seed) ? values.seed.map(String) : [],
+      planLimits: responsibilityPlanLimitsFromValues(values),
+    })).packet;
+  }
 
   const session = await startCoralConsoleRun({
     packet,
@@ -721,6 +1155,11 @@ async function cmdConsole(rest: string[]): Promise<number> {
       sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
       threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
       coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
+      coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
+      llmProxy: Boolean(values["coral-llm-proxy"]),
+      modelName: typeof values.model === "string" ? values.model : undefined,
+      modelProxyProvider: typeof values["model-provider"] === "string" ? values["model-provider"] : undefined,
+      reasoningEffort: typeof values["reasoning-effort"] === "string" ? values["reasoning-effort"] : undefined,
       timeoutMs: coralTimeoutMs,
       topology,
       startServer: typeof values["coral-url"] === "string" ? false : !values["coral-no-start"],
@@ -753,6 +1192,17 @@ async function cmdReview(rest: string[]): Promise<number> {
     "sink-timeout-ms": { type: "string" },
     "source-limit": { type: "string" },
     "source-char-limit": { type: "string" },
+    "graph-source-limit": { type: "string" },
+    "no-graph": { type: "boolean", default: false },
+    seed: { type: "string", multiple: true },
+    "max-nodes": { type: "string" },
+    "max-edges": { type: "string" },
+    "max-hops": { type: "string" },
+    "max-chars": { type: "string" },
+    "max-tokens": { type: "string" },
+    "edge-kind": { type: "string", multiple: true },
+    "min-confidence": { type: "string" },
+    "max-age-days": { type: "string" },
     "coral-url": { type: "string" },
     "coral-auth-key": { type: "string" },
     "coral-config": { type: "string" },
@@ -760,9 +1210,15 @@ async function cmdReview(rest: string[]): Promise<number> {
     "coral-session-id": { type: "string" },
     "coral-thread-id": { type: "string" },
     "coral-package": { type: "string" },
+    "coral-jar": { type: "string" },
+    "coral-llm-proxy": { type: "boolean", default: false },
+    model: { type: "string" },
+    "model-provider": { type: "string" },
+    "reasoning-effort": { type: "string" },
     "coral-timeout-ms": { type: "string" },
     "coral-no-start": { type: "boolean", default: false },
     "coral-no-teardown": { type: "boolean", default: false },
+    hypothesis: { type: "string" },
     topology: { type: "string" },
     json: { type: "boolean", default: false },
   });
@@ -771,6 +1227,7 @@ async function cmdReview(rest: string[]): Promise<number> {
   const request = typeof values.request === "string" && values.request.trim() ? values.request.trim() : null;
   const sourceLimit = parsePositiveIntegerOption(values["source-limit"], "--source-limit");
   const sourceCharLimit = parsePositiveIntegerOption(values["source-char-limit"], "--source-char-limit");
+  const graphSourceLimit = parsePositiveIntegerOption(values["graph-source-limit"], "--graph-source-limit");
   const sinkTimeoutMs = parsePositiveIntegerOption(values["sink-timeout-ms"], "--sink-timeout-ms");
   const coralTimeoutMs = parsePositiveIntegerOption(values["coral-timeout-ms"], "--coral-timeout-ms");
   const topology = parseReviewTopology(values.topology);
@@ -794,22 +1251,42 @@ async function cmdReview(rest: string[]): Promise<number> {
   if (typeof values["coral-thread-id"] === "string" && typeof values["coral-session-id"] !== "string") {
     throw new RefineryError("INVALID_OPTION", "--coral-thread-id requires --coral-session-id", { phase: "args" });
   }
-  const packet = await buildReviewPacket({
-    sourceSpecs: parseSourceSpecs(values.source),
+  if (typeof values["model-provider"] === "string" && !values["coral-llm-proxy"]) {
+    throw new RefineryError("INVALID_OPTION", "--model-provider requires --coral-llm-proxy", { phase: "args" });
+  }
+  if (typeof values["coral-jar"] === "string" && typeof values["coral-package"] === "string") {
+    throw new RefineryError("INVALID_OPTION", "Use only one of --coral-jar or --coral-package", { phase: "args" });
+  }
+  const sourceSpecs = parseSourceSpecs(values.source);
+  let packet = await buildReviewPacket({
+    sourceSpecs,
     targets: parseTargetSurfaces(values.target),
     project,
     scope: String(values.scope ?? "project"),
     intent,
     request,
+    home: typeof values.home === "string" ? values.home : undefined,
     memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
     sourceLimit,
     sourceCharLimit,
   });
+  if (!values["no-graph"]) {
+    packet = (await prepareGraphReviewPacket({
+      packet,
+      sourceSpecs,
+      memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+      home: typeof values.home === "string" ? values.home : undefined,
+      sourceLimit: graphSourceLimit,
+      explicitNodeIds: Array.isArray(values.seed) ? values.seed.map(String) : [],
+      planLimits: responsibilityPlanLimitsFromValues(values),
+    })).packet;
+  }
 
   const result = await runCoralReview({
     packet,
     runId,
     outputDir,
+    hypothesis: typeof values.hypothesis === "string" ? values.hypothesis : undefined,
     sink,
     coral: {
       apiUrl: typeof values["coral-url"] === "string" ? values["coral-url"] : undefined,
@@ -819,6 +1296,11 @@ async function cmdReview(rest: string[]): Promise<number> {
       sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
       threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
       coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
+      coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
+      llmProxy: Boolean(values["coral-llm-proxy"]),
+      modelName: typeof values.model === "string" ? values.model : undefined,
+      modelProxyProvider: typeof values["model-provider"] === "string" ? values["model-provider"] : undefined,
+      reasoningEffort: typeof values["reasoning-effort"] === "string" ? values["reasoning-effort"] : undefined,
       timeoutMs: coralTimeoutMs,
       topology,
       startServer: typeof values["coral-url"] === "string" ? false : !values["coral-no-start"],
@@ -830,21 +1312,30 @@ async function cmdReview(rest: string[]): Promise<number> {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  const command = argv[0];
+  const updateCheck = stripUpdateCheckFlag(argv);
+  const commandArgs = updateCheck.args;
+  const command = commandArgs[0];
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(HELP + "\n");
     return 0;
   }
-  if (command === "doctor") return cmdDoctor(argv.slice(1));
-  if (command === "init") return cmdInit(argv.slice(1));
-  if (command === "set") return cmdSet(argv.slice(1));
-  if (command === "skill") return cmdSkill(argv.slice(1));
-  if (command === "version") return cmdVersion(argv.slice(1));
-  if (command === "sources") return cmdSources(argv.slice(1));
-  if (command === "trial") return cmdTrial(argv.slice(1));
-  if (command === "console") return cmdConsole(argv.slice(1));
-  if (command === "dev") return cmdDev(argv.slice(1));
-  if (command === "review") return cmdReview(argv.slice(1));
+  if (!supportsUpdateCheck(command)) {
+    throw new RefineryError("INVALID_OPTION", `Unknown command: ${command}`, { phase: "args" });
+  }
+  await maybePrintUpdateNotice(updateCheck.disabled);
+  if (command === "doctor") return cmdDoctor(commandArgs.slice(1));
+  if (command === "init") return cmdInit(commandArgs.slice(1));
+  if (command === "set") return cmdSet(commandArgs.slice(1));
+  if (command === "skill") return cmdSkill(commandArgs.slice(1));
+  if (command === "version") return cmdVersion(commandArgs.slice(1));
+  if (command === "sources") return cmdSources(commandArgs.slice(1));
+  if (command === "graph") return cmdGraph(commandArgs.slice(1));
+  if (command === "gateway") return cmdGateway(commandArgs.slice(1));
+  if (command === "ui") return cmdUi(commandArgs.slice(1));
+  if (command === "trial") return cmdTrial(commandArgs.slice(1));
+  if (command === "console") return cmdConsole(commandArgs.slice(1));
+  if (command === "dev") return cmdDev(commandArgs.slice(1));
+  if (command === "review") return cmdReview(commandArgs.slice(1));
   throw new RefineryError("INVALID_OPTION", `Unknown command: ${command}`, { phase: "args" });
 }
 

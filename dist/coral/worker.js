@@ -1,11 +1,10 @@
-import { loadLocalEnv } from "../env.js";
-import { parseModelMaxTokens } from "../env.js";
+import { loadLocalEnv, parseModelMaxTokens, redactModelBaseUrl } from "../env.js";
 import { parseClaimScout, parseDecisionSynthesizer, parseEvidenceFindings, parseProposalEditor, buildPrompt, redactModel, } from "../core/live-review.js";
 import { refineryReviewSchemaVersion } from "../core/types.js";
 import { claimScoutSpecialist, decisionSynthesizerSpecialist, evidenceAuditorSpecialist, memoryCartographerSpecialist, proposalEditorSpecialist, } from "../core/specialists/index.js";
 import { callCoralChatWithMetadata } from "../core/model-client.js";
 import { resolveModelApiKey } from "../core/credentials.js";
-import { getCoralAgentBySpecialistName, getSpecialistNameArg, refineryCoralAgentNames, refineryCoralModelDefaults, } from "./definitions.js";
+import { getCoralAgentBySpecialistName, getSpecialistNameArg, refineryCoralAgentNames, refineryCoralProxyRequestName, refineryCoralModelDefaults, } from "./definitions.js";
 import { connectCoralMcp, parseWaitForMentionResult, readCoralState } from "./mcp.js";
 import { defaultReviewTopology, isReviewTopology } from "./topology.js";
 const coralSpecialistPromptVersion = "refinery.coral-specialist-prompt.v1";
@@ -14,6 +13,20 @@ function readEnv(name, localEnv) {
 }
 export function loadWorkerModelConfig(cwd = process.cwd()) {
     const localEnv = loadLocalEnv(cwd);
+    const proxyUrl = readEnv(`CORAL_PROXY_URL_${refineryCoralProxyRequestName}`, localEnv);
+    const proxyModel = readEnv(`CORAL_PROXY_MODEL_${refineryCoralProxyRequestName}`, localEnv);
+    if (proxyUrl) {
+        return {
+            provider: "coral",
+            modelName: proxyModel ?? readEnv("MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
+            baseUrl: `${proxyUrl.replace(/\/$/, "")}/v1`,
+            apiKey: "",
+            authMode: "coral-agent-proxy",
+            reasoningEffort: readEnv("REASONING_EFFORT", localEnv) ?? refineryCoralModelDefaults.reasoningEffort,
+            maxTokens: parseModelMaxTokens(readEnv("MODEL_MAX_TOKENS", localEnv) ?? readEnv("REFINERY_MODEL_MAX_TOKENS", localEnv)),
+            apiKeyPresent: true,
+        };
+    }
     const modelAuth = resolveModelApiKey({
         env: process.env,
         localEnv,
@@ -24,6 +37,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()) {
         modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
         baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
         apiKey: modelAuth.apiKey,
+        authMode: "bearer",
         reasoningEffort: readEnv("REASONING_EFFORT", localEnv) ?? refineryCoralModelDefaults.reasoningEffort,
         maxTokens: parseModelMaxTokens(readEnv("MODEL_MAX_TOKENS", localEnv) ?? readEnv("REFINERY_MODEL_MAX_TOKENS", localEnv)),
         apiKeyPresent: Boolean(modelAuth.apiKey),
@@ -89,6 +103,15 @@ function phaseFrom(envelope) {
     return typeof envelope.phase === "string" ? envelope.phase : null;
 }
 function outputPhaseFor(args) {
+    if (args.topology === "sparse-blackboard") {
+        switch (args.specialistName) {
+            case "claim-scout": return "topic-claim";
+            case "memory-cartographer": return "overlap-cartography";
+            case "evidence-auditor": return "risk-audit";
+            case "proposal-editor": return "survivor-proposal";
+            case "decision-synthesizer": return "candidate-synthesis";
+        }
+    }
     if (args.topology !== "debate-critique")
         return "pipeline";
     const incomingPhase = phaseFrom(args.envelope);
@@ -111,6 +134,8 @@ function contextFrom(envelope) {
         : {
             source_chunks: Array.isArray(envelope.source_chunks) ? envelope.source_chunks : [],
             active_memory_hints: Array.isArray(envelope.active_memory_hints) ? envelope.active_memory_hints : [],
+            responsibility_plan: isRecord(envelope.responsibility_plan) ? envelope.responsibility_plan : null,
+            graph_context: Array.isArray(envelope.graph_context) ? envelope.graph_context : [],
             target_surfaces: Array.isArray(envelope.target_surfaces) ? envelope.target_surfaces : [],
             source_sets: Array.isArray(envelope.source_sets) ? envelope.source_sets : [],
         };
@@ -148,6 +173,16 @@ function contextFrom(envelope) {
             : Array.isArray(base.source_sets)
                 ? base.source_sets
                 : [],
+        responsibility_plan: isRecord(base.responsibility_plan)
+            ? base.responsibility_plan
+            : isRecord(envelope.responsibility_plan)
+                ? envelope.responsibility_plan
+                : null,
+        graph_context: Array.isArray(base.graph_context)
+            ? base.graph_context
+            : Array.isArray(envelope.graph_context)
+                ? envelope.graph_context
+                : [],
     };
 }
 function arrayFrom(record, field) {
@@ -162,6 +197,14 @@ function nextReviewAgent(agentName) {
 }
 export function expectedReviewAgent(envelope, senderName) {
     if (envelope.type === "refinery-review-intake") {
+        if (topologyFrom(envelope) === "sparse-blackboard") {
+            switch (phaseFrom(envelope)) {
+                case "overlap-cartography-intake": return "refinery-memory-cartographer";
+                case "risk-audit-intake": return "refinery-evidence-auditor";
+                case "survivor-proposal-intake": return "refinery-proposal-editor";
+                default: return "refinery-claim-scout";
+            }
+        }
         return topologyFrom(envelope) === "debate-critique" && phaseFrom(envelope) === "critique-intake"
             ? "refinery-evidence-auditor"
             : "refinery-claim-scout";
@@ -172,6 +215,8 @@ export function expectedReviewAgent(envelope, senderName) {
 }
 function nextReviewMentions(outputEnvelope, currentAgent) {
     const topology = topologyFrom(outputEnvelope);
+    if (topology === "sparse-blackboard")
+        return [];
     if (topology !== "debate-critique") {
         const next = nextReviewAgent(currentAgent);
         return next ? [next] : [];
@@ -262,7 +307,33 @@ function intentInstruction(context) {
             return `Intent guidance: perform a dry-run memory review for intent ${intent} and emit only evidence-backed proposals.${request}`;
     }
 }
+function evidenceBoundaryInstruction() {
+    return [
+        "Treat review_request as a hard relevance constraint: if the selected source chunks do not directly support the requested subject, emit an empty candidate/proposal array rather than substituting a different durable fact.",
+        "Only source_chunks may support a new memory claim; active_memory_hints may be used only to compare or target existing memory.",
+        "A recurring-workflow claim requires selected source refs from at least two independent session ids unless the chunks contain an explicit decision, invariant, or reproducible failure that independently establishes durability.",
+        "Honor source chunk truncation metadata. If omitted context could change the claim, mark it too_weak or return no candidate.",
+        "Novelty means absent retrieval behavior; contradiction means incompatible behavior; supersession requires evidence that a newer decision replaces an exact prior target.",
+        "responsibility_plan, graph_context, coral_runtime_projection, and coral_thread_context are control metadata, not admissible memory evidence. Never cite their fields as source_refs or turn runtime attachment state into a memory claim.",
+    ].join(" ");
+}
 function topologyInstructionForSpecialist(args) {
+    if (args.topology === "sparse-blackboard") {
+        switch (args.phase) {
+            case "topic-claim":
+                return "Topology guidance: inspect only this topic's selected source chunks. Emit durable claims with exact source references; do not broaden into sleeping topics or ask other agents to bid for work.";
+            case "overlap-cartography":
+                return "Topology guidance: the app-owned blackboard detected material active-memory overlap. Classify only duplicate, refinement, contradiction, or supersession relationships supported by the supplied candidates and memory hints.";
+            case "risk-audit":
+                return "Topology guidance: the app-owned blackboard woke this audit only for weak, conflicting, truncated, or high-impact claims. Validate provenance and future value; mark unsupported or one-off claims too_weak.";
+            case "survivor-proposal":
+                return "Topology guidance: edit only candidates that survived deterministic routing and optional review. Preserve source references and do not resurrect duplicate or too_weak claims.";
+            case "candidate-synthesis":
+                return "Topology guidance: synthesize only typed candidates or explicit specialist disagreement from the app-owned blackboard. Emit no unsupported final proposal.";
+            default:
+                return "Topology guidance: follow app-owned sparse routing and remain idle unless mentioned.";
+        }
+    }
     if (args.topology !== "debate-critique")
         return "";
     switch (args.phase) {
@@ -345,6 +416,40 @@ function referencedActiveMemoryHints(context, findings) {
         return ids.has(String(memory.id));
     });
 }
+function sourceReferenceIds(value) {
+    if (typeof value === "string" && value.trim())
+        return [value.trim()];
+    if (!isRecord(value))
+        return [];
+    return ["source_id", "sourceId", "graph_node_id", "graphNodeId", "source_uri", "sourceUri", "uri"]
+        .flatMap((key) => {
+        const candidate = value[key];
+        return typeof candidate === "string" && candidate.trim() ? [candidate.trim()] : [];
+    });
+}
+function referencedSourceChunks(context, findings) {
+    const referencedIds = new Set();
+    for (const finding of findings) {
+        if (!Array.isArray(finding.source_refs))
+            continue;
+        for (const ref of finding.source_refs) {
+            for (const id of sourceReferenceIds(ref))
+                referencedIds.add(id);
+        }
+    }
+    if (referencedIds.size === 0 || !Array.isArray(context.source_chunks))
+        return [];
+    return context.source_chunks.filter((chunk) => {
+        if (!isRecord(chunk))
+            return false;
+        if (sourceReferenceIds(chunk.id).some((id) => referencedIds.has(id)))
+            return true;
+        if (sourceReferenceIds(chunk.uri).some((id) => referencedIds.has(id)))
+            return true;
+        return Array.isArray(chunk.refs)
+            && chunk.refs.some((ref) => sourceReferenceIds(ref).some((id) => referencedIds.has(id)));
+    });
+}
 function mergeProposalEditorOutput(envelope) {
     return isRecord(envelope.proposal_editor_output) ? envelope.proposal_editor_output : {};
 }
@@ -375,6 +480,8 @@ function payloadForSpecialist(args) {
         phase,
         target_surfaces: context.target_surfaces,
         source_sets: context.source_sets,
+        responsibility_plan: context.responsibility_plan,
+        graph_context: context.graph_context,
     };
     const previousOutput = isRecord(args.envelope.output) ? args.envelope.output : {};
     const threadContext = coralThreadContext({ message: args.message, envelope: args.envelope });
@@ -392,14 +499,17 @@ function payloadForSpecialist(args) {
                 },
             };
         case "memory-cartographer":
+            const cartographyCandidates = arrayFrom(previousOutput, "candidates").length > 0
+                ? arrayFrom(previousOutput, "candidates")
+                : arrayFrom(context, "claim_candidates");
             return {
                 context: {
                     ...context,
-                    claim_candidates: arrayFrom(previousOutput, "candidates"),
+                    claim_candidates: cartographyCandidates,
                 },
                 payload: {
                     ...intentContext,
-                    candidates: arrayFrom(previousOutput, "candidates"),
+                    candidates: cartographyCandidates,
                     active_memory_hints: compactMemoryHints(context.active_memory_hints),
                     target_surfaces: context.target_surfaces,
                     source_sets: context.source_sets,
@@ -422,7 +532,8 @@ function payloadForSpecialist(args) {
                 },
             };
         case "decision-synthesizer":
-            if (topology === "debate-critique" && args.envelope.type === "refinery-review-merge") {
+            if ((topology === "debate-critique" || topology === "sparse-blackboard")
+                && args.envelope.type === "refinery-review-merge") {
                 return {
                     context: {
                         ...context,
@@ -450,7 +561,8 @@ function payloadForSpecialist(args) {
                 },
             };
         case "evidence-auditor":
-            if (topology === "debate-critique" && phase === "critique-intake") {
+            if ((topology === "debate-critique" && phase === "critique-intake")
+                || (topology === "sparse-blackboard" && phase === "risk-audit-intake")) {
                 return {
                     context,
                     payload: {
@@ -469,6 +581,7 @@ function payloadForSpecialist(args) {
                 payload: {
                     ...intentContext,
                     proposal_synthesis: previousOutput,
+                    source_chunks: referencedSourceChunks(context, arrayFrom(previousOutput, "findings")),
                     active_memory_candidates: activeMemoryCandidates(context, previousOutput),
                     debate_critique: critiqueBundle(args.envelope, context),
                     claim_cards: claimCards(context),
@@ -527,11 +640,12 @@ export async function buildLiveReviewEnvelope(args) {
         instruction: [
             instructionForSpecialist(args.specialistName),
             intentInstruction(context),
+            evidenceBoundaryInstruction(),
             topologyInstructionForSpecialist({ topology, phase, specialistName: args.specialistName }),
         ].filter(Boolean).join(" "),
         payload,
     });
-    if (!args.model.apiKey) {
+    if (!args.model.apiKeyPresent) {
         return failureEnvelope({
             runId,
             step: args.specialistName,
@@ -555,7 +669,15 @@ export async function buildLiveReviewEnvelope(args) {
             user: prompt.user,
         });
         rawOutput = response.content;
-        providerMetadata = response.metadata;
+        providerMetadata = response.metadata
+            ? {
+                ...response.metadata,
+                baseUrl: redactModelBaseUrl({
+                    baseUrl: response.metadata.baseUrl,
+                    authMode: args.model.authMode,
+                }),
+            }
+            : undefined;
     }
     catch (error) {
         return failureEnvelope({
@@ -620,7 +742,7 @@ async function main() {
     if (!coralConnectionUrl)
         throw new Error("CORAL_CONNECTION_URL is required for executable Coral agents");
     log(definition.agentName, `booted specialist=${definition.specialistName} session=${process.env.CORAL_SESSION_ID ?? "unknown"}`);
-    log(definition.agentName, `model=${model.modelName} baseUrl=${model.baseUrl} reasoning=${model.reasoningEffort} apiKey=${model.apiKeyPresent ? "present" : "missing"}`);
+    log(definition.agentName, `model=${model.modelName} baseUrl=${redactModelBaseUrl(model)} reasoning=${model.reasoningEffort} apiKey=${model.apiKeyPresent ? "present" : "missing"}`);
     const connection = await connectCoralMcp(coralConnectionUrl, `refinery-${definition.specialistName}-worker`);
     log(definition.agentName, `mcp connected tools=${connection.toolNames.join(",")}`);
     try {

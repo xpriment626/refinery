@@ -1,4 +1,4 @@
-import type { ModelConfig } from "../env.ts";
+import { type ModelConfig } from "../env.ts";
 import { type MemoryMaintenanceAction } from "./types.ts";
 import type { LocalSpecialist } from "./specialists/types.ts";
 export interface ClaimScoutCandidate {

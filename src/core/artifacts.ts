@@ -52,6 +52,8 @@ export interface ReviewArtifactManifest {
     claims?: string;
     challengeLedger?: string;
     deliberation?: string;
+    responsibilityPlan?: string;
+    graphContext?: string;
     status?: string;
     sink?: string;
     coral?: string;
@@ -140,6 +142,8 @@ function buildArtifactPaths(runDir: string): ReviewArtifactManifest["artifacts"]
     claims: existingRel(runDir, "claims.json"),
     challengeLedger: existingRel(runDir, "challenge-ledger.json"),
     deliberation: existingRel(runDir, "deliberation.json"),
+    responsibilityPlan: existingRel(runDir, "responsibility-plan.json"),
+    graphContext: existingRel(runDir, "graph-context.json"),
     status: existingRel(runDir, "status.json"),
     sink: existingRel(runDir, "sink.json"),
     coral: existingRel(runDir, "coral.json"),

@@ -1,3 +1,4 @@
+import type { ResponsibilityPlan } from "./graph/plan.ts";
 export declare const memoryMaintenanceActions: readonly ["create", "update", "supersede", "merge", "archive", "retag", "quarantine", "promote", "demote", "ttl_update", "contradiction_review"];
 export declare const memoryProposalLifecycleStates: readonly ["proposed", "needs_review", "accepted", "rejected", "deferred", "applied_externally", "superseded", "archived_for_audit"];
 export declare const refineryReviewSchemaVersion = "refinery.review.v1";
@@ -47,6 +48,27 @@ export interface ReviewPacketLimits {
 export interface ReviewPacketDerivedViews {
     source_chunks: unknown[];
     active_memory_hints: unknown[];
+    responsibility_plan?: unknown;
+    graph_context?: unknown[];
+}
+export interface ReviewGraphContextNode {
+    nodeId: string;
+    revisionId: string;
+    kind: string;
+    label: string;
+    scope: string;
+    project: string | null;
+    uri: string | null;
+    depth: number;
+    seed: boolean;
+    responsibilityUnitId: string;
+    selectedText: string;
+    metadata: Record<string, unknown>;
+}
+export interface ReviewPacketGraph {
+    schemaVersion: "refinery.review-graph-context.v1";
+    plan: ResponsibilityPlan;
+    context: ReviewGraphContextNode[];
 }
 export interface ReviewPacket {
     schemaVersion: typeof reviewPacketSchemaVersion;
@@ -61,14 +83,21 @@ export interface ReviewPacket {
         scope: string;
     };
     limits: ReviewPacketLimits;
+    graph?: ReviewPacketGraph;
     derivedViews: ReviewPacketDerivedViews;
     counts: {
         sourceSets: number;
         documents: number;
         activeMemoryHints: number;
         sourceChunks: number;
+        graphNodes?: number;
+        responsibilityUnits?: number;
     };
     warnings: string[];
+    sourceIsolation?: {
+        processSeparated: true;
+        permissionModel: boolean;
+    };
 }
 export interface MemoryProposal {
     schemaVersion: typeof refineryReviewSchemaVersion;

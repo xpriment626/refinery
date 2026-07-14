@@ -12,7 +12,13 @@ claim should update, replace, merge, or challenge an active memory, identify the
 target memory id and cite the memory evidence used for that decision.
 
 Do not write memory and do not make final acceptance decisions. Your output is a
-cartographic relationship map for the Proposal Editor and Decision Synthesizer.`,
+cartographic relationship map for the Proposal Editor and Decision Synthesizer.
+
+Novel means materially absent from active memory, not merely reworded. Duplicate
+means equivalent retrieval behavior. Refinement preserves the prior invariant
+while making it more precise. Contradiction requires incompatible instructions or
+facts. Supersession requires evidence that a newer decision replaces an older
+one; chronological proximity alone is insufficient.`,
   inputContract: [
     "candidates[].claim from Claim Scout",
     "candidates[].source_refs from Claim Scout",

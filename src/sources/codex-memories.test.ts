@@ -20,11 +20,11 @@ function seedCodexMemoryHome(): string {
       "# Task Group: Research-Desk / refinery CLI module-ready substrate and release hygiene",
       "",
       "scope: Use when working on Refinery CLI contracts.",
-      "applies_to: cwd=/Users/bambozlor/Lab/Research-Desk/refinery",
+      "applies_to: cwd=/Users/example/Lab/Research-Desk/refinery",
       "",
       "### rollout_summary_files",
       "",
-      "- rollout_summaries/2026-06-10T13-09-48-UPI5-refinery_cli_module_ready_lifecycle_aware.md (cwd=/Users/bambozlor/Lab/Research-Desk, rollout_path=/Users/bambozlor/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl, updated_at=2026-06-14T14:24:07+00:00, thread_id=019eb1a7-4054-7f51-9cea-484e208390f9, success)",
+      "- rollout_summaries/2026-06-10T13-09-48-UPI5-refinery_cli_module_ready_lifecycle_aware.md (cwd=/Users/example/Lab/Research-Desk, rollout_path=/Users/example/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl, updated_at=2026-06-14T14:24:07+00:00, thread_id=019eb1a7-4054-7f51-9cea-484e208390f9, success)",
       "",
       "## User preferences",
       "",
@@ -46,7 +46,7 @@ function seedCodexMemoryHome(): string {
       "",
       "## What's in Memory",
       "",
-      "### /Users/bambozlor/Lab/Research-Desk",
+      "### /Users/example/Lab/Research-Desk",
       "",
       "- refinery Codex-first CLI substrate and release hygiene: `doctor`, `review`, `manifest.json`, `trial inspect`",
     ].join("\n"),
@@ -56,8 +56,8 @@ function seedCodexMemoryHome(): string {
     [
       "thread_id: 019eb1a7-4054-7f51-9cea-484e208390f9",
       "updated_at: 2026-06-14T14:24:07+00:00",
-      "rollout_path: /Users/bambozlor/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl",
-      "cwd: /Users/bambozlor/Lab/Research-Desk",
+      "rollout_path: /Users/example/.codex/sessions/2026/06/10/rollout-2026-06-10T21-09-48-019eb1a7-4054-7f51-9cea-484e208390f9.jsonl",
+      "cwd: /Users/example/Lab/Research-Desk",
       "",
       "# Refinery was hardened into a Codex-first CLI substrate",
       "",
@@ -92,6 +92,8 @@ test("Codex memory source reader parses memory index, summaries, rollout metadat
   assert.ok(memoryIndex);
   assert.equal(memoryIndex.role, "codex-memory-index");
   assert.equal(memoryIndex.metadata.originKind, "memory-index");
+  assert.equal("cwd" in memoryIndex.metadata, false);
+  assert.equal("threadId" in memoryIndex.metadata, false);
 
   const rollout = sources.find((source) => source.role === "codex-rollout-summary");
   assert.ok(rollout);
@@ -103,6 +105,15 @@ test("Codex memory source reader parses memory index, summaries, rollout metadat
   assert.equal(preference.type, "operational");
   assert.equal(preference.scope, "project");
   assert.equal(preference.provenance?.originKind, "memory-index");
+  assert.equal(preference.provenance?.projectPath, "/Users/example/Lab/Research-Desk/refinery");
+  assert.equal(preference.provenance?.threadId, null);
+  const rolloutReference = memories.find((memory) => memory.body.startsWith("rollout_summaries/"));
+  assert.ok(rolloutReference);
+  assert.equal(rolloutReference.provenance?.threadId, "019eb1a7-4054-7f51-9cea-484e208390f9");
+  const globalPreference = memories.find((memory) => memory.body.startsWith("For Refinery contracts"));
+  assert.ok(globalPreference);
+  assert.equal(globalPreference.scope, "global");
+  assert.equal(globalPreference.provenance?.projectPath, null);
   assert.equal(memories.some((memory) => memory.body.includes("manifest.json")), true);
 });
 

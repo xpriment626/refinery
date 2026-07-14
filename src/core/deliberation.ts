@@ -284,8 +284,11 @@ export function buildDeliberationArtifacts(args: {
   topology: string;
   messages: DeliberationSpecialistMessage[];
 }): DeliberationArtifacts {
-  const claimScout = firstMessage(args.messages, "claim-scout", "candidate-proposal") ??
-    firstMessage(args.messages, "claim-scout");
+  const claimScoutMessages = args.messages.filter((message) => (
+    message.status === "succeeded" && message.output && message.step === "claim-scout"
+  ));
+  const claimScout = claimScoutMessages.find((message) => message.phase === "candidate-proposal") ??
+    claimScoutMessages[0] ?? null;
   const proposalEditor = firstMessage(args.messages, "proposal-editor", "typed-proposal") ??
     firstMessage(args.messages, "proposal-editor");
   const memoryCartographer = firstMessage(args.messages, "memory-cartographer", "memory-cartography") ??
@@ -295,7 +298,10 @@ export function buildDeliberationArtifacts(args: {
   const finalSynthesis = firstMessage(args.messages, "decision-synthesizer", "proposal-synthesis") ??
     firstMessage(args.messages, "decision-synthesizer");
 
-  const claims = records(claimScout?.output?.candidates).map((candidate, index): ClaimCard => ({
+  const claimRows = claimScoutMessages.flatMap((message) => (
+    records(message.output?.candidates).map((candidate) => ({ candidate, message }))
+  ));
+  const claims = claimRows.map(({ candidate, message }, index): ClaimCard => ({
     schemaVersion: refineryReviewSchemaVersion,
     claimId: `claim:${args.runId}:${index + 1}`,
     body: rowBody(candidate) ?? `Unnamed claim ${index + 1}`,
@@ -306,7 +312,7 @@ export function buildDeliberationArtifacts(args: {
     confidence: null,
     status: "proposed",
     statusReason: null,
-    specialistTrace: claimScout ? [messageTrace(claimScout)] : [],
+    specialistTrace: [messageTrace(message)],
   }));
 
   const trace: DeliberationTraceEntry[] = [];
@@ -315,11 +321,13 @@ export function buildDeliberationArtifacts(args: {
       kind: "claim",
       claimId: claim.claimId,
       challengeId: null,
-      agent: claimScout?.agent ?? "refinery-claim-scout",
+      agent: claim.specialistTrace[0]?.step === "claim-scout"
+        ? claimScoutMessages.find((message) => message.messageId === claim.specialistTrace[0]?.messageId)?.agent ?? "refinery-claim-scout"
+        : "refinery-claim-scout",
       step: "claim-scout",
-      phase: claimScout?.phase ?? null,
-      threadId: claimScout?.threadId ?? null,
-      messageId: claimScout?.messageId ?? null,
+      phase: claim.specialistTrace[0]?.phase ?? null,
+      threadId: claim.specialistTrace[0]?.threadId ?? null,
+      messageId: claim.specialistTrace[0]?.messageId ?? null,
       summary: claim.body,
       refs: claim.sourceRefs,
     });

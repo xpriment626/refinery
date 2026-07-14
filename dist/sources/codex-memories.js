@@ -122,7 +122,6 @@ function metadataFor(relPath, text, originKind) {
         metadata.rolloutPath = firstMetadataValue(text, "rollout_path");
         metadata.cwd = firstMetadataValue(text, "cwd");
     }
-    Object.assign(metadata, parseRolloutListMetadata(text));
     return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined));
 }
 function toDocument(memoryHome, absPath) {
@@ -153,13 +152,13 @@ function loadMarkdownDocuments(memoryHome) {
         docs.push(toDocument(memoryHome, abs));
     return docs;
 }
-function toSourceDocument(doc) {
+function toSourceDocument(doc, maxChars = 8000) {
     return {
         id: hashId("codex-source", [doc.relPath, doc.text]),
         role: doc.sourceKind,
         relPath: doc.relPath,
         absPath: doc.absPath,
-        text: compactText(doc.text, 8000),
+        text: compactText(doc.text, maxChars),
         refs: [{ source_path: doc.relPath, origin_kind: doc.originKind }],
         metadata: doc.metadata,
     };
@@ -171,6 +170,31 @@ function headingForLine(lines, lineIndex) {
             return match[1].trim();
     }
     return null;
+}
+function firstCwdPath(text) {
+    const match = text.match(/\bcwd=([^,;)\n]+)/);
+    if (!match)
+        return null;
+    const candidate = match[1].trim().split(/\s+(?:and|with|plus)\s+/i)[0]?.trim();
+    return candidate ? path.resolve(candidate) : null;
+}
+function projectPathForLine(doc, lines, lineIndex) {
+    if (doc.originKind === "rollout-summary" && typeof doc.metadata.cwd === "string" && doc.metadata.cwd.trim()) {
+        return path.resolve(doc.metadata.cwd);
+    }
+    let taskStart = -1;
+    for (let index = lineIndex; index >= 0; index -= 1) {
+        if (/^#\s+/.test(lines[index])) {
+            taskStart = index;
+            break;
+        }
+    }
+    if (taskStart < 0)
+        return null;
+    const taskContext = lines.slice(taskStart, lineIndex + 1);
+    const appliesTo = taskContext.find((line) => /^applies_to:\s*/.test(line));
+    const scope = taskContext.find((line) => /^scope:\s*/.test(line));
+    return firstCwdPath(appliesTo ?? "") ?? firstCwdPath(scope ?? "");
 }
 function inferMemoryType(originKind, heading, body) {
     const text = `${heading ?? ""} ${body}`.toLowerCase();
@@ -193,10 +217,22 @@ function documentToMemories(doc) {
         if (!body)
             return;
         const heading = headingForLine(lines, index);
+        const projectPath = projectPathForLine(doc, lines, index);
+        const lineMetadata = parseRolloutListMetadata(line);
+        const threadId = typeof lineMetadata.threadId === "string"
+            ? lineMetadata.threadId
+            : doc.originKind === "rollout-summary" && typeof doc.metadata.threadId === "string"
+                ? doc.metadata.threadId
+                : null;
+        const updatedAt = typeof lineMetadata.updatedAt === "string"
+            ? lineMetadata.updatedAt
+            : doc.originKind === "rollout-summary" && typeof doc.metadata.updatedAt === "string"
+                ? doc.metadata.updatedAt
+                : null;
         records.push({
             id: hashId("codex-memory", [doc.relPath, String(index + 1), body]),
             type: inferMemoryType(doc.originKind, heading, body),
-            scope: "project",
+            scope: projectPath ? "project" : "global",
             status: "active",
             body,
             confidence: null,
@@ -205,16 +241,18 @@ function documentToMemories(doc) {
                 sourcePath: doc.relPath,
                 heading,
                 line: index + 1,
-                threadId: typeof doc.metadata.threadId === "string" ? doc.metadata.threadId : null,
-                updatedAt: typeof doc.metadata.updatedAt === "string" ? doc.metadata.updatedAt : null,
+                projectPath,
+                threadId,
+                updatedAt,
             },
         });
     });
     if (records.length === 0 && doc.originKind === "ad-hoc-note" && doc.text.trim()) {
+        const projectPath = projectPathForLine(doc, lines, 0);
         records.push({
             id: hashId("codex-memory", [doc.relPath, doc.text]),
             type: "semantic",
-            scope: "project",
+            scope: projectPath ? "project" : "global",
             status: "active",
             body: compactText(doc.text, 1600),
             confidence: null,
@@ -223,6 +261,7 @@ function documentToMemories(doc) {
                 sourcePath: doc.relPath,
                 heading: null,
                 line: 1,
+                projectPath,
             },
         });
     }
@@ -233,7 +272,7 @@ function limitItems(items, limit) {
 }
 export function listCodexMemorySourceDocuments(options = {}) {
     const memoryHome = resolveCodexMemoryHome(options.memoryHome);
-    return limitItems(loadMarkdownDocuments(memoryHome).map(toSourceDocument), options.limit);
+    return limitItems(loadMarkdownDocuments(memoryHome).map((document) => toSourceDocument(document, options.maxChars)), options.limit);
 }
 export function listCodexActiveMemories(options = {}) {
     const memoryHome = resolveCodexMemoryHome(options.memoryHome);

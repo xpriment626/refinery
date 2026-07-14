@@ -1,3 +1,4 @@
+import { redactModelBaseUrl } from "../env.js";
 import { memoryMaintenanceActions } from "./types.js";
 export function extractJson(raw) {
     const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -11,7 +12,7 @@ export function extractJson(raw) {
 export function redactModel(config) {
     return {
         provider: config.provider,
-        baseUrl: config.baseUrl,
+        baseUrl: redactModelBaseUrl(config),
         modelName: config.modelName,
         ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
         apiKeyPresent: Boolean(config.apiKey),

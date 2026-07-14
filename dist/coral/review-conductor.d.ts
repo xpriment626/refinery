@@ -1,7 +1,9 @@
 import { type ChildProcessWithoutNullStreams } from "node:child_process";
-import { type ReviewTopology } from "./topology.ts";
+import { type CoralRuntimeCapabilities } from "./client.ts";
+import { type CoralCommunicationProjection, type ReviewTopology } from "./topology.ts";
 import { refineryReviewSchemaVersion, type ReviewPacket, type SkillCandidateArtifact } from "../core/types.ts";
 import { type ReviewRunResult, type ReviewSinkOptions, type ReviewSinkResult } from "../core/review.ts";
+import { type ReviewIntent } from "../core/intents.ts";
 export interface CoralReviewRuntimeOptions {
     apiUrl?: string;
     authKey?: string;
@@ -12,19 +14,32 @@ export interface CoralReviewRuntimeOptions {
     startServer?: boolean;
     noTeardown?: boolean;
     coralPackage?: string;
+    coralJar?: string;
     timeoutMs?: number;
     modelName?: string;
     modelBaseUrl?: string;
     reasoningEffort?: string;
     maxTurns?: string;
+    llmProxy?: boolean;
+    modelProxyProvider?: string;
     topology?: ReviewTopology;
 }
 export interface CoralReviewRunOptions {
     packet: ReviewPacket;
     runId: string;
     outputDir: string;
+    hypothesis?: string;
     sink?: ReviewSinkOptions;
     coral?: CoralReviewRuntimeOptions;
+}
+interface CoralUsageSummary {
+    callCount: number;
+    status200Count: number;
+    promptTokens: number | null;
+    completionTokens: number | null;
+    totalTokens: number | null;
+    promptChars: number;
+    usageComplete: boolean;
 }
 export interface CoralReviewRunResult extends ReviewRunResult {
     mode: "coral";
@@ -39,6 +54,14 @@ export interface CoralReviewRunResult extends ReviewRunResult {
         threadId: string;
         threadIds?: string[];
         agents: string[];
+        model?: {
+            name: string;
+            transport: "direct" | "coral-server-proxy";
+            proxyProvider: string | null;
+        };
+        runtimeCapabilities?: CoralRuntimeCapabilities;
+        runtimeProjection?: CoralCommunicationProjection;
+        usage?: CoralUsageSummary;
     };
     sink?: ReviewSinkResult;
 }
@@ -81,6 +104,13 @@ export interface CoralConsoleRunResult {
         topology: ReviewTopology;
         serverMode: "managed" | "attached";
         managedServerStarted: boolean;
+        model: {
+            name: string;
+            transport: "direct" | "coral-server-proxy";
+            proxyProvider: string | null;
+        };
+        runtimeCapabilities: CoralRuntimeCapabilities;
+        runtimeProjection: CoralCommunicationProjection;
     };
     seededMessages: Array<{
         id: string;
@@ -98,6 +128,40 @@ export interface CoralConsoleRunSession {
     close: () => Promise<void>;
 }
 export declare function defaultCoralReviewTimeoutMs(topology: ReviewTopology): number;
-export declare function resolveRuntimeCoralConfigPath(configPath: string): string;
+export declare function buildReviewIntake(args: {
+    runId: string;
+    packet: ReviewPacket;
+    intent: ReviewIntent;
+    request: string | null;
+    topology: ReviewTopology;
+    runtimeProjection?: CoralCommunicationProjection;
+}): Record<string, unknown>;
+export declare function validateCoralDecisionContract(args: {
+    sourceChunks: unknown[];
+    typedCandidates: unknown[];
+    proposals: Array<{
+        action: string;
+        sourceRefs: unknown[];
+    }>;
+}): void;
+export declare function redactCoralLogText(text: string, secrets?: string[]): string;
+export declare function reserveLoopbackPort(): Promise<number>;
+interface RuntimeCoralConfigOptions {
+    modernAgents?: boolean;
+    coralCloudProxy?: boolean;
+    deepSeekProxy?: boolean;
+    port?: number;
+    authKey?: string;
+}
+export declare function resolveRuntimeCoralConfigPath(configPath: string, options?: RuntimeCoralConfigOptions): string;
+export declare function cleanupRuntimeCoralConfigPath(configPath: string): void;
+export declare function selectCoralServerSecretEnv(model: {
+    transport: "direct" | "coral-server-proxy";
+    proxyProvider: string | null;
+}, secrets: {
+    coralApiKey: string;
+    deepSeekApiKey: string;
+}): Record<string, string>;
 export declare function startCoralConsoleRun(options: CoralConsoleRunOptions): Promise<CoralConsoleRunSession>;
 export declare function runCoralReview(options: CoralReviewRunOptions): Promise<CoralReviewRunResult>;
+export {};

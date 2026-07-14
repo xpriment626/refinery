@@ -1,6 +1,31 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveModelApiKey } from "./core/credentials.js";
+export function redactModelBaseUrl(config) {
+    if (config.authMode !== "coral-agent-proxy")
+        return config.baseUrl;
+    try {
+        const url = new URL(config.baseUrl);
+        const segments = url.pathname.split("/");
+        const proxyIndex = segments.indexOf("llm-proxy");
+        if (proxyIndex >= 0 && proxyIndex + 1 < segments.length) {
+            segments[proxyIndex + 1] = "__redacted__";
+            url.pathname = segments.join("/");
+        }
+        else {
+            url.pathname = "/__redacted__";
+        }
+        url.username = "";
+        url.password = "";
+        url.search = "";
+        url.hash = "";
+        const redacted = url.toString();
+        return config.baseUrl.endsWith("/") ? redacted : redacted.replace(/\/$/, "");
+    }
+    catch {
+        return "coral-agent-proxy://__redacted__";
+    }
+}
 export const defaultModelMaxTokens = 8000;
 export const defaultModelBaseUrl = "https://llm.coralcloud.ai/openai/v1";
 export const defaultModelName = "gpt-5.4-nano";

@@ -7,7 +7,32 @@ export interface ModelConfig {
   baseUrl: string;
   modelName: string;
   apiKey: string;
+  authMode?: "bearer" | "coral-agent-proxy";
+  reasoningEffort?: string;
   maxTokens?: number;
+}
+
+export function redactModelBaseUrl(config: Pick<ModelConfig, "baseUrl" | "authMode">): string {
+  if (config.authMode !== "coral-agent-proxy") return config.baseUrl;
+  try {
+    const url = new URL(config.baseUrl);
+    const segments = url.pathname.split("/");
+    const proxyIndex = segments.indexOf("llm-proxy");
+    if (proxyIndex >= 0 && proxyIndex + 1 < segments.length) {
+      segments[proxyIndex + 1] = "__redacted__";
+      url.pathname = segments.join("/");
+    } else {
+      url.pathname = "/__redacted__";
+    }
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    const redacted = url.toString();
+    return config.baseUrl.endsWith("/") ? redacted : redacted.replace(/\/$/, "");
+  } catch {
+    return "coral-agent-proxy://__redacted__";
+  }
 }
 
 export const defaultModelMaxTokens = 8000;

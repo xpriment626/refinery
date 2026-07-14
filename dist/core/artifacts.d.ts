@@ -38,6 +38,8 @@ export interface ReviewArtifactManifest {
         claims?: string;
         challengeLedger?: string;
         deliberation?: string;
+        responsibilityPlan?: string;
+        graphContext?: string;
         status?: string;
         sink?: string;
         coral?: string;

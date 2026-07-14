@@ -115,3 +115,35 @@ test("claimCardsForCritique emits proposed claim cards from claim scout output",
   assert.equal(cards[0].status, "proposed");
   assert.equal(cards[0].body, "Claim critique should be local to claim cards.");
 });
+
+test("sparse deliberation aggregates claims across independent topic threads", () => {
+  const messages = [
+    {
+      step: "claim-scout",
+      agent: "refinery-claim-scout",
+      status: "succeeded" as const,
+      messageId: "topic-empty",
+      threadId: "topic-1",
+      phase: "topic-claim",
+      output: { candidates: [] },
+    },
+    {
+      step: "claim-scout",
+      agent: "refinery-claim-scout",
+      status: "succeeded" as const,
+      messageId: "topic-claim",
+      threadId: "topic-2",
+      phase: "topic-claim",
+      output: {
+        candidates: [{
+          claim: "A later topic produced a durable claim.",
+          source_refs: [{ source_id: "source:2" }],
+          why_future_useful: "Preserves sparse topic provenance.",
+        }],
+      },
+    },
+  ];
+  const deliberation = buildDeliberationArtifacts({ runId: "run-sparse", topology: "sparse-blackboard", messages });
+  assert.equal(deliberation.summary.claims, 1);
+  assert.equal(deliberation.claims[0]?.specialistTrace[0]?.threadId, "topic-2");
+});

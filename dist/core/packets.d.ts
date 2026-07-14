@@ -1,4 +1,4 @@
-import { type ActiveMemory, type ReviewPacket, type SourceDocument, type SourceSpec, type TargetSurface } from "./types.ts";
+import { type ActiveMemory, type ReviewPacket, type ReviewPacketLimits, type SourceDocument, type SourceSet, type SourceSpec, type TargetSurface } from "./types.ts";
 export interface BuildReviewPacketOptions {
     sourceSpecs: SourceSpec[];
     targets: TargetSurface[];
@@ -6,6 +6,7 @@ export interface BuildReviewPacketOptions {
     scope: string;
     intent: string;
     request: string | null;
+    home?: string;
     memoryHome?: string;
     sourceLimit?: number;
     sourceCharLimit?: number;
@@ -41,6 +42,22 @@ export interface SourceInspectResult {
     };
     warnings: string[];
 }
+export interface SourceCorpus {
+    sourceSets: SourceSet[];
+    documents: SourceDocument[];
+    activeMemories: ActiveMemory[];
+    warnings: string[];
+}
+export interface LoadSourceCorpusOptions {
+    sourceSpecs: SourceSpec[];
+    project: string;
+    scope: string;
+    home?: string;
+    memoryHome?: string;
+    sourceIndexes?: number[];
+    limits: ReviewPacketLimits;
+    now?: Date;
+}
 export declare function parseSourceSpec(raw: string): SourceSpec;
 export declare function parseSourceSpecs(values: unknown, fallback?: string[]): SourceSpec[];
 export declare function parseTargetSurface(raw: string): TargetSurface;
@@ -48,4 +65,5 @@ export declare function parseTargetSurfaces(values: unknown, fallback?: string[]
 export declare function toSourceChunks(documents: SourceDocument[], charLimit: number): unknown[];
 export declare function activeMemoryHints(memories: ActiveMemory[], limit: number): unknown[];
 export declare function buildReviewPacket(options: BuildReviewPacketOptions): Promise<ReviewPacket>;
+export declare function loadSourceCorpus(options: LoadSourceCorpusOptions): Promise<SourceCorpus>;
 export declare function inspectSources(options: Omit<BuildReviewPacketOptions, "targets" | "intent" | "request">): Promise<SourceInspectResult>;

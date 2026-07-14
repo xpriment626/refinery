@@ -1,4 +1,4 @@
-import type { ModelConfig } from "../env.ts";
+import { redactModelBaseUrl, type ModelConfig } from "../env.ts";
 import { memoryMaintenanceActions, type MemoryMaintenanceAction } from "./types.ts";
 import type { LocalSpecialist } from "./specialists/types.ts";
 
@@ -98,7 +98,7 @@ export function redactModel(config: ModelConfig): Omit<ModelConfig, "apiKey"> & 
 } {
   return {
     provider: config.provider,
-    baseUrl: config.baseUrl,
+    baseUrl: redactModelBaseUrl(config),
     modelName: config.modelName,
     ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
     apiKeyPresent: Boolean(config.apiKey),

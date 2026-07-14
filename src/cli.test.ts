@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { LibsqlGraphStore } from "./core/graph/libsql-store.ts";
 
 const cliPath = path.resolve(import.meta.dirname, "cli.ts");
 const packagePath = path.resolve(import.meta.dirname, "..", "package.json");
@@ -11,13 +12,14 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const bundledSkillPath = path.join(repoRoot, "skills/refinery/SKILL.md");
 const bundledSkillOpenAiPath = path.join(repoRoot, "skills/refinery/agents/openai.yaml");
 
-function runCli(args: string[], options: { cwd?: string; env?: Record<string, string | undefined>; input?: string } = {}) {
+function runCli(args: string[], options: { cwd?: string; env?: Record<string, string | undefined>; input?: string; updateCheck?: boolean } = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: options.cwd ?? path.resolve(import.meta.dirname, ".."),
     encoding: "utf8",
     input: options.input,
     env: {
       ...process.env,
+      REFINERY_NO_UPDATE_CHECK: options.updateCheck ? undefined : "1",
       ...options.env,
       PATH: `${path.dirname(process.execPath)}:${process.env.PATH ?? ""}`,
     },
@@ -37,6 +39,8 @@ function seedCodexMemoryHome(): string {
     path.join(home, "MEMORY.md"),
     [
       "# Task Group: Research-Desk / refinery Codex-first CLI",
+      "",
+      `applies_to: cwd=${repoRoot}`,
       "",
       "## Reusable knowledge",
       "",
@@ -59,7 +63,7 @@ function seedCodexMemoryHome(): string {
       "thread_id: 019ef730-cd4b-76c0-a3cb-c57aabd53808",
       "updated_at: 2026-06-28T00:00:00+00:00",
       "rollout_path: /tmp/rollout.jsonl",
-      "cwd: /Users/bambozlor/Lab/Research-Desk/refinery",
+      "cwd: /Users/example/Lab/Research-Desk/refinery",
       "",
       "# Refinery is being focused on Codex memories.",
     ].join("\n"),
@@ -77,11 +81,27 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
   assert.match(result.stdout, /refinery doctor/);
   assert.match(result.stdout, /refinery version/);
   assert.match(result.stdout, /refinery sources inspect/);
+  assert.match(result.stdout, /refinery graph sync/);
+  assert.match(result.stdout, /refinery graph status/);
+  assert.match(result.stdout, /refinery graph inspect/);
+  assert.match(result.stdout, /refinery graph neighbors/);
+  assert.match(result.stdout, /refinery graph plan/);
+  assert.match(result.stdout, /refinery gateway start/);
+  assert.match(result.stdout, /refinery gateway status/);
+  assert.match(result.stdout, /refinery gateway stop/);
+  assert.match(result.stdout, /refinery ui url/);
+  assert.match(result.stdout, /refinery ui open/);
+  assert.match(result.stdout, /refinery ui config/);
   assert.match(result.stdout, /refinery review/);
   assert.match(result.stdout, /refinery console run/);
   assert.match(result.stdout, /refinery dev fixture memory-proposal/);
   assert.match(result.stdout, /refinery trial inspect/);
-  assert.doesNotMatch(result.stdout, /--topology/);
+  assert.match(result.stdout, /--no-update-check/);
+  assert.match(result.stdout, /--topology pipeline\|debate-critique\|sparse-blackboard/);
+  assert.match(result.stdout, /--model <id>/);
+  assert.match(result.stdout, /--coral-llm-proxy/);
+  assert.match(result.stdout, /--model-provider <name>/);
+  assert.match(result.stdout, /--coral-jar <path>/);
   assert.doesNotMatch(result.stdout, /instance init/);
   assert.doesNotMatch(result.stdout, /module check/);
   assert.doesNotMatch(result.stdout, /runtime sequential/);
@@ -102,7 +122,7 @@ test("package surface does not publish experiment commands", () => {
   };
 
   assert.equal(pkg.name, "@itsshadowai/refinery");
-  assert.equal(pkg.version, "0.2.0");
+  assert.equal(pkg.version, "0.3.0");
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.license, "MIT");
   assert.deepEqual(pkg.publishConfig, { access: "public" });
@@ -110,7 +130,16 @@ test("package surface does not publish experiment commands", () => {
   assert.deepEqual(Object.keys(pkg.bin ?? {}).sort(), ["refinery"]);
   assert.equal(pkg.bin?.refinery, "dist/cli.js");
   assert.match(pkg.scripts?.build ?? "", /tsc/);
+  assert.match(pkg.scripts?.build ?? "", /vite/);
   assert.equal(pkg.scripts?.postinstall, "node scripts/postinstall.mjs");
+  assert.equal(pkg.devDependencies?.svelte, "5.56.4");
+  assert.equal(pkg.devDependencies?.vite, "8.1.4");
+  assert.equal(pkg.devDependencies?.sigma, "3.0.3");
+  assert.equal(pkg.devDependencies?.graphology, "0.26.0");
+  const postinstall = fs.readFileSync(path.join(repoRoot, "scripts/postinstall.mjs"), "utf8");
+  assert.match(postinstall, /refinery ui url --json/);
+  assert.match(postinstall, /refinery ui config --browser-open on --json/);
+  assert.match(postinstall, /disabled by default/i);
   const serialized = JSON.stringify({
     scripts: pkg.scripts ?? {},
     dependencies: pkg.dependencies ?? {},
@@ -147,6 +176,14 @@ test("npm pack allowlist contains runtime files only", () => {
   assert.equal(paths.includes(".env.example"), false);
   assert.equal(paths.includes(".nvmrc"), false);
   assert.equal(paths.includes("package-lock.json"), false);
+  assert.equal(paths.some((file) => file === "AGENTS.md" || file.startsWith(".agents/") || file.startsWith(".codex/")), false);
+  assert.equal(paths.some((file) =>
+    file.startsWith("docs/")
+    || file.includes("/plans/")
+    || file.endsWith(".plan.md")
+    || file.endsWith("-implementation-plan.md")
+    || file.endsWith("-design-plan.md")
+  ), false);
 });
 
 test("version returns package metadata as structured JSON", () => {
@@ -159,6 +196,29 @@ test("version returns package metadata as structured JSON", () => {
   assert.equal(parsed.command, "version");
   assert.equal(parsed.name, pkg.name);
   assert.equal(parsed.version, pkg.version);
+});
+
+test("CLI reports a cached update before running and supports the global opt-out", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-update-cli-"));
+  const cachePath = path.join(home, "cache", "update-check.json");
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, JSON.stringify({
+    checkedAt: Date.now(),
+    currentVersion: "0.3.0",
+    latestVersion: "0.4.0",
+  }));
+
+  const env = { REFINERY_HOME: home, CI: undefined, REFINERY_NO_UPDATE_CHECK: undefined };
+  const noticed = runCli(["version", "--json"], { env, updateCheck: true });
+  const noticedJson = parseJson(noticed.stdout);
+  assert.equal(noticed.status, 0, noticed.stderr || noticed.stdout);
+  assert.equal(noticedJson.version, "0.3.0");
+  assert.match(noticed.stderr, /A newer Refinery version is available: 0\.3\.0 -> 0\.4\.0/);
+  assert.match(noticed.stderr, /No update was installed automatically/);
+
+  const suppressed = runCli(["version", "--no-update-check", "--json"], { env, updateCheck: true });
+  assert.equal(suppressed.status, 0, suppressed.stderr || suppressed.stdout);
+  assert.equal(suppressed.stderr, "");
 });
 
 test("doctor validates the bounded Codex memory home without model credentials", () => {
@@ -233,6 +293,159 @@ test("sources inspect reports bounded source sets as structured JSON", () => {
   const sources = parsed.sources as Array<Record<string, unknown>>;
   assert.equal(sources[0]?.role, "codex-memories");
   assert.equal(((sources[0]?.spec as Record<string, unknown>)?.kind), "codex:memories");
+});
+
+test("graph CLI syncs, reports status, inspects nodes and neighbours, and emits a bounded retrieval plan", () => {
+  const memoryHome = seedCodexMemoryHome();
+  const refineryHome = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-graph-home-"));
+  const common = ["--project", repoRoot, "--home", refineryHome, "--json"];
+  const synced = runCli([
+    "graph",
+    "sync",
+    "--source",
+    "codex:memories",
+    "--memory-home",
+    memoryHome,
+    ...common,
+  ]);
+  const syncJson = parseJson(synced.stdout);
+  assert.equal(synced.status, 0, synced.stderr || synced.stdout);
+  assert.equal(syncJson.ok, true);
+  assert.equal(syncJson.command, "graph sync");
+  assert.equal(syncJson.canonicalSourcesMutated, false);
+  const graphPath = String(syncJson.graphPath);
+  assert.equal(fs.statSync(graphPath).isFile(), true);
+  const index = new LibsqlGraphStore(graphPath).read();
+  assert.ok(index);
+  const memoryNode = index.nodes.find((node) => node.kind === "memory");
+  assert.ok(memoryNode);
+
+  const status = runCli(["graph", "status", ...common]);
+  const statusJson = parseJson(status.stdout);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.equal(statusJson.command, "graph status");
+  assert.equal(statusJson.exists, true);
+  assert.equal(Number((statusJson.counts as Record<string, unknown>).nodes) > 0, true);
+
+  const inspected = runCli(["graph", "inspect", memoryNode.id, ...common]);
+  const inspectJson = parseJson(inspected.stdout);
+  assert.equal(inspected.status, 0, inspected.stderr || inspected.stdout);
+  assert.equal(inspectJson.command, "graph inspect");
+  assert.equal((inspectJson.node as Record<string, unknown>).id, memoryNode.id);
+
+  const neighbors = runCli(["graph", "neighbors", memoryNode.id, "--depth", "1", ...common]);
+  const neighborsJson = parseJson(neighbors.stdout);
+  assert.equal(neighbors.status, 0, neighbors.stderr || neighbors.stdout);
+  assert.equal(neighborsJson.command, "graph neighbors");
+  assert.equal(Array.isArray(neighborsJson.nodes), true);
+  assert.equal(Array.isArray(neighborsJson.edges), true);
+
+  const planned = runCli([
+    "graph",
+    "plan",
+    "--request",
+    "Refinery dry-run proposals",
+    "--seed",
+    memoryNode.id,
+    "--max-nodes",
+    "4",
+    "--max-edges",
+    "4",
+    "--max-hops",
+    "1",
+    "--max-chars",
+    "500",
+    "--max-tokens",
+    "125",
+    ...common,
+  ]);
+  const planJson = parseJson(planned.stdout);
+  assert.equal(planned.status, 0, planned.stderr || planned.stdout);
+  assert.equal(planJson.command, "graph plan");
+  const plan = planJson.plan as Record<string, unknown>;
+  assert.equal(Array.isArray(plan.selectedNodes), true);
+  assert.equal((plan.limits as Record<string, unknown>).maxNodes, 4);
+  assert.equal((plan.runtimeProjection as Record<string, unknown>).nextSeam, "sleeping-unit-first-wake-expansion");
+});
+
+test("graph CLI failures are structured, actionable, and nonzero", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-missing-graph-"));
+  const result = runCli(["graph", "inspect", "graph-node:missing", "--home", home, "--project", repoRoot, "--json"]);
+  const parsed = parseJson(result.stdout);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.command, "graph inspect");
+  const error = parsed.error as Record<string, unknown>;
+  assert.equal(error.code, "GRAPH_INDEX_NOT_FOUND");
+  assert.match(String(error.message), /graph sync first/i);
+  assert.equal((error.details as Record<string, unknown>).next, "refinery graph sync --json");
+});
+
+test("gateway and UI CLI expose redacted lifecycle state plus an explicit capability URL", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-gateway-"));
+  const home = path.join(tmp, "home");
+  const project = path.join(tmp, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const common = ["--home", home, "--project", project, "--json"];
+  const configured = runCli(["ui", "config", "--browser-open", "on", ...common]);
+  assert.equal(configured.status, 0, configured.stderr || configured.stdout);
+  assert.equal((parseJson(configured.stdout).config as Record<string, unknown>).browserOpenOnSync, true);
+
+  const started = runCli(["gateway", "start", ...common]);
+  try {
+    assert.equal(started.status, 0, started.stderr || started.stdout);
+    const startJson = parseJson(started.stdout);
+    assert.equal(startJson.running, true);
+    assert.match(String(startJson.uiUrl), /^http:\/\/127\.0\.0\.1:\d+\/#cap=/);
+    assert.doesNotMatch(JSON.stringify(startJson.publicState), /capability|token/i);
+
+    const status = runCli(["gateway", "status", ...common]);
+    const statusJson = parseJson(status.stdout);
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    assert.equal(statusJson.running, true);
+    assert.equal(statusJson.uiUrl, undefined);
+
+    const url = runCli(["ui", "url", ...common]);
+    assert.equal(url.status, 0, url.stderr || url.stdout);
+    assert.match(String(parseJson(url.stdout).url), /#cap=/);
+  } finally {
+    const stopped = runCli(["gateway", "stop", ...common]);
+    assert.equal(stopped.status, 0, stopped.stderr || stopped.stdout);
+    assert.equal(parseJson(stopped.stdout).running, false);
+  }
+});
+
+test("review aborts on graph preparation failure instead of falling back to broad legacy context", () => {
+  const memoryHome = seedCodexMemoryHome();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-cli-review-graph-failure-"));
+  const blockedHome = path.join(tmp, "home-is-a-file");
+  fs.writeFileSync(blockedHome, "not a directory");
+  const memoryPath = path.join(memoryHome, "MEMORY.md");
+  const original = fs.readFileSync(memoryPath);
+  const result = runCli([
+    "review",
+    "--source",
+    "codex:memories",
+    "--target",
+    "codex:memories",
+    "--project",
+    repoRoot,
+    "--memory-home",
+    memoryHome,
+    "--home",
+    blockedHome,
+    "--request",
+    "graph preparation must succeed",
+    "--json",
+  ]);
+  const parsed = parseJson(result.stdout);
+
+  assert.notEqual(result.status, 0);
+  assert.equal((parsed.error as Record<string, unknown>).code, "GRAPH_STORE_WRITE_FAILED");
+  assert.equal((parsed.error as Record<string, unknown>).phase, "graph-store");
+  assert.doesNotMatch(JSON.stringify(parsed), /CORAL_/);
+  assert.deepEqual(fs.readFileSync(memoryPath), original);
 });
 
 test("set auth coral stores a redacted Coral credential under Refinery home", () => {
@@ -347,6 +560,7 @@ test("init creates global state directories and installs bundled Codex skill", (
   assert.equal(fs.statSync(path.join(home, "config")).isDirectory(), true);
   assert.equal(fs.statSync(path.join(home, "credentials")).isDirectory(), true);
   assert.equal(fs.statSync(path.join(home, "runs/by-project")).isDirectory(), true);
+  assert.equal(fs.statSync(path.join(home, "graphs/by-project")).isDirectory(), true);
   assert.equal(fs.statSync(installedSkill).isFile(), true);
   assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
   assert.deepEqual(parsed.codexSkill, {

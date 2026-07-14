@@ -8,6 +8,10 @@ export const refineryCoralAuthKey = "refinery-dev";
 export const refineryCoralPort = 5555;
 export const refineryCoralConfigPath = "coral/refinery-config.toml";
 export const refineryCoralAgentGlob = "coral/agents/*";
+export const refineryCoralModernAgentGlob = "coral/agents-v1.4/*";
+export const refineryCoralProxyRequestName = "MAIN";
+export const coralCloudOpenAiProxyProvider = "Coral Cloud, OpenAI";
+export const deepSeekProxyProvider = "DeepSeek";
 
 export const refineryCoralModelDefaults = {
   modelName: defaultModelName,
@@ -39,6 +43,14 @@ export const refineryCoralAgentNames = refineryCoralAgents.map((agent) => agent.
 
 export function refineryCoralAgentGlobForRepo(repoRoot = process.cwd()): string {
   return path.join(repoRoot, refineryCoralAgentGlob);
+}
+
+export function refineryCoralModernAgentGlobForRepo(repoRoot = process.cwd()): string {
+  return path.join(repoRoot, refineryCoralModernAgentGlob);
+}
+
+export function defaultCoralProxyProvider(modelName: string): string {
+  return modelName.startsWith("deepseek-") ? deepSeekProxyProvider : coralCloudOpenAiProxyProvider;
 }
 
 export function getCoralAgentBySpecialistName(name: SpecialistName): RefineryCoralAgentDefinition {

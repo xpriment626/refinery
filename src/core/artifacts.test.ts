@@ -23,6 +23,8 @@ test("trial inspect reports claim deliberation artifacts", () => {
       unresolvedChallenges: 0,
     },
   });
+  writeJson(path.join(runDir, "responsibility-plan.json"), { id: "responsibility-plan:run-1" });
+  writeJson(path.join(runDir, "graph-context.json"), [{ nodeId: "graph-node:run-1" }]);
 
   writeReviewArtifactManifest({
     runDir,
@@ -55,5 +57,7 @@ test("trial inspect reports claim deliberation artifacts", () => {
   assert.equal(summary.artifacts.claims, "claims.json");
   assert.equal(summary.artifacts.challengeLedger, "challenge-ledger.json");
   assert.equal(summary.artifacts.deliberation, "deliberation.json");
+  assert.equal(summary.artifacts.responsibilityPlan, "responsibility-plan.json");
+  assert.equal(summary.artifacts.graphContext, "graph-context.json");
   assert.equal(summary.manifest.runtime?.topologyDesign, "claim-centered-interruptible");
 });

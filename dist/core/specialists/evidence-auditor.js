@@ -12,7 +12,15 @@ Be bounded. Do not debate indefinitely, invent missing memory records, or
 rewrite proposals. Choose the strongest relationship supported by the claim,
 source evidence, and active-memory candidates. Use novel when no active memory
 materially overlaps. Use too_weak when source support, provenance, truncation, or
-future value is insufficient.`,
+future value is insufficient.
+
+Only selected source chunks are admissible evidence. Check source identity,
+session independence, exact references, and truncation metadata. A recurrence
+claim needs at least two independent session ids unless an explicit decision,
+invariant, or reproducible failure directly supports durability. Mark unsupported
+generalization too_weak. Distinguish novelty, contradiction, and supersession
+using the same behavioral tests as the memory map, and require a concrete future
+retrieval use before endorsing a claim.`,
     inputContract: [
         "claim_cards[] from Claim Scout",
         "source_chunks[] used as evidence",

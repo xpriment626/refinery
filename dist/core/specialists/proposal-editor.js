@@ -8,7 +8,9 @@ Turn claim cards and memory maps into typed proposal candidates. Preserve
 meaning and provenance, remove session-only phrasing, make each body
 understandable without opening the original transcript, and choose the most
 appropriate memory-maintenance action. Do not approve, reject, or activate
-memory.`,
+memory. Never restore claims marked duplicate or too_weak. Preserve provenance
+and truncation caveats, and use update/supersede only when the relationship map
+identifies the exact target and evidence for the change.`,
     inputContract: [
         "candidates[] from Claim Scout",
         "memory_map.findings[] from Memory Cartographer",

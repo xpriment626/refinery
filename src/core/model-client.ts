@@ -1,4 +1,4 @@
-import { defaultModelMaxTokens, type ModelConfig } from "../env.ts";
+import { defaultModelMaxTokens, redactModelBaseUrl, type ModelConfig } from "../env.ts";
 
 export interface ModelCallMetadata {
   provider: string;
@@ -17,17 +17,20 @@ function chatRequestBody(request: {
   user: string;
 }): Record<string, unknown> {
   const tokenLimitField = request.model.modelName.startsWith("gpt-") ? "max_completion_tokens" : "max_tokens";
-  return {
+  const body: Record<string, unknown> = {
     model: request.model.modelName,
     messages: [
       { role: "system", content: request.system },
       { role: "user", content: request.user },
     ],
-    temperature: 0.1,
     [tokenLimitField]: request.model.maxTokens ?? defaultModelMaxTokens,
     stream: true,
     stream_options: { include_usage: true },
   };
+  if (!request.model.modelName.startsWith("gpt-5")) body.temperature = 0.1;
+  if (request.model.reasoningEffort) body.reasoning_effort = request.model.reasoningEffort;
+  if (request.model.modelName.startsWith("deepseek-v4")) body.thinking = { type: "enabled" };
+  return body;
 }
 
 function processStreamEvent(args: {
@@ -107,7 +110,7 @@ async function readStreamingChatResponse(response: Response, model: ModelConfig)
     content: combined,
     metadata: {
       provider: model.provider,
-      baseUrl: model.baseUrl,
+      baseUrl: redactModelBaseUrl(model),
       modelName: model.modelName,
       status: response.status,
       responseId: metadata.responseId,
@@ -123,12 +126,13 @@ export async function callCoralChatWithMetadata(request: {
   system: string;
   user: string;
 }): Promise<{ content: string; metadata: ModelCallMetadata }> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (request.model.authMode !== "coral-agent-proxy") {
+    headers.authorization = `Bearer ${request.model.apiKey}`;
+  }
   const response = await fetch(`${request.model.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${request.model.apiKey}`,
-    },
+    headers,
     body: JSON.stringify(chatRequestBody(request)),
   });
   if (!response.ok) {

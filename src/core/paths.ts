@@ -9,6 +9,15 @@ export interface RefineryPaths {
   runsRootDir: string;
   projectKey: string;
   runsDir: string;
+  cataloguesDir: string;
+  sessionCataloguePath: string;
+  graphsDir: string;
+  graphIndexPath: string;
+  legacyGraphIndexPath: string;
+  gatewayDir: string;
+  gatewayStatePath: string;
+  gatewayLogPath: string;
+  uiConfigPath: string;
 }
 
 export interface ResolveRefineryPathsOptions {
@@ -48,6 +57,8 @@ export function resolveRefineryPaths(options: ResolveRefineryPathsOptions = {}):
   const home = resolvePathInput(homeInput, cwd);
   const runsRootDir = path.join(home, "runs");
   const projectKey = projectKeyForPath(cwd);
+  const graphsDir = path.join(home, "graphs", "by-project", projectKey);
+  const gatewayDir = path.join(home, "gateway");
   return {
     home,
     configDir: path.join(home, "config"),
@@ -55,5 +66,14 @@ export function resolveRefineryPaths(options: ResolveRefineryPathsOptions = {}):
     runsRootDir,
     projectKey,
     runsDir: path.join(runsRootDir, "by-project", projectKey),
+    cataloguesDir: path.join(home, "catalogues"),
+    sessionCataloguePath: path.join(home, "catalogues", "codex-sessions.db"),
+    graphsDir,
+    graphIndexPath: path.join(graphsDir, "memory-graph.db"),
+    legacyGraphIndexPath: path.join(graphsDir, "memory-graph.json"),
+    gatewayDir,
+    gatewayStatePath: path.join(gatewayDir, "state.json"),
+    gatewayLogPath: path.join(gatewayDir, "gateway.jsonl"),
+    uiConfigPath: path.join(home, "config", "ui.json"),
   };
 }

@@ -5,6 +5,15 @@ export interface RefineryPaths {
     runsRootDir: string;
     projectKey: string;
     runsDir: string;
+    cataloguesDir: string;
+    sessionCataloguePath: string;
+    graphsDir: string;
+    graphIndexPath: string;
+    legacyGraphIndexPath: string;
+    gatewayDir: string;
+    gatewayStatePath: string;
+    gatewayLogPath: string;
+    uiConfigPath: string;
 }
 export interface ResolveRefineryPathsOptions {
     home?: string;

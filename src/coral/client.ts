@@ -1,10 +1,13 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  defaultCoralProxyProvider,
   refineryCoralAgents,
   refineryCoralAgentNames,
+  refineryCoralProxyRequestName,
   refineryCoralAgentVersion,
   refineryCoralModelDefaults,
 } from "./definitions.ts";
+import { buildCoralCommunicationGroups, type ReviewTopology } from "./topology.ts";
 
 export interface SessionIdentifier {
   sessionId: string;
@@ -55,6 +58,20 @@ export interface CoralSessionRequestInput {
   maxTurns?: string;
   ttlMs?: number;
   holdAfterExitMs?: number;
+  topology?: ReviewTopology;
+  llmProxy?: {
+    enabled: boolean;
+    configurationName?: string;
+  };
+}
+
+export interface CoralRuntimeCapabilities {
+  schemaVersion: "refinery.coral-runtime-capabilities.v1";
+  graphAgentProxyOverrides: boolean;
+  dynamicAgentInsertion: false;
+  nativeSleep: false;
+  softSleep: "wait_for_mention";
+  wakeSignal: "mention";
 }
 
 export interface PingEnvelope {
@@ -102,6 +119,16 @@ function option(value: string): { type: "string"; value: string } {
 }
 
 export function buildCoralSessionRequest(input: CoralSessionRequestInput): unknown {
+  const topology = input.topology ?? "pipeline";
+  const modelName = input.modelName ?? refineryCoralModelDefaults.modelName;
+  const proxyOverride = input.llmProxy?.enabled
+    ? {
+        [refineryCoralProxyRequestName]: {
+          configurationName: input.llmProxy.configurationName ?? defaultCoralProxyProvider(modelName),
+          modelName,
+        },
+      }
+    : undefined;
   return {
     agentGraphRequest: {
       agents: refineryCoralAgents.map((agent) => ({
@@ -114,14 +141,19 @@ export function buildCoralSessionRequest(input: CoralSessionRequestInput): unkno
         description: agent.specialist.purpose,
         blocking: true,
         provider: { type: "local", runtime: "executable" },
+        ...(proxyOverride ? { proxies: proxyOverride } : {}),
+        annotations: {
+          "refinery.specialist": agent.specialistName,
+          "refinery.topology": topology,
+        },
         options: {
-          MODEL_NAME: option(input.modelName ?? refineryCoralModelDefaults.modelName),
+          MODEL_NAME: option(modelName),
           MODEL_BASE_URL: option(input.modelBaseUrl ?? refineryCoralModelDefaults.baseUrl),
           REASONING_EFFORT: option(input.reasoningEffort ?? refineryCoralModelDefaults.reasoningEffort),
           REFINERY_CORAL_MAX_TURNS: option(input.maxTurns ?? "1"),
         },
       })),
-      groups: [refineryCoralAgentNames],
+      groups: buildCoralCommunicationGroups(topology),
       customTools: {},
     },
     namespaceProvider: {
@@ -129,7 +161,7 @@ export function buildCoralSessionRequest(input: CoralSessionRequestInput): unkno
       namespaceRequest: {
         name: input.namespace,
         deleteOnLastSessionExit: true,
-        annotations: { app: "refinery", smoke: "coral-ping-pong", runId: input.runId },
+        annotations: { app: "refinery", smoke: "coral-ping-pong", runId: input.runId, topology },
       },
     },
     execution: {
@@ -144,7 +176,25 @@ export function buildCoralSessionRequest(input: CoralSessionRequestInput): unkno
       app: "refinery",
       smoke: "coral-ping-pong",
       runId: input.runId,
+      topology,
     },
+  };
+}
+
+export async function inspectCoralRuntimeCapabilities(apiUrl: string): Promise<CoralRuntimeCapabilities> {
+  const response = await fetch(`${apiUrl.replace(/\/$/, "")}/api_v1.json`);
+  if (!response.ok) throw new Error(`Coral schema request failed (${response.status}).`);
+  const schema = await response.json() as {
+    components?: { schemas?: { GraphAgentRequest?: { properties?: Record<string, unknown> } } };
+  };
+  const graphAgentProperties = schema.components?.schemas?.GraphAgentRequest?.properties ?? {};
+  return {
+    schemaVersion: "refinery.coral-runtime-capabilities.v1",
+    graphAgentProxyOverrides: "proxies" in graphAgentProperties,
+    dynamicAgentInsertion: false,
+    nativeSleep: false,
+    softSleep: "wait_for_mention",
+    wakeSignal: "mention",
   };
 }
 

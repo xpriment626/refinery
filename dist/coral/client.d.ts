@@ -1,3 +1,4 @@
+import { type ReviewTopology } from "./topology.ts";
 export interface SessionIdentifier {
     sessionId: string;
     namespace: string;
@@ -40,6 +41,19 @@ export interface CoralSessionRequestInput {
     maxTurns?: string;
     ttlMs?: number;
     holdAfterExitMs?: number;
+    topology?: ReviewTopology;
+    llmProxy?: {
+        enabled: boolean;
+        configurationName?: string;
+    };
+}
+export interface CoralRuntimeCapabilities {
+    schemaVersion: "refinery.coral-runtime-capabilities.v1";
+    graphAgentProxyOverrides: boolean;
+    dynamicAgentInsertion: false;
+    nativeSleep: false;
+    softSleep: "wait_for_mention";
+    wakeSignal: "mention";
 }
 export interface PingEnvelope {
     type: "refinery-ping" | "refinery-pong";
@@ -65,6 +79,7 @@ export interface PingPongEvaluation {
     }>;
 }
 export declare function buildCoralSessionRequest(input: CoralSessionRequestInput): unknown;
+export declare function inspectCoralRuntimeCapabilities(apiUrl: string): Promise<CoralRuntimeCapabilities>;
 export declare function getLocalAgent(opts: CoralSmokeClientOptions, agentName: string): Promise<unknown>;
 export declare function createSession(opts: CoralSmokeClientOptions, req: unknown): Promise<SessionIdentifier>;
 export declare function closeSession(opts: CoralSmokeClientOptions, session: SessionIdentifier): Promise<void>;

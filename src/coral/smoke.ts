@@ -49,7 +49,7 @@ interface SmokeArtifact {
   completedAt?: string;
   runId: string;
   apiUrl: string;
-  authKey: string;
+  authKeyPresent: boolean;
   configPath: string;
   outputDir: string;
   startServer: boolean;
@@ -196,7 +196,7 @@ async function runSmoke(args: SmokeArgs): Promise<SmokeArtifact> {
     startedAt: new Date().toISOString(),
     runId: args.runId,
     apiUrl: args.apiUrl,
-    authKey: args.authKey,
+    authKeyPresent: Boolean(args.authKey),
     configPath: path.resolve(repoRoot, args.configPath),
     outputDir,
     startServer: args.startServer,
@@ -227,7 +227,7 @@ async function runSmoke(args: SmokeArgs): Promise<SmokeArtifact> {
       child = startCoralServer(args, logs);
     }
     const serverReady = await waitForServer(args.apiUrl, args.authKey, 60_000);
-    if (!serverReady) throw new Error(`Coral server was not reachable at ${args.apiUrl} with auth key ${args.authKey}`);
+    if (!serverReady) throw new Error(`Coral server was not reachable at ${args.apiUrl} with the configured auth key.`);
 
     for (const agentName of refineryCoralAgentNames) {
       try {

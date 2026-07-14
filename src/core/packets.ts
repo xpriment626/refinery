@@ -9,6 +9,7 @@ import {
   resolveCodexMemoryHome,
 } from "../sources/codex-memories.ts";
 import { RefineryError } from "./errors.ts";
+import { readSourceCorpusIsolated } from "./source-reader.ts";
 import {
   reviewPacketSchemaVersion,
   sourceSpecKinds,
@@ -36,6 +37,7 @@ export interface BuildReviewPacketOptions {
   scope: string;
   intent: string;
   request: string | null;
+  home?: string;
   memoryHome?: string;
   sourceLimit?: number;
   sourceCharLimit?: number;
@@ -78,6 +80,24 @@ interface LoadedSourceSet {
   documents: SourceDocument[];
   activeMemories: ActiveMemory[];
   warnings: string[];
+}
+
+export interface SourceCorpus {
+  sourceSets: SourceSet[];
+  documents: SourceDocument[];
+  activeMemories: ActiveMemory[];
+  warnings: string[];
+}
+
+export interface LoadSourceCorpusOptions {
+  sourceSpecs: SourceSpec[];
+  project: string;
+  scope: string;
+  home?: string;
+  memoryHome?: string;
+  sourceIndexes?: number[];
+  limits: ReviewPacketLimits;
+  now?: Date;
 }
 
 interface SourceLoadContext {
@@ -177,13 +197,19 @@ function sourceDocument(args: {
   metadata?: Record<string, unknown>;
   maxChars: number;
 }): SourceDocument {
+  const text = compactText(args.text, args.maxChars);
   return {
     id: hashId("source-doc", [args.sourceSet, args.uri, args.text]),
     sourceSet: args.sourceSet,
     role: args.role,
     uri: args.uri,
-    text: compactText(args.text, args.maxChars),
-    metadata: args.metadata ?? {},
+    text,
+    metadata: {
+      ...(args.metadata ?? {}),
+      sourceTextChars: args.text.length,
+      selectedTextChars: text.length,
+      truncated: text.length < args.text.replace(/\s+/g, " ").trim().length,
+    },
   };
 }
 
@@ -231,8 +257,44 @@ function limitItems<T>(items: T[], limit: number): T[] {
 
 async function loadCodexMemories(spec: SourceSpec, index: number, context: SourceLoadContext): Promise<LoadedSourceSet> {
   const memoryHome = resolveCodexMemoryHome(spec.params.home ?? context.memoryHome);
-  const sourceSet = sourceSetFor(spec, index, "codex-memories", { memoryHome });
-  const sources = listCodexMemorySourceDocuments({ memoryHome, limit: context.limits.sourceLimit });
+  const root = spec.params.root ? path.resolve(spec.params.root) : null;
+  const withinRoot = (candidate: unknown): boolean => {
+    if (!root || typeof candidate !== "string") return false;
+    const relative = path.relative(root, path.resolve(candidate));
+    return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+  };
+  const sourceSet = sourceSetFor(spec, index, "codex-memories", root
+    ? { rootPathHash: hashId("path", [root]), filteredRecords: true }
+    : { memoryHome });
+  if (root) {
+    const matchingMemories = listCodexActiveMemories({ memoryHome })
+      .filter((memory) => memory.scope === "project" && withinRoot(memory.provenance?.projectPath));
+    const activeMemories = limitItems(matchingMemories, context.limits.activeMemoryLimit);
+    const selected = limitItems(matchingMemories, context.limits.sourceLimit);
+    return {
+      sourceSet,
+      activeMemories,
+      warnings: [],
+      documents: selected.map((memory) => sourceDocument({
+        sourceSet: sourceSet.id,
+        role: "codex-memory-record",
+        uri: `codex-memory-record://${encodeURIComponent(memory.id)}`,
+        text: memory.body,
+        metadata: {
+          memoryId: memory.id,
+          memoryType: memory.type,
+          scope: memory.scope,
+          ...(memory.provenance ?? {}),
+        },
+        maxChars: context.limits.documentCharLimit,
+      })),
+    };
+  }
+  const sources = listCodexMemorySourceDocuments({
+    memoryHome,
+    limit: context.limits.sourceLimit,
+    maxChars: context.limits.documentCharLimit,
+  });
   const activeMemories = listCodexActiveMemories({ memoryHome, limit: context.limits.activeMemoryLimit });
   return {
     sourceSet,
@@ -252,10 +314,6 @@ async function loadCodexMemories(spec: SourceSpec, index: number, context: Sourc
   };
 }
 
-function codexHome(): string {
-  return path.join(os.homedir(), ".codex");
-}
-
 function walkFiles(dir: string): string[] {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
   const out: string[] = [];
@@ -265,182 +323,6 @@ function walkFiles(dir: string): string[] {
     else if (entry.isFile()) out.push(abs);
   }
   return out.sort();
-}
-
-function findSessionFiles(sessionsDir = path.join(codexHome(), "sessions")): string[] {
-  return walkFiles(sessionsDir).filter((file) => path.basename(file).startsWith("rollout-") && file.endsWith(".jsonl"));
-}
-
-function textFromContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((item) => {
-      if (!item || typeof item !== "object") return "";
-      const record = item as Record<string, unknown>;
-      return typeof record.text === "string" ? record.text : "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function parseSessionFile(filePath: string): {
-  sessionId: string;
-  cwd: string | null;
-  timestamp: string | null;
-  text: string;
-  metadata: Record<string, unknown>;
-} | null {
-  const userPrompts: string[] = [];
-  const assistantFinals: string[] = [];
-  const assistantSummaries: string[] = [];
-  const toolCalls: string[] = [];
-  const eventSummaries: string[] = [];
-  const toolCounts: Record<string, number> = {};
-  let sessionId = path.basename(filePath, ".jsonl");
-  let cwd: string | null = null;
-  let timestamp: string | null = null;
-  let firstTimestamp: string | null = null;
-  let lastTimestamp: string | null = null;
-
-  for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    let entry: { timestamp?: string; type?: string; payload?: Record<string, unknown> };
-    try {
-      entry = JSON.parse(line) as typeof entry;
-    } catch {
-      continue;
-    }
-    if (typeof entry.timestamp === "string") {
-      firstTimestamp ??= entry.timestamp;
-      lastTimestamp = entry.timestamp;
-    }
-    const payload = entry.payload;
-    if (!payload || typeof payload !== "object") continue;
-    if (entry.type === "session_meta") {
-      if (typeof payload.id === "string") sessionId = payload.id;
-      else if (typeof payload.session_id === "string") sessionId = payload.session_id;
-      if (typeof payload.cwd === "string") cwd = payload.cwd;
-      if (typeof payload.timestamp === "string") timestamp = payload.timestamp;
-      continue;
-    }
-    if (entry.type === "turn_context") {
-      if (typeof payload.cwd === "string") cwd = payload.cwd;
-      continue;
-    }
-    if (entry.type === "event_msg") {
-      if (payload.type === "user_message" && typeof payload.message === "string") {
-        userPrompts.push(compactText(payload.message, 1200));
-      } else if (payload.type === "agent_message" && typeof payload.message === "string") {
-        eventSummaries.push(compactText(payload.message, 300));
-      }
-      continue;
-    }
-    if (entry.type !== "response_item") continue;
-    if (payload.type === "message") {
-      const text = compactText(textFromContent(payload.content), 1400);
-      if (!text) continue;
-      if (payload.role === "user") userPrompts.push(text);
-      if (payload.role === "assistant" && payload.phase !== "commentary") assistantFinals.push(text);
-      continue;
-    }
-    if (payload.type === "reasoning" && Array.isArray(payload.summary)) {
-      const summary = payload.summary.map((item) => typeof item === "string" ? item : "").filter(Boolean).join(" ");
-      if (summary) assistantSummaries.push(compactText(summary, 500));
-      continue;
-    }
-    if (payload.type === "function_call") {
-      const name = typeof payload.name === "string" ? payload.name : "tool";
-      toolCounts[name] = (toolCounts[name] ?? 0) + 1;
-      let detail = "";
-      if (typeof payload.arguments === "string" && payload.arguments.trim()) {
-        try {
-          const parsed = JSON.parse(payload.arguments) as Record<string, unknown>;
-          if (typeof parsed.cmd === "string") detail = ` cmd=${compactText(parsed.cmd, 180)}`;
-          else if (typeof parsed.query === "string") detail = ` query=${compactText(parsed.query, 120)}`;
-        } catch {
-          detail = ` args=${compactText(payload.arguments, 120)}`;
-        }
-      }
-      toolCalls.push(`${name}${detail}`);
-    }
-  }
-
-  const text = [
-    `Codex session: ${sessionId}`,
-    cwd ? `cwd: ${cwd}` : null,
-    `session_file: ${filePath}`,
-    timestamp || firstTimestamp ? `started_at: ${timestamp ?? firstTimestamp}` : null,
-    lastTimestamp ? `last_event_at: ${lastTimestamp}` : null,
-    "",
-    "User prompts:",
-    ...limitItems(userPrompts, 8).map((item) => `- ${item}`),
-    "",
-    "Assistant finals/summaries:",
-    ...limitItems([...assistantFinals, ...assistantSummaries], 8).map((item) => `- ${item}`),
-    "",
-    "Compact tool/action summary:",
-    ...Object.entries(toolCounts).map(([name, count]) => `- ${name}: ${count}`),
-    ...limitItems(toolCalls, 12).map((item) => `- ${item}`),
-    ...limitItems(eventSummaries, 4).map((item) => `- event: ${item}`),
-  ].filter((item): item is string => item !== null).join("\n");
-
-  if (!text.trim()) return null;
-  return {
-    sessionId,
-    cwd,
-    timestamp: timestamp ?? firstTimestamp,
-    text,
-    metadata: {
-      sessionId,
-      cwd,
-      timestamp: timestamp ?? firstTimestamp,
-      firstTimestamp,
-      lastTimestamp,
-      filePath,
-      userPromptCount: userPrompts.length,
-      assistantFinalCount: assistantFinals.length,
-      toolCounts,
-    },
-  };
-}
-
-function withinDays(timestamp: string | null, days: number, now: Date): boolean {
-  if (!timestamp) return true;
-  const then = new Date(timestamp);
-  if (Number.isNaN(then.getTime())) return true;
-  return then.getTime() >= now.getTime() - days * 24 * 60 * 60 * 1000;
-}
-
-async function loadCodexSessions(spec: SourceSpec, index: number, context: SourceLoadContext): Promise<LoadedSourceSet> {
-  const sessionsDir = spec.params.home ?? path.join(codexHome(), "sessions");
-  const projectFilter = spec.params.scope === "global" ? null : path.resolve(spec.params.project ?? context.project);
-  const days = spec.params.days ? Number.parseInt(spec.params.days, 10) : null;
-  const sourceSet = sourceSetFor(spec, index, "codex-sessions", { sessionsDir, project: projectFilter, days });
-  const warnings: string[] = [];
-  if (!fs.existsSync(sessionsDir)) {
-    return { sourceSet, documents: [], activeMemories: [], warnings: [`Codex sessions directory not found: ${sessionsDir}`] };
-  }
-  const parsed = findSessionFiles(sessionsDir)
-    .map(parseSessionFile)
-    .filter((session): session is NonNullable<typeof session> => Boolean(session))
-    .filter((session) => !projectFilter || (session.cwd ? path.resolve(session.cwd) === projectFilter : false))
-    .filter((session) => !days || withinDays(session.timestamp, days, context.now))
-    .sort((left, right) => String(right.timestamp ?? "").localeCompare(String(left.timestamp ?? "")));
-  const selected = limitItems(parsed, context.limits.sourceLimit);
-  return {
-    sourceSet,
-    activeMemories: [],
-    warnings,
-    documents: selected.map((session) => sourceDocument({
-      sourceSet: sourceSet.id,
-      role: "codex-session-summary",
-      uri: `${pathToFileURL(String(session.metadata.filePath)).href}#session=${encodeURIComponent(session.sessionId)}`,
-      text: session.text,
-      metadata: session.metadata,
-      maxChars: context.limits.documentCharLimit,
-    })),
-  };
 }
 
 function findSkillFiles(roots: string[]): string[] {
@@ -599,7 +481,11 @@ async function loadSourceSet(spec: SourceSpec, index: number, context: SourceLoa
     case "codex:memories":
       return loadCodexMemories(spec, index, context);
     case "codex:sessions":
-      return loadCodexSessions(spec, index, context);
+      throw new RefineryError(
+        "SESSION_CATALOGUE_COORDINATOR_REQUIRED",
+        "Codex sessions must be loaded through the incremental catalogue coordinator.",
+        { phase: "source-reader" },
+      );
     case "codex:skills":
       return loadCodexSkills(spec, index, context);
     case "file":
@@ -622,17 +508,17 @@ export async function buildReviewPacket(options: BuildReviewPacketOptions): Prom
     documentCharLimit: Math.max(500, Math.min(options.documentCharLimit ?? DEFAULT_DOCUMENT_CHAR_LIMIT, 24_000)),
     activeMemoryLimit: Math.max(1, Math.min(options.activeMemoryLimit ?? DEFAULT_ACTIVE_MEMORY_LIMIT, 200)),
   };
-  const context: SourceLoadContext = {
+  const isolated = await readSourceCorpusIsolated({
+    sourceSpecs: options.sourceSpecs,
     project: options.project,
     scope: options.scope,
+    home: options.home,
     memoryHome: options.memoryHome,
     limits,
-    now: options.now ?? new Date(),
-  };
-  const loaded = await Promise.all(options.sourceSpecs.map((spec, index) => loadSourceSet(spec, index, context)));
-  const sourceSets = loaded.map((set) => set.sourceSet);
-  const documents = loaded.flatMap((set) => set.documents);
-  const activeMemories = uniqueActiveMemories(loaded.flatMap((set) => set.activeMemories));
+    now: options.now,
+  });
+  const corpus = isolated.corpus;
+  const { sourceSets, documents, activeMemories } = corpus;
   const derivedViews = {
     source_chunks: toSourceChunks(documents, limits.sourceCharLimit),
     active_memory_hints: activeMemoryHints(activeMemories, limits.activeMemoryLimit),
@@ -657,6 +543,31 @@ export async function buildReviewPacket(options: BuildReviewPacketOptions): Prom
       activeMemoryHints: derivedViews.active_memory_hints.length,
       sourceChunks: derivedViews.source_chunks.length,
     },
+    warnings: corpus.warnings,
+    sourceIsolation: {
+      processSeparated: isolated.isolation.processSeparated,
+      permissionModel: isolated.isolation.permissionModel,
+    },
+  };
+}
+
+export async function loadSourceCorpus(options: LoadSourceCorpusOptions): Promise<SourceCorpus> {
+  const context: SourceLoadContext = {
+    project: options.project,
+    scope: options.scope,
+    memoryHome: options.memoryHome,
+    limits: options.limits,
+    now: options.now ?? new Date(),
+  };
+  const loaded = await Promise.all(options.sourceSpecs.map((spec, index) => loadSourceSet(
+    spec,
+    options.sourceIndexes?.[index] ?? index,
+    context,
+  )));
+  return {
+    sourceSets: loaded.map((set) => set.sourceSet),
+    documents: loaded.flatMap((set) => set.documents),
+    activeMemories: uniqueActiveMemories(loaded.flatMap((set) => set.activeMemories)),
     warnings: loaded.flatMap((set) => set.warnings),
   };
 }

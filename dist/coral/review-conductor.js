@@ -1,14 +1,18 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, getExtended, getLocalAgent, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
-import { refineryCoralAgentGlobForRepo, refineryCoralAgentNames, refineryCoralAuthKey, refineryCoralConfigPath, refineryCoralModelDefaults, refineryCoralPort, } from "./definitions.js";
-import { defaultReviewTopology } from "./topology.js";
+import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, getExtended, getLocalAgent, inspectCoralRuntimeCapabilities, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
+import { coralCloudOpenAiProxyProvider, defaultCoralProxyProvider, deepSeekProxyProvider, refineryCoralAgentGlobForRepo, refineryCoralModernAgentGlobForRepo, refineryCoralAgentNames, refineryCoralAuthKey, refineryCoralConfigPath, refineryCoralModelDefaults, refineryCoralPort, } from "./definitions.js";
+import { buildCoralCommunicationProjection, defaultReviewTopology } from "./topology.js";
+import { createSparseBlackboard, routeSparseClaims, } from "./sparse-blackboard.js";
 import { memoryMaintenanceActions, refineryReviewSchemaVersion, } from "../core/types.js";
 import { loadLocalEnv, parseModelMaxTokens } from "../env.js";
+import { resolveModelApiKey } from "../core/credentials.js";
 import { applyErrorContext, asRefineryError, RefineryError, } from "../core/errors.js";
 import { writeReviewArtifactManifest, reviewStepOrder } from "../core/artifacts.js";
 import { buildDeliberationArtifacts, claimCardsForCritique, } from "../core/deliberation.js";
@@ -25,7 +29,7 @@ function writeJson(filePath, value) {
     fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 export function defaultCoralReviewTimeoutMs(topology) {
-    return topology === "debate-critique"
+    return topology === "debate-critique" || topology === "sparse-blackboard"
         ? DEFAULT_DEBATE_CRITIQUE_WAIT_TIMEOUT_MS
         : DEFAULT_PIPELINE_WAIT_TIMEOUT_MS;
 }
@@ -50,15 +54,21 @@ function buildConsoleUrl(apiUrl, pathname) {
 function resolveConfiguredModel(coral) {
     const localEnv = loadLocalEnv(repoRoot);
     const readConfig = (name) => process.env[name] ?? localEnv[name];
+    const modelName = coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName;
+    const llmProxy = coral.llmProxy ?? false;
     return {
         provider: "coral",
         baseUrl: coral.modelBaseUrl ?? readConfig("MODEL_BASE_URL") ?? readConfig("REFINERY_MODEL_BASE_URL") ?? refineryCoralModelDefaults.baseUrl,
-        modelName: coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName,
+        modelName,
         reasoningEffort: coral.reasoningEffort ?? readConfig("REASONING_EFFORT") ?? refineryCoralModelDefaults.reasoningEffort,
         maxTokens: parseModelMaxTokens(readConfig("MODEL_MAX_TOKENS") ?? readConfig("REFINERY_MODEL_MAX_TOKENS")),
+        transport: llmProxy ? "coral-server-proxy" : "direct",
+        proxyProvider: llmProxy
+            ? coral.modelProxyProvider ?? readConfig("REFINERY_MODEL_PROXY_PROVIDER") ?? defaultCoralProxyProvider(modelName)
+            : null,
     };
 }
-function buildReviewIntake(args) {
+export function buildReviewIntake(args) {
     return {
         schemaVersion: refineryReviewSchemaVersion,
         type: "refinery-review-intake",
@@ -74,11 +84,16 @@ function buildReviewIntake(args) {
         noApply: true,
         dryRun: true,
         topology: args.topology,
-        phase: args.topology === "debate-critique" ? "proposal-intake" : "pipeline",
+        coral_runtime_projection: args.runtimeProjection ?? null,
+        phase: args.topology === "sparse-blackboard"
+            ? "topic-intake"
+            : args.topology === "debate-critique" ? "proposal-intake" : "pipeline",
         sourceLimit: args.packet.limits.sourceLimit,
         sourceCharLimit: args.packet.limits.sourceCharLimit,
         source_chunks: args.packet.derivedViews.source_chunks,
         active_memory_hints: args.packet.derivedViews.active_memory_hints,
+        responsibility_plan: args.packet.derivedViews.responsibility_plan ?? null,
+        graph_context: args.packet.derivedViews.graph_context ?? [],
         target_surfaces: args.packet.targets,
         source_sets: args.packet.sourceSets,
         proposal_schema: {
@@ -102,9 +117,11 @@ function buildReviewIntake(args) {
             args.request ? `User request: ${args.request}` : "No additional user request.",
             `Target surfaces: ${args.packet.targets.join(", ")}.`,
             "Do not activate, approve, or write memory.",
-            args.topology === "debate-critique"
-                ? "Use debate/critique topology: proposal work and critique work happen in separate Coral threads before final synthesis."
-                : "Use the default pipeline topology.",
+            args.topology === "sparse-blackboard"
+                ? "Use app-owned sparse topic routing: Claim Scout wakes first per awake responsibility unit; every other specialist remains at wait_for_mention until a deterministic routing condition wakes it."
+                : args.topology === "debate-critique"
+                    ? "Use debate/critique topology: proposal work and critique work happen in separate Coral threads before final synthesis."
+                    : "Use the default pipeline topology.",
         ].join(" "),
     };
 }
@@ -160,6 +177,58 @@ function collectSpecialistMessages(messages, threadIds, runId) {
             : null,
     }))
         .sort((left, right) => reviewStepOrder.indexOf(left.step) - reviewStepOrder.indexOf(right.step));
+}
+function usageNumber(record, names) {
+    for (const name of names) {
+        const value = record[name];
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0)
+            return value;
+    }
+    return null;
+}
+function summarizeCoralUsage(messages) {
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let totalTokens = 0;
+    let usageComplete = messages.length > 0;
+    let status200Count = 0;
+    let promptChars = 0;
+    for (const message of messages) {
+        promptChars += message.prompt === null || message.prompt === undefined
+            ? 0
+            : JSON.stringify(message.prompt).length;
+        const metadata = message.providerMetadata && typeof message.providerMetadata === "object" && !Array.isArray(message.providerMetadata)
+            ? message.providerMetadata
+            : null;
+        if (metadata?.status === 200)
+            status200Count += 1;
+        const usage = metadata?.usage && typeof metadata.usage === "object" && !Array.isArray(metadata.usage)
+            ? metadata.usage
+            : null;
+        if (!usage) {
+            usageComplete = false;
+            continue;
+        }
+        const prompt = usageNumber(usage, ["prompt_tokens", "input_tokens"]);
+        const completion = usageNumber(usage, ["completion_tokens", "output_tokens"]);
+        const total = usageNumber(usage, ["total_tokens"]);
+        if (prompt === null || completion === null) {
+            usageComplete = false;
+            continue;
+        }
+        promptTokens += prompt;
+        completionTokens += completion;
+        totalTokens += total ?? prompt + completion;
+    }
+    return {
+        callCount: messages.length,
+        status200Count,
+        promptTokens: usageComplete ? promptTokens : null,
+        completionTokens: usageComplete ? completionTokens : null,
+        totalTokens: usageComplete ? totalTokens : null,
+        promptChars,
+        usageComplete,
+    };
 }
 function debatePriority(message) {
     if (message.step === "decision-synthesizer" && message.phase === "proposal-synthesis")
@@ -301,6 +370,83 @@ function parseDecisionSynthesizerOutput(runId, output) {
         skillCandidates: parseSkillCandidateArtifact(runId, output),
     };
 }
+function sourceReferenceTokens(value) {
+    if (typeof value === "string" && value.trim())
+        return [value.trim()];
+    if (!isRecord(value))
+        return [];
+    const identityKeys = [
+        "source_id",
+        "sourceId",
+        "graph_node_id",
+        "graphNodeId",
+        "source_uri",
+        "sourceUri",
+        "uri",
+    ];
+    return identityKeys.flatMap((key) => {
+        const candidate = value[key];
+        return typeof candidate === "string" && candidate.trim() ? [candidate.trim()] : [];
+    });
+}
+function isControlMetadataReference(value) {
+    if (!isRecord(value))
+        return false;
+    if (value.ref_type === "payload_field")
+        return true;
+    const ref = typeof value.ref === "string" ? value.ref : "";
+    return /^(responsibility_plan|graph_context|coral_runtime_projection|coral_thread_context)(\.|$)/.test(ref);
+}
+function referencesOverlap(left, right) {
+    const rightTokens = new Set(sourceReferenceTokens(right));
+    return sourceReferenceTokens(left).some((token) => rightTokens.has(token));
+}
+export function validateCoralDecisionContract(args) {
+    if (args.proposals.length === 0)
+        return;
+    const typedCandidates = args.typedCandidates.filter(isRecord);
+    if (typedCandidates.length === 0) {
+        throw new RefineryError("CORAL_DECISION_CONTRACT_VIOLATION", "Decision Synthesizer emitted a memory proposal when Proposal Editor emitted no typed candidates.", { phase: "coral", details: { reason: "proposal-without-typed-candidate" } });
+    }
+    const allowedSourceTokens = new Set();
+    for (const chunk of args.sourceChunks) {
+        if (!isRecord(chunk))
+            continue;
+        for (const token of sourceReferenceTokens(chunk.id))
+            allowedSourceTokens.add(token);
+        for (const token of sourceReferenceTokens(chunk.uri))
+            allowedSourceTokens.add(token);
+        if (Array.isArray(chunk.refs)) {
+            for (const ref of chunk.refs) {
+                for (const token of sourceReferenceTokens(ref))
+                    allowedSourceTokens.add(token);
+            }
+        }
+    }
+    args.proposals.forEach((proposal, proposalIndex) => {
+        if (proposal.sourceRefs.length === 0) {
+            throw new RefineryError("CORAL_DECISION_CONTRACT_VIOLATION", `Decision proposal ${proposalIndex + 1} has no source references.`, { phase: "coral", details: { reason: "proposal-without-source-reference", proposalIndex } });
+        }
+        const inadmissible = proposal.sourceRefs.find((ref) => {
+            if (isControlMetadataReference(ref))
+                return true;
+            const tokens = sourceReferenceTokens(ref);
+            return tokens.length === 0 || !tokens.some((token) => allowedSourceTokens.has(token));
+        });
+        if (inadmissible !== undefined) {
+            throw new RefineryError("CORAL_DECISION_CONTRACT_VIOLATION", `Decision proposal ${proposalIndex + 1} cites control metadata or a reference outside the selected source chunks.`, { phase: "coral", details: { reason: "inadmissible-source-reference", proposalIndex } });
+        }
+        const matchesTypedCandidate = typedCandidates.some((typed) => {
+            if (typed.action !== proposal.action)
+                return false;
+            const typedRefs = Array.isArray(typed.source_refs) ? typed.source_refs : [];
+            return proposal.sourceRefs.every((proposalRef) => typedRefs.some((typedRef) => referencesOverlap(proposalRef, typedRef)));
+        });
+        if (!matchesTypedCandidate) {
+            throw new RefineryError("CORAL_DECISION_CONTRACT_VIOLATION", `Decision proposal ${proposalIndex + 1} was not derived from a typed candidate with the same action and evidence.`, { phase: "coral", details: { reason: "proposal-not-derived-from-typed-candidate", proposalIndex } });
+        }
+    });
+}
 function skillBundle(output) {
     const camel = output.skillCandidates;
     const snake = output.skill_candidates;
@@ -363,16 +509,43 @@ function parseSkillCandidateArtifact(runId, output) {
         })),
     };
 }
-function appendLogLines(store, prefix, chunk) {
+export function redactCoralLogText(text, secrets = []) {
+    let redacted = text.replace(/(\/llm-proxy\/)[^/\s"']+/g, "$1__redacted__");
+    for (const secret of secrets.filter((value) => value.length >= 8)) {
+        redacted = redacted.replaceAll(secret, "[REDACTED]");
+        const encoded = encodeURIComponent(secret);
+        if (encoded !== secret)
+            redacted = redacted.replaceAll(encoded, "[REDACTED]");
+    }
+    return redacted;
+}
+function appendLogLines(store, prefix, chunk, secrets = []) {
     const lines = chunk.toString("utf8").split(/\r?\n/).filter(Boolean);
     for (const line of lines)
-        store.push(`[${prefix}] ${line}`);
+        store.push(`[${prefix}] ${redactCoralLogText(line, secrets)}`);
     while (store.length > 500)
         store.shift();
 }
 function node24Bin() {
     const candidate = path.join(os.homedir(), ".nvm/versions/node/v24.10.0/bin/node");
     return fs.existsSync(candidate) ? candidate : null;
+}
+export async function reserveLoopbackPort() {
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.unref();
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+            const address = server.address();
+            if (!address || typeof address === "string") {
+                server.close();
+                reject(new Error("could not reserve a loopback port for Coral"));
+                return;
+            }
+            const port = address.port;
+            server.close((error) => error ? reject(error) : resolve(port));
+        });
+    });
 }
 function coralJavaHome() {
     const candidates = [
@@ -411,31 +584,40 @@ function startCoralServer(args) {
         javaHome ? path.join(javaHome, "bin") : null,
         process.env.PATH,
     ].filter((entry) => Boolean(entry));
-    const child = spawn("npx", ["-y", args.coralPackage, "server", "start"], {
+    const command = args.coralJar ? "java" : "npx";
+    const commandArgs = args.coralJar
+        ? ["-jar", path.resolve(args.coralJar)]
+        : ["-y", args.coralPackage, "server", "start"];
+    const logSecrets = [refineryCoralAuthKey, ...(args.logSecrets ?? []), ...Object.values(args.secretEnv ?? {})];
+    const inheritedEnv = { ...process.env };
+    delete inheritedEnv.CORAL_API_KEY;
+    delete inheritedEnv.DEEPSEEK_API_KEY;
+    const child = spawn(command, commandArgs, {
         cwd: repoRoot,
         env: {
-            ...process.env,
+            ...inheritedEnv,
+            ...args.secretEnv,
             CONFIG_FILE_PATH: configAbs,
             REFINERY_NODE_BIN: process.env.REFINERY_NODE_BIN ?? nodeBin ?? undefined,
             JAVA_HOME: process.env.JAVA_HOME ?? javaHome ?? undefined,
             PATH: pathEntries.join(":"),
         },
     });
-    child.stdout.on("data", (chunk) => appendLogLines(args.logs, "coral:stdout", chunk));
-    child.stderr.on("data", (chunk) => appendLogLines(args.logs, "coral:stderr", chunk));
+    child.stdout.on("data", (chunk) => appendLogLines(args.logs, "coral:stdout", chunk, logSecrets));
+    child.stderr.on("data", (chunk) => appendLogLines(args.logs, "coral:stderr", chunk, logSecrets));
     child.on("exit", (code, signal) => args.logs.push(`[coral:exit] code=${code ?? "null"} signal=${signal ?? "null"}`));
     return child;
 }
-function defaultRuntimeCoralConfig() {
-    return [
+function defaultRuntimeCoralConfig(options = {}) {
+    const lines = [
         "[network]",
         'bind_address = "127.0.0.1"',
         'external_address = "127.0.0.1"',
-        `bind_port = ${refineryCoralPort}`,
+        `bind_port = ${options.port ?? refineryCoralPort}`,
         "allow_any_host = true",
         "",
         "[auth]",
-        `keys = ["${refineryCoralAuthKey}"]`,
+        `keys = [${JSON.stringify(options.authKey ?? refineryCoralAuthKey)}]`,
         "",
         "[registry]",
         "include_coral_home_agents = false",
@@ -443,18 +625,54 @@ function defaultRuntimeCoralConfig() {
         "export_debug_agents = false",
         "watch_local_agents = true",
         'local_agent_rescan_timer = "10s"',
-        `local_agents = [${JSON.stringify(refineryCoralAgentGlobForRepo(repoRoot))}]`,
+        `local_agents = [${JSON.stringify(options.modernAgents
+            ? refineryCoralModernAgentGlobForRepo(repoRoot)
+            : refineryCoralAgentGlobForRepo(repoRoot))}]`,
         "",
-    ].join("\n");
+    ];
+    if (options.coralCloudProxy) {
+        lines.push("[cloud]", 'api_key = "${CORAL_API_KEY}"', "");
+    }
+    if (options.deepSeekProxy) {
+        lines.push("[[llm-proxy.providers]]", `name = ${JSON.stringify(deepSeekProxyProvider)}`, 'format = "OpenAI"', 'models = ["deepseek-v4-pro"]', 'api_key = "${DEEPSEEK_API_KEY}"', 'base_url = "https://api.deepseek.com/"', "allow_any_model = false", "");
+    }
+    return lines.join("\n");
 }
-export function resolveRuntimeCoralConfigPath(configPath) {
+export function resolveRuntimeCoralConfigPath(configPath, options = {}) {
     if (configPath !== refineryCoralConfigPath) {
         return path.isAbsolute(configPath) ? configPath : path.resolve(repoRoot, configPath);
     }
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-coral-config-"));
     const runtimeConfigPath = path.join(configDir, "refinery-config.toml");
-    fs.writeFileSync(runtimeConfigPath, defaultRuntimeCoralConfig());
+    fs.chmodSync(configDir, 0o700);
+    fs.writeFileSync(runtimeConfigPath, defaultRuntimeCoralConfig(options), { mode: 0o600 });
+    fs.chmodSync(runtimeConfigPath, 0o600);
     return runtimeConfigPath;
+}
+export function cleanupRuntimeCoralConfigPath(configPath) {
+    const configDir = path.dirname(path.resolve(configPath));
+    if (path.dirname(configDir) !== path.resolve(os.tmpdir()))
+        return;
+    if (!path.basename(configDir).startsWith("refinery-coral-config-"))
+        return;
+    fs.rmSync(configDir, { recursive: true, force: true });
+}
+function resolveCoralServerSecrets() {
+    const localEnv = loadLocalEnv(repoRoot);
+    const coralApiKey = resolveModelApiKey({ env: process.env, localEnv, cwd: repoRoot }).apiKey;
+    return {
+        coralApiKey,
+        deepSeekApiKey: process.env.DEEPSEEK_API_KEY ?? localEnv.DEEPSEEK_API_KEY ?? "",
+    };
+}
+export function selectCoralServerSecretEnv(model, secrets) {
+    if (model.transport === "direct" || model.proxyProvider === coralCloudOpenAiProxyProvider) {
+        return secrets.coralApiKey ? { CORAL_API_KEY: secrets.coralApiKey } : {};
+    }
+    if (model.proxyProvider === deepSeekProxyProvider) {
+        return secrets.deepSeekApiKey ? { DEEPSEEK_API_KEY: secrets.deepSeekApiKey } : {};
+    }
+    return {};
 }
 async function stopStartedServer(child) {
     if (!child || child.exitCode !== null || child.signalCode !== null)
@@ -524,6 +742,331 @@ function debateBranchesComplete(messages, proposalThreadId, critiqueThreadId) {
 function debateFinalComplete(messages, proposalThreadId, critiqueThreadId) {
     return debateBranchesComplete(messages, proposalThreadId, critiqueThreadId) &&
         Boolean(findMessage({ messages, step: "decision-synthesizer", threadId: proposalThreadId, phase: "proposal-synthesis" }));
+}
+function recordArray(value) {
+    return Array.isArray(value)
+        ? value.filter((item) => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+        : [];
+}
+function topicIntake(args) {
+    const chunks = recordArray(args.packet.derivedViews.source_chunks);
+    const selectedIds = new Set(args.topic.sourceChunkIds);
+    const selectedChunks = chunks.filter((chunk) => typeof chunk.id === "string" && selectedIds.has(chunk.id));
+    const selectedContext = args.packet.graph?.context.filter((context) => (context.responsibilityUnitId === args.topic.responsibilityUnitId)) ?? [];
+    const { review_packet: _reviewPacket, source_chunks: _sourceChunks, graph_context: _graphContext, ...boundedIntake } = args.intake;
+    return {
+        ...boundedIntake,
+        phase: "topic-intake",
+        topic: args.topic,
+        source_chunks: selectedChunks,
+        graph_context: selectedContext,
+        context: {
+            source_chunks: selectedChunks,
+            active_memory_hints: args.packet.derivedViews.active_memory_hints,
+            responsibility_plan: args.packet.derivedViews.responsibility_plan ?? null,
+            graph_context: selectedContext,
+            target_surfaces: args.packet.targets,
+            source_sets: args.packet.sourceSets,
+            review_intent: args.packet.objective.intent,
+            review_request: args.packet.objective.request,
+        },
+    };
+}
+async function executeSparseBlackboardReview(args) {
+    const blackboard = createSparseBlackboard(args.runId, args.packet);
+    const awakeTopics = blackboard.topics.filter((topic) => topic.state === "awake");
+    const topics = awakeTopics.length > 0 ? awakeTopics : blackboard.topics.slice(0, 1);
+    const topicThreads = [];
+    let threadCreated = false;
+    let scoutSnapshot = null;
+    let scoutMessages = [];
+    for (let index = 0; index < topics.length; index += 1) {
+        const topic = topics[index];
+        let threadId;
+        if (index === 0 && args.suppliedThreadId) {
+            threadId = args.suppliedThreadId;
+        }
+        else {
+            const created = await puppetCreateThread({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-claim-scout", {
+                threadName: `Refinery ${args.runId} topic ${index + 1}`,
+                participantNames: refineryCoralAgentNames,
+            });
+            threadId = created.thread.id;
+            threadCreated = true;
+        }
+        topicThreads.push({ topic, threadId });
+        await puppetSendMessage({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-evidence-auditor", {
+            threadId,
+            content: JSON.stringify(topicIntake({ intake: args.intake, topic, packet: args.packet })),
+            mentions: ["refinery-claim-scout"],
+        });
+        blackboard.wakeSequence.push(`claim-scout:${topic.id}`);
+        blackboard.modelCalls += 1;
+        const topicPoll = await pollReviewOutputs({
+            apiUrl: args.apiUrl,
+            authKey: args.authKey,
+            session: args.session,
+            threadIds: [threadId],
+            runId: args.runId,
+            timeoutMs: args.timeoutMs,
+            readinessSnapshots: args.readinessSnapshots,
+            topology: "sparse-blackboard",
+            complete: (messages) => Boolean(findMessage({
+                messages,
+                step: "claim-scout",
+                threadId,
+                phase: "topic-claim",
+            })),
+        });
+        scoutSnapshot = topicPoll.snapshot;
+        scoutMessages = [...scoutMessages, ...topicPoll.specialistMessages];
+        if (topicPoll.specialistMessages.some((message) => message.status === "failed"))
+            break;
+    }
+    const threadIds = topicThreads.map((topic) => topic.threadId);
+    let polled = { snapshot: scoutSnapshot, specialistMessages: scoutMessages };
+    const failedScout = polled.specialistMessages.find((message) => message.status === "failed");
+    if (failedScout)
+        return {
+            blackboard,
+            threadId: threadIds[0],
+            threadIds,
+            snapshot: polled.snapshot,
+            messages: polled.specialistMessages,
+            threadCreated,
+        };
+    blackboard.claims = topicThreads.flatMap((topic) => {
+        const message = findMessage({
+            messages: polled.specialistMessages,
+            step: "claim-scout",
+            threadId: topic.threadId,
+            phase: "topic-claim",
+        });
+        return recordArray(message?.output?.candidates);
+    });
+    const activeMemories = recordArray(args.packet.derivedViews.active_memory_hints);
+    blackboard.routing = routeSparseClaims({ candidates: blackboard.claims, activeMemories }).decision;
+    if (blackboard.claims.length === 0)
+        return {
+            blackboard,
+            threadId: threadIds[0],
+            threadIds,
+            snapshot: polled.snapshot,
+            messages: polled.specialistMessages,
+            threadCreated,
+        };
+    const synthesisThread = await puppetCreateThread({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-proposal-editor", {
+        threadName: `Refinery ${args.runId} sparse blackboard`,
+        participantNames: refineryCoralAgentNames,
+    });
+    const synthesisThreadId = synthesisThread.thread.id;
+    threadCreated = true;
+    threadIds.push(synthesisThreadId);
+    const allChunks = args.packet.derivedViews.source_chunks;
+    const claimCards = claimCardsForCritique({ runId: args.runId, claimScoutOutput: { candidates: blackboard.claims } });
+    const sharedContext = {
+        source_chunks: allChunks,
+        active_memory_hints: activeMemories,
+        claim_candidates: blackboard.claims,
+        claim_cards: claimCards,
+        responsibility_plan: args.packet.derivedViews.responsibility_plan ?? null,
+        graph_context: args.packet.derivedViews.graph_context ?? [],
+        target_surfaces: args.packet.targets,
+        source_sets: args.packet.sourceSets,
+        review_intent: args.packet.objective.intent,
+        review_request: args.packet.objective.request,
+        topology: "sparse-blackboard",
+    };
+    if (blackboard.routing.wakeCartographer) {
+        await puppetSendMessage({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-claim-scout", {
+            threadId: synthesisThreadId,
+            content: JSON.stringify({
+                ...args.intake,
+                phase: "overlap-cartography-intake",
+                context: sharedContext,
+            }),
+            mentions: ["refinery-memory-cartographer"],
+        });
+        blackboard.wakeSequence.push("memory-cartographer:overlap");
+        blackboard.modelCalls += 1;
+        polled = await pollReviewOutputs({
+            apiUrl: args.apiUrl,
+            authKey: args.authKey,
+            session: args.session,
+            threadIds,
+            runId: args.runId,
+            timeoutMs: args.timeoutMs,
+            readinessSnapshots: args.readinessSnapshots,
+            topology: "sparse-blackboard",
+            complete: (messages) => Boolean(findMessage({
+                messages,
+                step: "memory-cartographer",
+                threadId: synthesisThreadId,
+                phase: "overlap-cartography",
+            })),
+        });
+        blackboard.cartographyFindings = recordArray(findMessage({
+            messages: polled.specialistMessages,
+            step: "memory-cartographer",
+            threadId: synthesisThreadId,
+            phase: "overlap-cartography",
+        })?.output?.findings);
+    }
+    if (blackboard.routing.wakeAuditor) {
+        await puppetSendMessage({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-claim-scout", {
+            threadId: synthesisThreadId,
+            content: JSON.stringify({
+                ...args.intake,
+                phase: "risk-audit-intake",
+                claim_cards: claimCards,
+                context: sharedContext,
+            }),
+            mentions: ["refinery-evidence-auditor"],
+        });
+        blackboard.wakeSequence.push("evidence-auditor:risk");
+        blackboard.modelCalls += 1;
+        polled = await pollReviewOutputs({
+            apiUrl: args.apiUrl,
+            authKey: args.authKey,
+            session: args.session,
+            threadIds,
+            runId: args.runId,
+            timeoutMs: args.timeoutMs,
+            readinessSnapshots: args.readinessSnapshots,
+            topology: "sparse-blackboard",
+            complete: (messages) => Boolean(findMessage({
+                messages,
+                step: "evidence-auditor",
+                threadId: synthesisThreadId,
+                phase: "risk-audit",
+            })),
+        });
+        blackboard.auditFindings = recordArray(findMessage({
+            messages: polled.specialistMessages,
+            step: "evidence-auditor",
+            threadId: synthesisThreadId,
+            phase: "risk-audit",
+        })?.output?.findings);
+    }
+    let routed = routeSparseClaims({
+        candidates: blackboard.claims,
+        activeMemories,
+        cartographyFindings: blackboard.cartographyFindings,
+        auditFindings: blackboard.auditFindings,
+    });
+    blackboard.routing = routed.decision;
+    if (!blackboard.routing.wakeProposalEditor)
+        return {
+            blackboard,
+            threadId: threadIds[0],
+            threadIds,
+            snapshot: polled.snapshot,
+            messages: polled.specialistMessages,
+            threadCreated,
+        };
+    await puppetSendMessage({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-evidence-auditor", {
+        threadId: synthesisThreadId,
+        content: JSON.stringify({
+            schemaVersion: refineryReviewSchemaVersion,
+            type: "refinery-review-intake",
+            runId: args.runId,
+            topology: "sparse-blackboard",
+            phase: "survivor-proposal-intake",
+            output: { findings: [...blackboard.cartographyFindings, ...blackboard.auditFindings] },
+            context: { ...sharedContext, claim_candidates: routed.survivors },
+        }),
+        mentions: ["refinery-proposal-editor"],
+    });
+    blackboard.wakeSequence.push("proposal-editor:survivors");
+    blackboard.modelCalls += 1;
+    polled = await pollReviewOutputs({
+        apiUrl: args.apiUrl,
+        authKey: args.authKey,
+        session: args.session,
+        threadIds,
+        runId: args.runId,
+        timeoutMs: args.timeoutMs,
+        readinessSnapshots: args.readinessSnapshots,
+        topology: "sparse-blackboard",
+        complete: (messages) => Boolean(findMessage({
+            messages,
+            step: "proposal-editor",
+            threadId: synthesisThreadId,
+            phase: "survivor-proposal",
+        })),
+    });
+    const proposalEditor = findMessage({
+        messages: polled.specialistMessages,
+        step: "proposal-editor",
+        threadId: synthesisThreadId,
+        phase: "survivor-proposal",
+    });
+    blackboard.typedCandidates = recordArray(proposalEditor?.output?.typed);
+    routed = routeSparseClaims({
+        candidates: blackboard.claims,
+        activeMemories,
+        cartographyFindings: blackboard.cartographyFindings,
+        auditFindings: blackboard.auditFindings,
+        typedCandidates: blackboard.typedCandidates,
+    });
+    blackboard.routing = routed.decision;
+    if (!blackboard.routing.wakeDecisionSynthesizer)
+        return {
+            blackboard,
+            threadId: threadIds[0],
+            threadIds,
+            snapshot: polled.snapshot,
+            messages: polled.specialistMessages,
+            threadCreated,
+        };
+    await puppetSendMessage({ apiUrl: args.apiUrl, authKey: args.authKey }, args.session, "refinery-proposal-editor", {
+        threadId: synthesisThreadId,
+        content: JSON.stringify({
+            schemaVersion: refineryReviewSchemaVersion,
+            type: "refinery-review-merge",
+            runId: args.runId,
+            topology: "sparse-blackboard",
+            phase: "candidate-synthesis-intake",
+            proposal_editor_output: { typed: blackboard.typedCandidates },
+            context: {
+                ...sharedContext,
+                claim_cards: claimCards,
+                debate_critique: {
+                    topology: "sparse-blackboard",
+                    cartographyFindings: blackboard.cartographyFindings,
+                    auditFindings: blackboard.auditFindings,
+                    routing: blackboard.routing,
+                },
+            },
+        }),
+        mentions: ["refinery-decision-synthesizer"],
+    });
+    blackboard.wakeSequence.push("decision-synthesizer:candidates");
+    blackboard.modelCalls += 1;
+    polled = await pollReviewOutputs({
+        apiUrl: args.apiUrl,
+        authKey: args.authKey,
+        session: args.session,
+        threadIds,
+        runId: args.runId,
+        timeoutMs: args.timeoutMs,
+        readinessSnapshots: args.readinessSnapshots,
+        topology: "sparse-blackboard",
+        complete: (messages) => Boolean(findMessage({
+            messages,
+            step: "decision-synthesizer",
+            threadId: synthesisThreadId,
+            phase: "candidate-synthesis",
+        })),
+    });
+    return {
+        blackboard,
+        threadId: threadIds[0],
+        threadIds,
+        snapshot: polled.snapshot,
+        messages: polled.specialistMessages,
+        threadCreated,
+    };
 }
 function transcriptFromSnapshot(snapshot, threadIds) {
     if (!snapshot)
@@ -609,14 +1152,22 @@ export async function startCoralConsoleRun(options) {
     const request = options.packet.objective.request;
     const coral = options.coral ?? {};
     const topology = coral.topology ?? defaultReviewTopology;
-    const apiUrl = coral.apiUrl ?? `http://localhost:${refineryCoralPort}`;
-    const authKey = coral.authKey ?? refineryCoralAuthKey;
-    const configPath = resolveRuntimeCoralConfigPath(coral.configPath ?? refineryCoralConfigPath);
     const startServer = coral.startServer ?? !coral.apiUrl;
     const serverMode = startServer ? "managed" : "attached";
     const namespace = coral.namespace ?? `refinery-${options.runId}`;
     const timeoutMs = coral.timeoutMs ?? defaultCoralReviewTimeoutMs(topology);
     const configuredModel = resolveConfiguredModel(coral);
+    const coralJar = coral.coralJar ?? process.env.REFINERY_CORAL_SERVER_JAR;
+    const serverSecrets = resolveCoralServerSecrets();
+    const selectedServerSecretEnv = selectCoralServerSecretEnv(configuredModel, serverSecrets);
+    const requestedConfigPath = coral.configPath ?? refineryCoralConfigPath;
+    const generatedDefaultConfig = startServer && requestedConfigPath === refineryCoralConfigPath;
+    const managedPort = generatedDefaultConfig && !coral.apiUrl ? await reserveLoopbackPort() : refineryCoralPort;
+    const apiUrl = coral.apiUrl ?? `http://127.0.0.1:${managedPort}`;
+    const authKey = coral.authKey ?? (generatedDefaultConfig ? crypto.randomBytes(32).toString("base64url") : refineryCoralAuthKey);
+    let configPath = path.isAbsolute(requestedConfigPath) ? requestedConfigPath : path.resolve(repoRoot, requestedConfigPath);
+    let generatedConfigPath = null;
+    const runtimeProjection = buildCoralCommunicationProjection(topology, options.packet.graph?.plan.responsibilityUnits ?? []);
     const logs = [];
     const readinessSnapshots = [];
     const seededMessages = [];
@@ -624,23 +1175,76 @@ export async function startCoralConsoleRun(options) {
     let session = null;
     let sessionCreated = false;
     let closed = false;
+    let runtimeCapabilities = null;
+    const teardownRuntime = async () => {
+        try {
+            if (session && sessionCreated && !coral.noTeardown) {
+                await closeSession({ apiUrl, authKey }, session);
+            }
+        }
+        finally {
+            try {
+                await stopStartedServer(child);
+            }
+            finally {
+                if (generatedConfigPath)
+                    cleanupRuntimeCoralConfigPath(generatedConfigPath);
+            }
+        }
+    };
     try {
+        if (configuredModel.transport === "coral-server-proxy" && startServer && !coralJar) {
+            throw new RefineryError("CORAL_SERVER_PROXY_REQUIRES_MODERN_RUNTIME", "Managed Coral LLM proxy mode requires Coral Server 1.4+ via --coral-jar or REFINERY_CORAL_SERVER_JAR.", { phase: "coral", runId: options.runId });
+        }
+        if (configuredModel.transport === "coral-server-proxy"
+            && configuredModel.proxyProvider === deepSeekProxyProvider
+            && startServer
+            && !serverSecrets.deepSeekApiKey) {
+            throw new RefineryError("CORAL_MODEL_PROVIDER_AUTH_MISSING", "DeepSeek V4 Pro requires DEEPSEEK_API_KEY for the self-hosted Coral proxy; the Coral Cloud key does not currently expose this model.", { phase: "coral", runId: options.runId, details: { modelName: configuredModel.modelName, proxyProvider: configuredModel.proxyProvider } });
+        }
+        if (configuredModel.transport === "coral-server-proxy"
+            && configuredModel.proxyProvider === coralCloudOpenAiProxyProvider
+            && startServer
+            && !serverSecrets.coralApiKey) {
+            throw new RefineryError("CORAL_MODEL_PROVIDER_AUTH_MISSING", "Coral Cloud proxy mode requires CORAL_API_KEY or stored Coral auth.", { phase: "coral", runId: options.runId, details: { modelName: configuredModel.modelName, proxyProvider: configuredModel.proxyProvider } });
+        }
+        if (startServer) {
+            configPath = resolveRuntimeCoralConfigPath(requestedConfigPath, {
+                modernAgents: configuredModel.transport === "coral-server-proxy",
+                coralCloudProxy: configuredModel.transport === "coral-server-proxy"
+                    && configuredModel.proxyProvider === coralCloudOpenAiProxyProvider,
+                deepSeekProxy: configuredModel.transport === "coral-server-proxy"
+                    && configuredModel.proxyProvider === deepSeekProxyProvider,
+                port: managedPort,
+                authKey,
+            });
+            if (requestedConfigPath === refineryCoralConfigPath)
+                generatedConfigPath = configPath;
+        }
         const intake = buildReviewIntake({
             runId: options.runId,
             packet: options.packet,
             intent,
             request,
             topology,
+            runtimeProjection,
         });
         if (startServer && !(await isServerReady(apiUrl, authKey))) {
             child = startCoralServer({
                 configPath,
                 coralPackage: coral.coralPackage ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
+                coralJar,
+                secretEnv: selectedServerSecretEnv,
+                logSecrets: [authKey],
                 logs,
             });
         }
         if (!(await waitForServer(apiUrl, authKey, 60_000))) {
             throw new RefineryError("CORAL_SERVER_UNREACHABLE", `Coral server was not reachable at ${apiUrl}.`, { phase: "coral", runId: options.runId });
+        }
+        runtimeCapabilities = await inspectCoralRuntimeCapabilities(apiUrl);
+        if (configuredModel.transport === "coral-server-proxy" && !runtimeCapabilities.graphAgentProxyOverrides) {
+            throw new RefineryError("CORAL_SERVER_PROXY_UNSUPPORTED", "The running Coral Server does not expose GraphAgentRequest.proxies; use Coral Server 1.4+ or disable --coral-llm-proxy.", { phase: "coral", runId: options.runId, details: runtimeCapabilities });
         }
         const registry = [];
         for (const agentName of refineryCoralAgentNames) {
@@ -663,9 +1267,12 @@ export async function startCoralConsoleRun(options) {
                 modelName: configuredModel.modelName,
                 modelBaseUrl: configuredModel.baseUrl,
                 reasoningEffort: configuredModel.reasoningEffort,
-                maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? (topology === "debate-critique" ? "3" : "2"),
+                maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? (topology === "sparse-blackboard"
+                    ? String(Math.max(4, runtimeProjection.attachments.filter((attachment) => attachment.responsibilityState === "awake").length + 4))
+                    : topology === "debate-critique" ? "3" : "2"),
                 ttlMs: Math.max(timeoutMs + 60_000, 30 * 60_000),
                 holdAfterExitMs: Math.max(timeoutMs + 60_000, 30 * 60_000),
+                topology,
             }));
             sessionCreated = true;
         }
@@ -686,7 +1293,35 @@ export async function startCoralConsoleRun(options) {
                 textExcerpt: compactText(message.text),
             });
         };
-        if (topology === "debate-critique") {
+        if (topology === "sparse-blackboard") {
+            const blackboard = createSparseBlackboard(options.runId, options.packet);
+            const awakeTopics = blackboard.topics.filter((topic) => topic.state === "awake");
+            const topics = awakeTopics.length > 0 ? awakeTopics : blackboard.topics.slice(0, 1);
+            threadIds = [];
+            for (let index = 0; index < topics.length; index += 1) {
+                const topic = topics[index];
+                let topicThreadId;
+                if (index === 0 && coral.threadId) {
+                    topicThreadId = coral.threadId;
+                }
+                else {
+                    const created = await puppetCreateThread({ apiUrl, authKey }, session, "refinery-claim-scout", {
+                        threadName: `Refinery console ${options.runId} topic ${index + 1}`,
+                        participantNames: refineryCoralAgentNames,
+                    });
+                    topicThreadId = created.thread.id;
+                }
+                threadIds.push(topicThreadId);
+                const seed = await puppetSendMessage({ apiUrl, authKey }, session, "refinery-evidence-auditor", {
+                    threadId: topicThreadId,
+                    content: JSON.stringify(topicIntake({ intake, topic, packet: options.packet })),
+                    mentions: ["refinery-claim-scout"],
+                });
+                rememberSeed(seed.message);
+            }
+            threadId = threadIds[0];
+        }
+        else if (topology === "debate-critique") {
             if (coral.threadId) {
                 proposalThreadId = coral.threadId;
             }
@@ -740,10 +1375,7 @@ export async function startCoralConsoleRun(options) {
             if (closed)
                 return;
             closed = true;
-            if (session && sessionCreated && !coral.noTeardown) {
-                await closeSession({ apiUrl, authKey }, session);
-            }
-            await stopStartedServer(child);
+            await teardownRuntime();
         };
         return {
             managedServerStarted: Boolean(child),
@@ -783,6 +1415,13 @@ export async function startCoralConsoleRun(options) {
                     topology,
                     serverMode,
                     managedServerStarted: Boolean(child),
+                    model: {
+                        name: configuredModel.modelName,
+                        transport: configuredModel.transport,
+                        proxyProvider: configuredModel.proxyProvider,
+                    },
+                    runtimeCapabilities: runtimeCapabilities,
+                    runtimeProjection,
                 },
                 seededMessages,
                 next: `Open ${buildConsoleUrl(apiUrl, "/ui/console")} and inspect namespace ${session.namespace}, session ${session.sessionId}.`,
@@ -790,10 +1429,7 @@ export async function startCoralConsoleRun(options) {
         };
     }
     catch (error) {
-        if (session && sessionCreated && !coral.noTeardown) {
-            await closeSession({ apiUrl, authKey }, session);
-        }
-        await stopStartedServer(child);
+        await teardownRuntime().catch(() => { });
         throw applyErrorContext(asRefineryError(error, { code: "CORAL_CONSOLE_FAILED" }), {
             phase: "coral",
             runId: options.runId,
@@ -807,14 +1443,22 @@ export async function runCoralReview(options) {
     const request = options.packet.objective.request;
     const coral = options.coral ?? {};
     const topology = coral.topology ?? defaultReviewTopology;
-    const apiUrl = coral.apiUrl ?? `http://localhost:${refineryCoralPort}`;
-    const authKey = coral.authKey ?? refineryCoralAuthKey;
-    const configPath = resolveRuntimeCoralConfigPath(coral.configPath ?? refineryCoralConfigPath);
     const startServer = coral.startServer ?? !coral.apiUrl;
     const serverMode = startServer ? "managed" : "attached";
     const namespace = coral.namespace ?? `refinery-${options.runId}`;
     const timeoutMs = coral.timeoutMs ?? defaultCoralReviewTimeoutMs(topology);
     const configuredModel = resolveConfiguredModel(coral);
+    const coralJar = coral.coralJar ?? process.env.REFINERY_CORAL_SERVER_JAR;
+    const serverSecrets = resolveCoralServerSecrets();
+    const selectedServerSecretEnv = selectCoralServerSecretEnv(configuredModel, serverSecrets);
+    const requestedConfigPath = coral.configPath ?? refineryCoralConfigPath;
+    const generatedDefaultConfig = startServer && requestedConfigPath === refineryCoralConfigPath;
+    const managedPort = generatedDefaultConfig && !coral.apiUrl ? await reserveLoopbackPort() : refineryCoralPort;
+    const apiUrl = coral.apiUrl ?? `http://127.0.0.1:${managedPort}`;
+    const authKey = coral.authKey ?? (generatedDefaultConfig ? crypto.randomBytes(32).toString("base64url") : refineryCoralAuthKey);
+    let configPath = path.isAbsolute(requestedConfigPath) ? requestedConfigPath : path.resolve(repoRoot, requestedConfigPath);
+    let generatedConfigPath = null;
+    const runtimeProjection = buildCoralCommunicationProjection(topology, options.packet.graph?.plan.responsibilityUnits ?? []);
     const logs = [];
     const readinessSnapshots = [];
     let child = null;
@@ -823,20 +1467,55 @@ export async function runCoralReview(options) {
     let threadIds = [];
     let proposalThreadId = null;
     let critiqueThreadId = null;
+    let sparseBlackboard = null;
     let sessionCreated = false;
     let threadCreated = false;
     let finalSnapshot = null;
     let specialistMessages = [];
+    let runtimeCapabilities = null;
     fs.mkdirSync(runDir, { recursive: true });
     try {
+        if (configuredModel.transport === "coral-server-proxy" && startServer && !coralJar) {
+            throw new RefineryError("CORAL_SERVER_PROXY_REQUIRES_MODERN_RUNTIME", "Managed Coral LLM proxy mode requires Coral Server 1.4+ via --coral-jar or REFINERY_CORAL_SERVER_JAR.", { phase: "coral", runId: options.runId, runDir });
+        }
+        if (configuredModel.transport === "coral-server-proxy"
+            && configuredModel.proxyProvider === deepSeekProxyProvider
+            && startServer
+            && !serverSecrets.deepSeekApiKey) {
+            throw new RefineryError("CORAL_MODEL_PROVIDER_AUTH_MISSING", "DeepSeek V4 Pro requires DEEPSEEK_API_KEY for the self-hosted Coral proxy; the Coral Cloud key does not currently expose this model.", { phase: "coral", runId: options.runId, runDir, details: { modelName: configuredModel.modelName, proxyProvider: configuredModel.proxyProvider } });
+        }
+        if (configuredModel.transport === "coral-server-proxy"
+            && configuredModel.proxyProvider === coralCloudOpenAiProxyProvider
+            && startServer
+            && !serverSecrets.coralApiKey) {
+            throw new RefineryError("CORAL_MODEL_PROVIDER_AUTH_MISSING", "Coral Cloud proxy mode requires CORAL_API_KEY or stored Coral auth.", { phase: "coral", runId: options.runId, runDir, details: { modelName: configuredModel.modelName, proxyProvider: configuredModel.proxyProvider } });
+        }
+        if (startServer) {
+            configPath = resolveRuntimeCoralConfigPath(requestedConfigPath, {
+                modernAgents: configuredModel.transport === "coral-server-proxy",
+                coralCloudProxy: configuredModel.transport === "coral-server-proxy"
+                    && configuredModel.proxyProvider === coralCloudOpenAiProxyProvider,
+                deepSeekProxy: configuredModel.transport === "coral-server-proxy"
+                    && configuredModel.proxyProvider === deepSeekProxyProvider,
+                port: managedPort,
+                authKey,
+            });
+            if (requestedConfigPath === refineryCoralConfigPath)
+                generatedConfigPath = configPath;
+        }
         const intake = buildReviewIntake({
             runId: options.runId,
             packet: options.packet,
             intent,
             request,
             topology,
+            runtimeProjection,
         });
         writeJson(path.join(runDir, "input.json"), options.packet);
+        if (options.packet.graph) {
+            writeJson(path.join(runDir, "responsibility-plan.json"), options.packet.graph.plan);
+            writeJson(path.join(runDir, "graph-context.json"), options.packet.graph.context);
+        }
         writeJson(path.join(runDir, "source-counts.json"), {
             runId: options.runId,
             sourceSets: options.packet.sourceSets.map((sourceSet) => ({
@@ -852,11 +1531,18 @@ export async function runCoralReview(options) {
             child = startCoralServer({
                 configPath,
                 coralPackage: coral.coralPackage ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
+                coralJar,
+                secretEnv: selectedServerSecretEnv,
+                logSecrets: [authKey],
                 logs,
             });
         }
         if (!(await waitForServer(apiUrl, authKey, 60_000))) {
             throw new RefineryError("CORAL_SERVER_UNREACHABLE", `Coral server was not reachable at ${apiUrl}.`, { phase: "coral", runId: options.runId, runDir });
+        }
+        runtimeCapabilities = await inspectCoralRuntimeCapabilities(apiUrl);
+        if (configuredModel.transport === "coral-server-proxy" && !runtimeCapabilities.graphAgentProxyOverrides) {
+            throw new RefineryError("CORAL_SERVER_PROXY_UNSUPPORTED", "The running Coral Server does not expose GraphAgentRequest.proxies; use Coral Server 1.4+ or disable --coral-llm-proxy.", { phase: "coral", runId: options.runId, runDir, details: runtimeCapabilities });
         }
         const registry = [];
         for (const agentName of refineryCoralAgentNames) {
@@ -879,9 +1565,16 @@ export async function runCoralReview(options) {
                 modelName: configuredModel.modelName,
                 modelBaseUrl: configuredModel.baseUrl,
                 reasoningEffort: configuredModel.reasoningEffort,
-                maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? (topology === "debate-critique" ? "3" : "2"),
+                maxTurns: coral.maxTurns ?? process.env.REFINERY_CORAL_MAX_TURNS ?? (topology === "sparse-blackboard"
+                    ? String(Math.max(4, runtimeProjection.attachments.filter((attachment) => attachment.responsibilityState === "awake").length + 4))
+                    : topology === "debate-critique" ? "3" : "2"),
                 ttlMs: Math.max(timeoutMs + 60_000, 180_000),
                 holdAfterExitMs: Math.max(timeoutMs + 60_000, 180_000),
+                topology,
+                llmProxy: {
+                    enabled: configuredModel.transport === "coral-server-proxy",
+                    configurationName: configuredModel.proxyProvider ?? undefined,
+                },
             }));
             sessionCreated = true;
         }
@@ -889,7 +1582,27 @@ export async function runCoralReview(options) {
         if (!ready.ok) {
             throw new RefineryError("CORAL_AGENTS_NOT_READY", `Agents did not reach readiness. stopped=${ready.stopped.join(",") || "none"}`, { phase: "coral", runId: options.runId, runDir, details: ready.snapshot });
         }
-        if (topology === "debate-critique") {
+        if (topology === "sparse-blackboard") {
+            const sparse = await executeSparseBlackboardReview({
+                apiUrl,
+                authKey,
+                session,
+                runId: options.runId,
+                packet: options.packet,
+                intake,
+                timeoutMs,
+                readinessSnapshots,
+                suppliedThreadId: coral.threadId,
+            });
+            sparseBlackboard = sparse.blackboard;
+            threadId = sparse.threadId;
+            threadIds = sparse.threadIds;
+            finalSnapshot = sparse.snapshot;
+            specialistMessages = sparse.messages;
+            threadCreated = sparse.threadCreated;
+            writeJson(path.join(runDir, "blackboard.json"), sparseBlackboard);
+        }
+        else if (topology === "debate-critique") {
             if (coral.threadId) {
                 proposalThreadId = coral.threadId;
             }
@@ -955,6 +1668,8 @@ export async function runCoralReview(options) {
                     context: {
                         source_chunks: options.packet.derivedViews.source_chunks,
                         active_memory_hints: options.packet.derivedViews.active_memory_hints,
+                        responsibility_plan: options.packet.derivedViews.responsibility_plan ?? null,
+                        graph_context: options.packet.derivedViews.graph_context ?? [],
                         review_intent: intent,
                         review_request: request,
                         intent_description: describeReviewIntent(intent),
@@ -1036,9 +1751,13 @@ export async function runCoralReview(options) {
                 scope: options.packet.objective.scope,
                 intent,
                 request,
+                responsibility_plan: options.packet.derivedViews.responsibility_plan ?? null,
+                graph_context: options.packet.derivedViews.graph_context ?? [],
                 context: {
                     source_chunks: options.packet.derivedViews.source_chunks,
                     active_memory_hints: options.packet.derivedViews.active_memory_hints,
+                    responsibility_plan: options.packet.derivedViews.responsibility_plan ?? null,
+                    graph_context: options.packet.derivedViews.graph_context ?? [],
                     review_intent: intent,
                     review_request: request,
                     intent_description: describeReviewIntent(intent),
@@ -1111,19 +1830,53 @@ export async function runCoralReview(options) {
             throw failedSpecialistError({ runDir, runId: options.runId, message: failedMessage });
         }
         const byStep = outputMap(specialistMessages, topology);
-        const missingSteps = reviewStepOrder.filter((step) => !byStep.has(step));
+        const requiredSteps = topology === "sparse-blackboard" && sparseBlackboard
+            ? [
+                ...(sparseBlackboard.modelCalls > 0 ? ["claim-scout"] : []),
+                ...(sparseBlackboard.routing.wakeCartographer ? ["memory-cartographer"] : []),
+                ...(sparseBlackboard.routing.wakeAuditor ? ["evidence-auditor"] : []),
+                ...(sparseBlackboard.routing.wakeProposalEditor ? ["proposal-editor"] : []),
+                ...(sparseBlackboard.routing.wakeDecisionSynthesizer ? ["decision-synthesizer"] : []),
+            ]
+            : reviewStepOrder;
+        const missingSteps = requiredSteps.filter((step) => !byStep.has(step));
         if (missingSteps.length > 0) {
             throw new RefineryError("CORAL_REVIEW_INCOMPLETE", `Coral review did not emit all specialist outputs. Missing: ${missingSteps.join(", ")}`, { phase: "coral", runId: options.runId, runDir, details: { missingSteps, specialistMessages } });
         }
         const decisionSynthesis = byStep.get("decision-synthesizer");
-        if (!decisionSynthesis)
+        if (!decisionSynthesis && topology !== "sparse-blackboard")
             throw new Error("Missing decision-synthesizer output.");
-        const parsedDecision = parseDecisionSynthesizerOutput(options.runId, decisionSynthesis.output ?? {});
+        const parsedDecision = parseDecisionSynthesizerOutput(options.runId, decisionSynthesis?.output ?? { proposals: [], rejected: [] });
+        const proposalEditorOutput = byStep.get("proposal-editor")?.output;
+        validateCoralDecisionContract({
+            sourceChunks: options.packet.derivedViews.source_chunks,
+            typedCandidates: isRecord(proposalEditorOutput) && Array.isArray(proposalEditorOutput.typed)
+                ? proposalEditorOutput.typed
+                : [],
+            proposals: parsedDecision.proposals,
+        });
         parsedDecision.proposals = parsedDecision.proposals.map((proposal) => ({
             ...proposal,
             intent,
         }));
         const evidenceReview = byStep.get("evidence-auditor")?.output ?? { findings: [] };
+        const usage = summarizeCoralUsage(specialistMessages);
+        writeJson(path.join(runDir, "paid-run.json"), {
+            schemaVersion: "refinery.paid-run.v1",
+            runId: options.runId,
+            hypothesis: options.hypothesis?.trim() || null,
+            topology,
+            model: configuredModel.modelName,
+            provider: configuredModel.proxyProvider,
+            status: "succeeded",
+            usage,
+            outcome: {
+                proposalCount: parsedDecision.proposals.length,
+                rejectedCount: parsedDecision.rejected.length,
+                unsupportedFinalProposals: 0,
+                citationContractValidated: true,
+            },
+        });
         const deliberation = buildDeliberationArtifacts({
             runId: options.runId,
             topology,
@@ -1145,7 +1898,9 @@ export async function runCoralReview(options) {
         const runtime = {
             kind: "coral",
             topology,
-            topologyDesign: topology === "debate-critique" ? "claim-centered-interruptible" : "pipeline",
+            topologyDesign: topology === "sparse-blackboard"
+                ? "app-owned-topic-blackboard"
+                : topology === "debate-critique" ? "claim-centered-interruptible" : "pipeline",
             serverMode,
             apiUrl,
             authKeyPresent: Boolean(authKey),
@@ -1162,6 +1917,10 @@ export async function runCoralReview(options) {
             threadCreated,
             noTeardown: Boolean(coral.noTeardown),
             model: configuredModel,
+            runtimeCapabilities,
+            runtimeProjection,
+            sparseBlackboard,
+            usage,
             sourceSets: options.packet.sourceSets,
             targets: options.packet.targets,
         };
@@ -1182,6 +1941,10 @@ export async function runCoralReview(options) {
             sessionCreated,
             threadCreated,
             model: configuredModel,
+            runtimeCapabilities,
+            runtimeProjection,
+            sparseBlackboard,
+            usage,
             sourceSets: options.packet.sourceSets,
             targets: options.packet.targets,
             readinessSnapshots,
@@ -1205,15 +1968,17 @@ export async function runCoralReview(options) {
             sinkUrl: options.sink?.url ?? null,
             runtime,
             model: configuredModel,
-            specialistOrder: topology === "debate-critique"
-                ? [
-                    "proposal:claim-scout",
-                    "proposal:memory-cartographer",
-                    "critique:evidence-auditor",
-                    "proposal:proposal-editor",
-                    "proposal:decision-synthesizer",
-                ]
-                : reviewStepOrder,
+            specialistOrder: topology === "sparse-blackboard" && sparseBlackboard
+                ? sparseBlackboard.wakeSequence
+                : topology === "debate-critique"
+                    ? [
+                        "proposal:claim-scout",
+                        "proposal:memory-cartographer",
+                        "critique:evidence-auditor",
+                        "proposal:proposal-editor",
+                        "proposal:decision-synthesizer",
+                    ]
+                    : reviewStepOrder,
             sourceLimit: options.packet.limits.sourceLimit,
             sourceCharLimit: options.packet.limits.sourceCharLimit,
             intent,
@@ -1255,6 +2020,14 @@ export async function runCoralReview(options) {
                 threadId: threadId ?? threadIds[0] ?? "",
                 threadIds,
                 agents: refineryCoralAgentNames,
+                model: {
+                    name: configuredModel.modelName,
+                    transport: configuredModel.transport,
+                    proxyProvider: configuredModel.proxyProvider,
+                },
+                runtimeCapabilities: runtimeCapabilities,
+                runtimeProjection,
+                usage,
             },
             metadata,
         };
@@ -1297,6 +2070,21 @@ export async function runCoralReview(options) {
             phase: "coral",
             runId: options.runId,
             runDir,
+        });
+        const usage = summarizeCoralUsage(specialistMessages);
+        writeJson(path.join(runDir, "paid-run.json"), {
+            schemaVersion: "refinery.paid-run.v1",
+            runId: options.runId,
+            hypothesis: options.hypothesis?.trim() || null,
+            topology,
+            model: configuredModel.modelName,
+            provider: configuredModel.proxyProvider,
+            status: "failed",
+            usage,
+            outcome: {
+                errorCode: refineryError.code,
+                phase: refineryError.phase,
+            },
         });
         writeJson(path.join(runDir, "coral.json"), {
             schemaVersion: "refinery.coral-review.v1",
@@ -1342,9 +2130,19 @@ export async function runCoralReview(options) {
     finally {
         if (logs.length > 0)
             fs.writeFileSync(path.join(runDir, "server.log"), `${logs.join("\n")}\n`);
-        if (session && sessionCreated && !coral.noTeardown)
-            await closeSession({ apiUrl, authKey }, session);
-        await stopStartedServer(child);
+        try {
+            if (session && sessionCreated && !coral.noTeardown)
+                await closeSession({ apiUrl, authKey }, session);
+        }
+        finally {
+            try {
+                await stopStartedServer(child);
+            }
+            finally {
+                if (generatedConfigPath)
+                    cleanupRuntimeCoralConfigPath(generatedConfigPath);
+            }
+        }
     }
 }
 //# sourceMappingURL=review-conductor.js.map

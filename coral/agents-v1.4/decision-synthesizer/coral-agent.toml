@@ -1,0 +1,28 @@
+edition = 4
+
+[agent]
+name = "refinery-decision-synthesizer"
+version = "0.1.0"
+description = "Refinery Decision Synthesizer specialist as a Coral executable agent."
+summary = "Decision Synthesizer merges proposal and critique evidence."
+readme = "Executable Refinery specialist using Coral Server 1.4 model proxy injection."
+
+[agent.license]
+type = "spdx"
+expression = "MIT"
+
+[[llm.proxies]]
+name = "MAIN"
+format.type = "OpenAI"
+models = ["gpt-5.4-nano", "deepseek-v4-pro"]
+
+[options]
+MODEL_NAME = { type = "string", default = "gpt-5.4-nano" }
+MODEL_BASE_URL = { type = "string", default = "https://llm.coralcloud.ai/openai/v1" }
+REASONING_EFFORT = { type = "string", default = "low" }
+REFINERY_CORAL_MAX_TURNS = { type = "string", default = "1" }
+
+[runtimes.executable]
+path = "../../agents/run-worker.sh"
+arguments = ["--specialist", "decision-synthesizer"]
+transport = "streamable_http"

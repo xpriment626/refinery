@@ -47,6 +47,49 @@ If `refinery` is not installed, install the package first:
 npm i -g @itsshadowai/refinery
 ```
 
+## Update Notices
+
+The CLI may print a best-effort notice on stderr when a newer public npm
+version is available. Treat that as a prompt to ask the human user whether to
+install the suggested version. Never install or publish an update without
+explicit human confirmation. Use `--no-update-check` or
+`REFINERY_NO_UPDATE_CHECK=1` when the user wants the check disabled.
+
+## Local Graph UI
+
+Use the local observability UI when the user asks to see the graph, retrieval
+reasoning, provenance, revisions, sync activity, or gateway health. Prefer the
+agent-readable URL flow:
+
+```bash
+refinery ui url --project "$PWD" --json
+```
+
+Open the returned local capability URL in Codex's in-app browser when browser
+control is available. Otherwise report the URL so the human can paste it into a
+browser. Treat the full capability URL as a local secret: do not publish it,
+include it in logs or artifacts, or send it outside the local machine.
+
+The UI is observability-only. Do not describe it as editing memory, approving
+proposals, or coordinating agents. Use these commands for explicit lifecycle
+and diagnostics:
+
+```bash
+refinery gateway start --project "$PWD" --json
+refinery gateway status --project "$PWD" --json
+refinery gateway stop --project "$PWD" --json
+```
+
+Automatic browser opening after graph sync is off by default. If enabling it
+would help, ask the human first, then apply their choice with:
+
+```bash
+refinery ui config --browser-open on --project "$PWD" --json
+```
+
+Use `--browser-open off` to disable it. A browser-open failure is non-fatal;
+fall back to `refinery ui url --json`.
+
 ## Slice Controls
 
 Map the user's requested source slice onto the current CLI controls:
@@ -88,6 +131,29 @@ refinery sources inspect \
   --project "$PWD" \
   --json
 ```
+
+For graph-backed retrieval, inspect the derived project graph and the bounded
+responsibility plan without invoking Coral:
+
+```bash
+refinery graph sync \
+  --source "<source spec>" \
+  --project "$PWD" \
+  --json
+
+refinery graph plan \
+  --project "$PWD" \
+  --request "<user slice and review request>" \
+  --max-nodes 12 \
+  --max-edges 24 \
+  --max-hops 2 \
+  --json
+```
+
+Normal `refinery review` runs sync and use the responsibility graph by default.
+Do not add `--no-graph` unless the user explicitly requests legacy behavior.
+If graph preparation fails, report the structured graph error; do not retry by
+broadening to the pre-graph source context.
 
 ## Live Review Command
 
@@ -165,8 +231,9 @@ refinery trial inspect --run-dir "<runDir>" --json
 ```
 
 For failed live runs, inspect `status.json`, `review.json`, `coral.json`,
-`server.log`, and `steps/*/messages/*/` inside `runDir` before deciding whether
-the failure was startup, model output, merge, or timeout related.
+`responsibility-plan.json`, `graph-context.json`, `server.log`, and
+`steps/*/messages/*/` inside `runDir` before deciding whether the failure was
+graph preparation, startup, model output, merge, or timeout related.
 
 ## Reporting
 
@@ -174,6 +241,8 @@ Summarize the Refinery result in plain language:
 
 - live or fixture mode, run id, and run directory
 - source specs, target surfaces, and slice controls used
+- responsibility-plan id, awake seeds, sleeping one-hop units, exclusions, and
+  exhausted traversal budgets when graph context is present
 - counts for proposals, rejected candidates, claims, challenges, and unresolved
   challenges when present
 - each proposed edit: action, memory type, scope, target memory id(s), body or

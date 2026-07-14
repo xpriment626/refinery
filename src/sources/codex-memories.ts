@@ -146,7 +146,6 @@ function metadataFor(relPath: string, text: string, originKind: CodexOriginKind)
     metadata.rolloutPath = firstMetadataValue(text, "rollout_path");
     metadata.cwd = firstMetadataValue(text, "cwd");
   }
-  Object.assign(metadata, parseRolloutListMetadata(text));
   return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== null && value !== undefined));
 }
 
@@ -177,13 +176,13 @@ function loadMarkdownDocuments(memoryHome: string): CodexMarkdownDocument[] {
   return docs;
 }
 
-function toSourceDocument(doc: CodexMarkdownDocument): CodexMemorySourceDocument {
+function toSourceDocument(doc: CodexMarkdownDocument, maxChars = 8000): CodexMemorySourceDocument {
   return {
     id: hashId("codex-source", [doc.relPath, doc.text]),
     role: doc.sourceKind,
     relPath: doc.relPath,
     absPath: doc.absPath,
-    text: compactText(doc.text, 8000),
+    text: compactText(doc.text, maxChars),
     refs: [{ source_path: doc.relPath, origin_kind: doc.originKind }],
     metadata: doc.metadata,
   };
@@ -195,6 +194,31 @@ function headingForLine(lines: string[], lineIndex: number): string | null {
     if (match) return match[1].trim();
   }
   return null;
+}
+
+function firstCwdPath(text: string): string | null {
+  const match = text.match(/\bcwd=([^,;)\n]+)/);
+  if (!match) return null;
+  const candidate = match[1].trim().split(/\s+(?:and|with|plus)\s+/i)[0]?.trim();
+  return candidate ? path.resolve(candidate) : null;
+}
+
+function projectPathForLine(doc: CodexMarkdownDocument, lines: string[], lineIndex: number): string | null {
+  if (doc.originKind === "rollout-summary" && typeof doc.metadata.cwd === "string" && doc.metadata.cwd.trim()) {
+    return path.resolve(doc.metadata.cwd);
+  }
+  let taskStart = -1;
+  for (let index = lineIndex; index >= 0; index -= 1) {
+    if (/^#\s+/.test(lines[index])) {
+      taskStart = index;
+      break;
+    }
+  }
+  if (taskStart < 0) return null;
+  const taskContext = lines.slice(taskStart, lineIndex + 1);
+  const appliesTo = taskContext.find((line) => /^applies_to:\s*/.test(line));
+  const scope = taskContext.find((line) => /^scope:\s*/.test(line));
+  return firstCwdPath(appliesTo ?? "") ?? firstCwdPath(scope ?? "");
 }
 
 function inferMemoryType(originKind: CodexOriginKind, heading: string | null, body: string): string {
@@ -214,10 +238,22 @@ function documentToMemories(doc: CodexMarkdownDocument): ActiveMemory[] {
     const body = bullet[1].trim();
     if (!body) return;
     const heading = headingForLine(lines, index);
+    const projectPath = projectPathForLine(doc, lines, index);
+    const lineMetadata = parseRolloutListMetadata(line);
+    const threadId = typeof lineMetadata.threadId === "string"
+      ? lineMetadata.threadId
+      : doc.originKind === "rollout-summary" && typeof doc.metadata.threadId === "string"
+        ? doc.metadata.threadId
+        : null;
+    const updatedAt = typeof lineMetadata.updatedAt === "string"
+      ? lineMetadata.updatedAt
+      : doc.originKind === "rollout-summary" && typeof doc.metadata.updatedAt === "string"
+        ? doc.metadata.updatedAt
+        : null;
     records.push({
       id: hashId("codex-memory", [doc.relPath, String(index + 1), body]),
       type: inferMemoryType(doc.originKind, heading, body),
-      scope: "project",
+      scope: projectPath ? "project" : "global",
       status: "active",
       body,
       confidence: null,
@@ -226,16 +262,18 @@ function documentToMemories(doc: CodexMarkdownDocument): ActiveMemory[] {
         sourcePath: doc.relPath,
         heading,
         line: index + 1,
-        threadId: typeof doc.metadata.threadId === "string" ? doc.metadata.threadId : null,
-        updatedAt: typeof doc.metadata.updatedAt === "string" ? doc.metadata.updatedAt : null,
+        projectPath,
+        threadId,
+        updatedAt,
       },
     });
   });
   if (records.length === 0 && doc.originKind === "ad-hoc-note" && doc.text.trim()) {
+    const projectPath = projectPathForLine(doc, lines, 0);
     records.push({
       id: hashId("codex-memory", [doc.relPath, doc.text]),
       type: "semantic",
-      scope: "project",
+      scope: projectPath ? "project" : "global",
       status: "active",
       body: compactText(doc.text, 1600),
       confidence: null,
@@ -244,6 +282,7 @@ function documentToMemories(doc: CodexMarkdownDocument): ActiveMemory[] {
         sourcePath: doc.relPath,
         heading: null,
         line: 1,
+        projectPath,
       },
     });
   }
@@ -257,9 +296,13 @@ function limitItems<T>(items: T[], limit?: number): T[] {
 export function listCodexMemorySourceDocuments(options: {
   memoryHome?: string;
   limit?: number;
+  maxChars?: number;
 } = {}): CodexMemorySourceDocument[] {
   const memoryHome = resolveCodexMemoryHome(options.memoryHome);
-  return limitItems(loadMarkdownDocuments(memoryHome).map(toSourceDocument), options.limit);
+  return limitItems(
+    loadMarkdownDocuments(memoryHome).map((document) => toSourceDocument(document, options.maxChars)),
+    options.limit,
+  );
 }
 
 export function listCodexActiveMemories(options: {

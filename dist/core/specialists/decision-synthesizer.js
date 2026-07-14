@@ -8,8 +8,12 @@ Decide whether each typed candidate should become a final memory proposal.
 Resolve evidence-audit challenges, memory-map findings, endorsements, and
 unresolved questions. Reject ephemeral run noise, one-off operational details,
 duplicates, unsupported claims, and memories without clear future retrieval
-value. Emit final proposal-shaped records only; activation is reserved for the
-caller.`,
+value. Require every final proposal to retain selected-source references. Reject
+recurrence claims without independent-session support unless an explicit
+decision, invariant, or reproducible failure establishes durability. Resolve
+novelty, contradiction, and supersession explicitly; uncertainty is a rejection
+or unresolved question, never invented support. Emit final proposal-shaped
+records only; activation is reserved for the caller.`,
     inputContract: [
         "typed[].body, memory_type, proposed_scope, action, and source_refs from Proposal Editor",
         "typed[].target_memory_id and optional typed[].target_memory_ids when applicable",

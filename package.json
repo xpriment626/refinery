@@ -1,6 +1,6 @@
 {
   "name": "@itsshadowai/refinery",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Refinery - Codex-first source review CLI.",
   "license": "MIT",
@@ -28,23 +28,36 @@
     "refinery": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/mark-bin-executable.mjs",
+    "build": "tsc -p tsconfig.build.json && vite build && node scripts/mark-bin-executable.mjs",
     "cli": "node src/cli.ts",
     "mcp": "node src/mcp.ts",
     "coral:worker": "node src/coral/worker.ts",
     "coral:smoke": "node src/coral/smoke.ts",
     "postinstall": "node scripts/postinstall.mjs",
-    "test": "node --test $(find src -name '*.test.ts' -print)",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "node --test $(find src bench ui/src -name '*.test.ts' -print)",
+    "benchmark:graph": "node --expose-gc bench/graph-benchmark.ts",
+    "benchmark:sessions": "node bench/session-retrieval-benchmark.ts",
+    "benchmark:coral-topology": "node bench/coral-topology-comparison.ts",
+    "benchmark:ui-delta": "node bench/ui-delta-driver.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && svelte-check --tsconfig ./ui/tsconfig.json",
+    "ui:dev": "vite"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "libsql": "0.5.28"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.2.0",
     "@types/node": "^26.0.1",
-    "typescript": "^6.0.3"
+    "graphology": "0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1",
+    "sigma": "3.0.3",
+    "svelte": "5.56.4",
+    "svelte-check": "4.7.2",
+    "typescript": "^6.0.3",
+    "vite": "8.1.4"
   }
 }
