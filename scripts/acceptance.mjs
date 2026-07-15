@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url";
 import { pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCli = process.env.npm_execpath;
+const npm = npmCli ? process.execPath : (process.platform === "win32" ? "npm.cmd" : "npm");
+const npmArgs = (args) => npmCli ? [npmCli, ...args] : args;
 const secret = "coral-packed-acceptance-secret";
 const receipts = [];
 const capturedOutput = [];
@@ -21,6 +23,7 @@ function run(command, args, options = {}) {
       env: options.env ?? process.env,
       stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true,
+      shell: options.shell ?? false,
     });
     const stdout = [];
     const stderr = [];
@@ -41,6 +44,13 @@ function run(command, args, options = {}) {
       else reject(new Error(`${result.command} failed (${code ?? signal})\n${result.stderr}\n${result.stdout}`));
     });
     if (options.input !== undefined) child.stdin.end(options.input);
+  });
+}
+
+function runNpm(args, options = {}) {
+  return run(npm, npmArgs(args), {
+    ...options,
+    shell: !npmCli && process.platform === "win32",
   });
 }
 
@@ -106,12 +116,12 @@ const canonicalBefore = new Map(walkFiles(memoryHome).map((file) => [file, fs.re
 const mock = await startMockCoral();
 
 try {
-  const packed = parseJson(await run(npm, ["pack", "--json", "--pack-destination", packDir], { cwd: root }));
+  const packed = parseJson(await runNpm(["pack", "--json", "--pack-destination", packDir], { cwd: root }));
   assert.equal(packed.length, 1);
   const tarball = path.join(packDir, packed[0].filename);
   assert.equal(fs.existsSync(tarball), true);
-  await run(npm, ["init", "-y"], { cwd: consumer });
-  await run(npm, ["install", tarball, "--no-audit", "--no-fund"], { cwd: consumer });
+  await runNpm(["init", "-y"], { cwd: consumer });
+  await runNpm(["install", tarball, "--no-audit", "--no-fund"], { cwd: consumer });
 
   const packageDir = path.join(consumer, "node_modules", "@itsshadowai", "refinery");
   const cli = path.join(packageDir, "dist", "cli.js");

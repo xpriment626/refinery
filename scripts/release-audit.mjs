@@ -6,14 +6,20 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCli = process.env.npm_execpath;
+const npm = npmCli ? process.execPath : (process.platform === "win32" ? "npm.cmd" : "npm");
+const npmArgs = (args) => npmCli ? [npmCli, ...args] : args;
 const git = (args) => {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
   if (result.status !== 0) throw new Error(result.stderr || `git ${args.join(" ")} failed`);
   return result.stdout;
 };
 const tracked = git(["ls-files", "-z"]).split("\0").filter(Boolean);
-const packedResult = spawnSync(npm, ["pack", "--dry-run", "--json"], { cwd: root, encoding: "utf8" });
+const packedResult = spawnSync(npm, npmArgs(["pack", "--dry-run", "--json"]), {
+  cwd: root,
+  encoding: "utf8",
+  shell: !npmCli && process.platform === "win32",
+});
 if (packedResult.status !== 0) throw new Error(packedResult.stderr || "npm pack --dry-run failed");
 const packed = JSON.parse(packedResult.stdout);
 const packedFiles = packed.flatMap((entry) => entry.files.map((file) => file.path));
