@@ -90,7 +90,7 @@ const setupHtml = `<!doctype html>
       <dl id="scope"></dl>
       <label for="coral-key">Coral API key</label>
       <input id="coral-key" name="coral-key" type="password" required autocomplete="off" spellcheck="false">
-      <p class="hint">Sent only to this loopback process, checked with registry and model-catalogue GET requests, then stored in an owner-only local file. It is never placed in the URL, Codex transcript, logs, or browser storage.</p>
+      <p class="hint">Sent only to this loopback process, checked with registry and model-catalogue GET requests, then stored in a private local file using POSIX mode 0600 or the Windows user-profile ACL. It is not an OS keychain, and is never placed in the URL, Codex transcript, logs, or browser storage.</p>
       <label class="choice"><input id="provision-runtime" type="checkbox" checked> Provision the pinned local Coral runtime (about 102 MB)</label>
       <label class="choice"><input id="browser-open" type="checkbox"> Let Refinery request the graph UI after graph changes</label>
       <button type="submit">Verify and finish setup</button>
@@ -136,7 +136,7 @@ async function boot() {
   values[0].textContent = setup.project;
   values[1].textContent = setup.memoryHome.path + " (read-only)";
   values[2].textContent = setup.graph.path + " (Refinery-managed)";
-  values[3].textContent = setup.credential.path + " (owner-only private file)";
+  values[3].textContent = setup.credential.path + " (" + setup.credential.protection + ")";
   values[4].textContent = "gpt-5.4-nano through Coral-coordinated specialists";
   document.querySelector("#browser-open").checked = Boolean(setup.ui?.browserOpenOnSync);
   loading.hidden = true;

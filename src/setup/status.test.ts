@@ -17,6 +17,10 @@ test("setup inspection is CODEX_HOME-aware and emits stable granular readiness i
   const status = inspectSetup({ home, project, env: { CODEX_HOME: codexHome, REFINERY_JAVA_BIN: "missing-java-fixture" } });
   assert.equal(status.codexHome, codexHome);
   assert.equal((status.memoryHome as Record<string, unknown>).path, path.join(codexHome, "memories"));
+  assert.equal(
+    (status.credential as Record<string, unknown>).protection,
+    process.platform === "win32" ? "platform-managed user-profile ACL" : "owner-only POSIX mode 0600",
+  );
   assert.deepEqual(status.readyFor, { agent: false, graph: true, liveReview: false, ui: false });
   const codes = (status.issues as Array<{ code: string }>).map((issue) => issue.code);
   assert.equal(codes.includes("CODEX_SKILL_MISSING"), true);

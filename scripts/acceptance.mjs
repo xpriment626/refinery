@@ -208,6 +208,10 @@ try {
   }
   const setupStatus = parseJson(await cliRun(["setup", "status", "--project", project, "--json"]));
   assert.equal(setupStatus.credential.verified, true);
+  assert.equal(
+    setupStatus.credential.protection,
+    process.platform === "win32" ? "platform-managed user-profile ACL" : "owner-only POSIX mode 0600",
+  );
   assert.equal(setupStatus.credential.modelName, "gpt-5.4-nano");
   assert.equal(setupStatus.server.running, false);
 

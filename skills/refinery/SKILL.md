@@ -46,6 +46,18 @@ actions, then use `refinery ui url --project "$PWD" --json` when `readyFor.ui`
 is true. Repo-local `.env` files with `CORAL_API_KEY` remain supported only for
 development sessions.
 
+When setup reports all readiness fields true, give the human a concise rundown:
+
+- Refinery can inspect bounded Codex memory, session, skill, file, and glob
+  sources without changing them.
+- It can build and display a derived local responsibility graph with provenance
+  and retrieval state.
+- Coral-coordinated specialists can produce evidence-backed dry-run memory or
+  skill proposals for human review.
+- Canonical Codex sources remain read-only; graph state, run evidence, and
+  proposals stay in Refinery-managed local storage.
+- Future requests can be made naturally in chat and routed through `$refinery`.
+
 If `refinery` is not installed, install the package first:
 
 ```bash

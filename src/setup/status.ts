@@ -233,6 +233,9 @@ export function inspectSetup(args: {
     skill,
     credential: {
       storage: "private-file",
+      protection: process.platform === "win32"
+        ? "platform-managed user-profile ACL"
+        : "owner-only POSIX mode 0600",
       present: Boolean(auth?.present),
       secure: Boolean(auth?.secure) && !authError,
       path: auth?.path ?? storedAuthPath("coral", { home: args.home, cwd: project, env }),

@@ -31,7 +31,7 @@ refinery setup start --project "$PWD" --json
 `setup start` returns a short-lived loopback capability URL. Codex should open
 it in the in-app browser; without browser automation, open the URL manually.
 The human enters the Coral API key directly in that local page, confirms the
-owner-only local credential file, and chooses whether to provision the pinned
+private local credential file, and chooses whether to provision the pinned
 Coral runtime and request the graph UI after syncs. The API key does not pass
 through chat, command arguments, the URL, logs, or browser storage.
 
@@ -61,10 +61,13 @@ Package-managed skill copies carry a content manifest. An unchanged older copy
 is refreshed automatically. A customized copy is preserved and reported as a
 conflict with an explicit `--force` repair action.
 
-The local credential store uses an owner-only directory and file, rejects
-symlinks and non-regular files, validates ownership and mode, and rotates via an
-atomic replacement. Use `refinery unset auth coral --json` to revoke it. You
-can also provide `CORAL_API_KEY` in the environment for development sessions.
+The local credential store uses mode `0700`/`0600` and owner validation on
+POSIX systems. On Windows it uses the access controls inherited from the
+user-profile directory and reports them as platform-managed; it does not claim
+to be an OS keychain. On every platform it rejects symlinks and non-regular
+files, rotates via atomic replacement, and supports revocation with
+`refinery unset auth coral --json`. You can also provide `CORAL_API_KEY` in the
+environment for development sessions.
 
 ## Version Checks
 
@@ -351,9 +354,10 @@ bounded onboarding window.
 
 The main residual local risk is a malicious process already running as the
 same OS user, which can generally read that user's files and inspect local
-processes. Refinery narrows exposure with owner-only state, one-time
-capabilities, loopback binding, short lifetimes, origin checks, and by never
-granting the observability gateway mutation authority.
+processes. Refinery narrows exposure with private user-profile state, strict
+POSIX modes where supported, one-time capabilities, loopback binding, short
+lifetimes, origin checks, and by never granting the observability gateway
+mutation authority.
 
 ## Review
 
