@@ -1,4 +1,5 @@
 import type { ActiveMemory } from "../core/types.ts";
+import { type CodexPathEnvironment } from "../core/codex-paths.ts";
 export interface CodexMemorySourceDocument {
     id: string;
     role: string;
@@ -8,7 +9,7 @@ export interface CodexMemorySourceDocument {
     refs: unknown[];
     metadata: Record<string, unknown>;
 }
-export declare function resolveCodexMemoryHome(memoryHome?: string): string;
+export declare function resolveCodexMemoryHome(memoryHome?: string, env?: CodexPathEnvironment): string;
 export declare function listCodexMemorySourceDocuments(options?: {
     memoryHome?: string;
     limit?: number;

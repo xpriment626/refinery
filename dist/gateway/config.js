@@ -24,10 +24,12 @@ export function writeUiConfig(options) {
     const temporary = `${paths.uiConfigPath}.tmp-${process.pid}`;
     try {
         fs.mkdirSync(path.dirname(paths.uiConfigPath), { recursive: true, mode: 0o700 });
-        fs.chmodSync(path.dirname(paths.uiConfigPath), 0o700);
+        if (process.platform !== "win32")
+            fs.chmodSync(path.dirname(paths.uiConfigPath), 0o700);
         fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
         fs.renameSync(temporary, paths.uiConfigPath);
-        fs.chmodSync(paths.uiConfigPath, 0o600);
+        if (process.platform !== "win32")
+            fs.chmodSync(paths.uiConfigPath, 0o600);
         return config;
     }
     catch (error) {

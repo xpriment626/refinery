@@ -75,6 +75,10 @@ function seedCodexMemoryHome(): string {
 
 test("resolveCodexMemoryHome defaults to the user's bounded memories directory", () => {
   assert.equal(resolveCodexMemoryHome(), path.join(os.homedir(), ".codex", "memories"));
+  assert.equal(
+    resolveCodexMemoryHome(undefined, { CODEX_HOME: path.join(os.tmpdir(), "alternate-codex") }),
+    path.join(os.tmpdir(), "alternate-codex", "memories"),
+  );
 });
 
 test("Codex memory source reader parses memory index, summaries, rollout metadata, and ad hoc notes", () => {

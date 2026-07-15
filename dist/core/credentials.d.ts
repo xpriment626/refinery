@@ -9,6 +9,8 @@ export interface StoredAuthStatus {
     present: boolean;
     path: string;
     source: "credentials" | "missing";
+    secure: boolean;
+    mode: "0600" | "platform-managed" | null;
 }
 export interface ModelAuthStatus {
     present: boolean;
@@ -20,6 +22,7 @@ export declare function storedAuthPath(providerInput: string, options?: StoredAu
 export declare function writeStoredAuth(providerInput: string, value: string, options?: StoredAuthOptions): StoredAuthStatus;
 export declare function readStoredAuth(providerInput: string, options?: StoredAuthOptions): string;
 export declare function storedAuthStatus(providerInput: string, options?: StoredAuthOptions): StoredAuthStatus;
+export declare function removeStoredAuth(providerInput: string, options?: StoredAuthOptions): StoredAuthStatus;
 export declare function resolveModelApiKey(args: {
     env: NodeJS.ProcessEnv | Record<string, string | undefined>;
     localEnv?: Record<string, string | undefined>;

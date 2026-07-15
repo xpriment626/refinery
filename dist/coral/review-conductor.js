@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, getExtended, getLocalAgent, inspectCoralRuntimeCapabilities, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
 import { coralCloudOpenAiProxyProvider, defaultCoralProxyProvider, deepSeekProxyProvider, refineryCoralAgentGlobForRepo, refineryCoralModernAgentGlobForRepo, refineryCoralAgentNames, refineryCoralAuthKey, refineryCoralConfigPath, refineryCoralModelDefaults, refineryCoralPort, } from "./definitions.js";
 import { buildCoralCommunicationProjection, defaultReviewTopology } from "./topology.js";
+import { coralRuntimeLauncherPath } from "./runtime.js";
 import { createSparseBlackboard, routeSparseClaims, } from "./sparse-blackboard.js";
 import { memoryMaintenanceActions, refineryReviewSchemaVersion, } from "../core/types.js";
 import { loadLocalEnv, parseModelMaxTokens } from "../env.js";
@@ -526,10 +527,6 @@ function appendLogLines(store, prefix, chunk, secrets = []) {
     while (store.length > 500)
         store.shift();
 }
-function node24Bin() {
-    const candidate = path.join(os.homedir(), ".nvm/versions/node/v24.10.0/bin/node");
-    return fs.existsSync(candidate) ? candidate : null;
-}
 export async function reserveLoopbackPort() {
     return new Promise((resolve, reject) => {
         const server = net.createServer();
@@ -546,13 +543,6 @@ export async function reserveLoopbackPort() {
             server.close((error) => error ? reject(error) : resolve(port));
         });
     });
-}
-function coralJavaHome() {
-    const candidates = [
-        "/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home",
-        "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
-    ];
-    return candidates.find((candidate) => fs.existsSync(path.join(candidate, "bin/java"))) ?? null;
 }
 async function isServerReady(apiUrl, authKey) {
     try {
@@ -576,18 +566,14 @@ async function waitForServer(apiUrl, authKey, timeoutMs) {
 }
 function startCoralServer(args) {
     const configAbs = path.isAbsolute(args.configPath) ? args.configPath : path.resolve(repoRoot, args.configPath);
-    const nodeBin = node24Bin();
-    const nodeDir = nodeBin ? path.dirname(nodeBin) : null;
-    const javaHome = coralJavaHome();
-    const pathEntries = [
-        nodeDir,
-        javaHome ? path.join(javaHome, "bin") : null,
-        process.env.PATH,
-    ].filter((entry) => Boolean(entry));
-    const command = args.coralJar ? "java" : "npx";
+    const launcher = args.coralRuntimeLauncher ?? coralRuntimeLauncherPath();
+    if (!args.coralJar && !fs.existsSync(launcher)) {
+        throw new RefineryError("CORAL_RUNTIME_NOT_PROVISIONED", "The pinned Coral runtime is not provisioned. Run `refinery setup provision coral --confirm --json` before live review.", { phase: "coral-runtime", details: { launcher } });
+    }
+    const command = args.coralJar ? (process.env.REFINERY_JAVA_BIN ?? "java") : process.execPath;
     const commandArgs = args.coralJar
         ? ["-jar", path.resolve(args.coralJar)]
-        : ["-y", args.coralPackage, "server", "start"];
+        : [launcher, "server", "start"];
     const logSecrets = [refineryCoralAuthKey, ...(args.logSecrets ?? []), ...Object.values(args.secretEnv ?? {})];
     const inheritedEnv = { ...process.env };
     delete inheritedEnv.CORAL_API_KEY;
@@ -598,9 +584,8 @@ function startCoralServer(args) {
             ...inheritedEnv,
             ...args.secretEnv,
             CONFIG_FILE_PATH: configAbs,
-            REFINERY_NODE_BIN: process.env.REFINERY_NODE_BIN ?? nodeBin ?? undefined,
-            JAVA_HOME: process.env.JAVA_HOME ?? javaHome ?? undefined,
-            PATH: pathEntries.join(":"),
+            REFINERY_NODE_BIN: process.execPath,
+            PATH: process.env.PATH,
         },
     });
     child.stdout.on("data", (chunk) => appendLogLines(args.logs, "coral:stdout", chunk, logSecrets));
@@ -644,9 +629,11 @@ export function resolveRuntimeCoralConfigPath(configPath, options = {}) {
     }
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-coral-config-"));
     const runtimeConfigPath = path.join(configDir, "refinery-config.toml");
-    fs.chmodSync(configDir, 0o700);
+    if (process.platform !== "win32")
+        fs.chmodSync(configDir, 0o700);
     fs.writeFileSync(runtimeConfigPath, defaultRuntimeCoralConfig(options), { mode: 0o600 });
-    fs.chmodSync(runtimeConfigPath, 0o600);
+    if (process.platform !== "win32")
+        fs.chmodSync(runtimeConfigPath, 0o600);
     return runtimeConfigPath;
 }
 export function cleanupRuntimeCoralConfigPath(configPath) {
@@ -1232,7 +1219,7 @@ export async function startCoralConsoleRun(options) {
         if (startServer && !(await isServerReady(apiUrl, authKey))) {
             child = startCoralServer({
                 configPath,
-                coralPackage: coral.coralPackage ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
+                coralRuntimeLauncher: coral.coralRuntimeLauncher,
                 coralJar,
                 secretEnv: selectedServerSecretEnv,
                 logSecrets: [authKey],
@@ -1530,7 +1517,7 @@ export async function runCoralReview(options) {
         if (startServer && !(await isServerReady(apiUrl, authKey))) {
             child = startCoralServer({
                 configPath,
-                coralPackage: coral.coralPackage ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
+                coralRuntimeLauncher: coral.coralRuntimeLauncher,
                 coralJar,
                 secretEnv: selectedServerSecretEnv,
                 logSecrets: [authKey],

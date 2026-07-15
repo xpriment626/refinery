@@ -78,6 +78,11 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
   assert.match(result.stdout, /refinery init/);
   assert.match(result.stdout, /refinery skill install/);
   assert.match(result.stdout, /refinery set auth coral/);
+  assert.match(result.stdout, /refinery unset auth coral/);
+  assert.match(result.stdout, /refinery setup inspect/);
+  assert.match(result.stdout, /refinery setup start/);
+  assert.match(result.stdout, /refinery setup status/);
+  assert.match(result.stdout, /refinery setup provision coral --confirm/);
   assert.match(result.stdout, /refinery doctor/);
   assert.match(result.stdout, /refinery version/);
   assert.match(result.stdout, /refinery sources inspect/);
@@ -137,6 +142,10 @@ test("package surface does not publish experiment commands", () => {
   assert.equal(pkg.devDependencies?.sigma, "3.0.3");
   assert.equal(pkg.devDependencies?.graphology, "0.26.0");
   const postinstall = fs.readFileSync(path.join(repoRoot, "scripts/postinstall.mjs"), "utf8");
+  assert.match(postinstall, /refinery setup inspect/);
+  assert.match(postinstall, /refinery setup start/);
+  assert.match(postinstall, /without placing it in chat, shell arguments, or logs/i);
+  assert.doesNotMatch(postinstall, /spawn|exec|openExternal|writeFile/);
   assert.match(postinstall, /refinery ui url --json/);
   assert.match(postinstall, /refinery ui config --browser-open on --json/);
   assert.match(postinstall, /disabled by default/i);
@@ -563,11 +572,14 @@ test("init creates global state directories and installs bundled Codex skill", (
   assert.equal(fs.statSync(path.join(home, "graphs/by-project")).isDirectory(), true);
   assert.equal(fs.statSync(installedSkill).isFile(), true);
   assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
-  assert.deepEqual(parsed.codexSkill, {
-    requested: true,
-    action: "installed",
-    path: installedSkill,
-  });
+  const codexSkill = parsed.codexSkill as Record<string, unknown>;
+  assert.equal(codexSkill.requested, true);
+  assert.equal(codexSkill.action, "installed");
+  assert.equal(codexSkill.path, installedSkill);
+  assert.equal(codexSkill.managed, true);
+  assert.equal(codexSkill.conflict, false);
+  assert.equal(codexSkill.packageVersion, "0.3.0");
+  assert.match(String(codexSkill.installedTreeHash), /^[a-f0-9]{64}$/);
 });
 
 test("init preserves existing Codex skill unless force is set", () => {
@@ -603,11 +615,12 @@ test("skill install installs bundled Codex skill without initializing Refinery s
   assert.equal(parsed.command, "skill install");
   assert.equal(fs.statSync(installedSkill).isFile(), true);
   assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
-  assert.deepEqual(parsed.codexSkill, {
-    requested: true,
-    action: "installed",
-    path: installedSkill,
-  });
+  const codexSkill = parsed.codexSkill as Record<string, unknown>;
+  assert.equal(codexSkill.requested, true);
+  assert.equal(codexSkill.action, "installed");
+  assert.equal(codexSkill.path, installedSkill);
+  assert.equal(codexSkill.managed, true);
+  assert.equal(codexSkill.conflict, false);
   assert.equal(fs.existsSync(path.join(tmp, "refinery-home")), false);
 });
 

@@ -13,7 +13,7 @@ export interface CoralReviewRuntimeOptions {
     threadId?: string;
     startServer?: boolean;
     noTeardown?: boolean;
-    coralPackage?: string;
+    coralRuntimeLauncher?: string;
     coralJar?: string;
     timeoutMs?: number;
     modelName?: string;

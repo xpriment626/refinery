@@ -18,6 +18,11 @@ export interface RefineryPaths {
   gatewayStatePath: string;
   gatewayLogPath: string;
   uiConfigPath: string;
+  setupDir: string;
+  setupStatePath: string;
+  setupReceiptPath: string;
+  runtimeDir: string;
+  coralRuntimeRootDir: string;
 }
 
 export interface ResolveRefineryPathsOptions {
@@ -59,6 +64,8 @@ export function resolveRefineryPaths(options: ResolveRefineryPathsOptions = {}):
   const projectKey = projectKeyForPath(cwd);
   const graphsDir = path.join(home, "graphs", "by-project", projectKey);
   const gatewayDir = path.join(home, "gateway");
+  const setupDir = path.join(home, "setup", "by-project", projectKey);
+  const runtimeDir = path.join(home, "runtime");
   return {
     home,
     configDir: path.join(home, "config"),
@@ -75,5 +82,10 @@ export function resolveRefineryPaths(options: ResolveRefineryPathsOptions = {}):
     gatewayStatePath: path.join(gatewayDir, "state.json"),
     gatewayLogPath: path.join(gatewayDir, "gateway.jsonl"),
     uiConfigPath: path.join(home, "config", "ui.json"),
+    setupDir,
+    setupStatePath: path.join(setupDir, "state.json"),
+    setupReceiptPath: path.join(setupDir, "receipt.json"),
+    runtimeDir,
+    coralRuntimeRootDir: path.join(runtimeDir, "coral"),
   };
 }

@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, evaluatePingPong, getExtended, getLocalAgent, pollPingPong, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
+import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, evaluatePingPong, getExtended, getLocalAgent, inspectCoralRuntimeCapabilities, pollPingPong, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
 import { refineryCoralAgentNames, refineryCoralAuthKey, refineryCoralConfigPath, refineryCoralModelDefaults, refineryCoralPort, } from "./definitions.js";
 import { resolveRefineryPaths } from "../core/paths.js";
+import { coralRuntimeLauncherPath } from "./runtime.js";
+import { cleanupRuntimeCoralConfigPath, resolveRuntimeCoralConfigPath } from "./review-conductor.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
 function parseArgs(argv) {
@@ -24,20 +25,9 @@ function parseArgs(argv) {
         runId,
         outputDir: read("--output-dir") ?? path.join(resolveRefineryPaths({ cwd: repoRoot }).runsDir, runId),
         startServer: has("--start-server"),
-        coralPackage: read("--coral-package") ?? process.env.REFINERY_CORAL_PACKAGE ?? "coralos-dev@RC-1.2.0",
+        coralRuntimeLauncher: read("--coral-runtime-launcher") ?? coralRuntimeLauncherPath({ cwd: repoRoot }),
         timeoutMs: Number.parseInt(read("--timeout-ms") ?? "180000", 10),
     };
-}
-function node24Bin() {
-    const candidate = path.join(os.homedir(), ".nvm/versions/node/v24.10.0/bin/node");
-    return fs.existsSync(candidate) ? candidate : null;
-}
-function coralJavaHome() {
-    const candidates = [
-        "/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home",
-        "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
-    ];
-    return candidates.find((candidate) => fs.existsSync(path.join(candidate, "bin/java"))) ?? null;
 }
 function writeJson(filePath, value) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -73,22 +63,16 @@ async function waitForServer(apiUrl, authKey, timeoutMs) {
 }
 function startCoralServer(args, logs) {
     const configAbs = path.resolve(repoRoot, args.configPath);
-    const nodeBin = node24Bin();
-    const nodeDir = nodeBin ? path.dirname(nodeBin) : null;
-    const javaHome = coralJavaHome();
-    const pathEntries = [
-        nodeDir,
-        javaHome ? path.join(javaHome, "bin") : null,
-        process.env.PATH,
-    ].filter((entry) => Boolean(entry));
-    const child = spawn("npx", ["-y", args.coralPackage, "server", "start"], {
+    if (!fs.existsSync(args.coralRuntimeLauncher)) {
+        throw new Error("Pinned Coral runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
+    }
+    const child = spawn(process.execPath, [args.coralRuntimeLauncher, "server", "start"], {
         cwd: repoRoot,
         env: {
             ...process.env,
             CONFIG_FILE_PATH: configAbs,
-            REFINERY_NODE_BIN: process.env.REFINERY_NODE_BIN ?? nodeBin ?? undefined,
-            JAVA_HOME: process.env.JAVA_HOME ?? javaHome ?? undefined,
-            PATH: pathEntries.join(":"),
+            REFINERY_NODE_BIN: process.execPath,
+            PATH: process.env.PATH,
         },
     });
     child.stdout.on("data", (chunk) => appendLogLines(logs, "coral:stdout", chunk));
@@ -127,6 +111,12 @@ async function runSmoke(args) {
     const logs = [];
     let child = null;
     let session = null;
+    let generatedConfigPath = null;
+    const runtimeConfigPath = args.startServer && args.configPath === refineryCoralConfigPath
+        ? resolveRuntimeCoralConfigPath(refineryCoralConfigPath, { port: refineryCoralPort, authKey: args.authKey })
+        : args.configPath;
+    if (runtimeConfigPath !== args.configPath)
+        generatedConfigPath = runtimeConfigPath;
     const artifact = {
         schemaVersion: "refinery.coral-smoke.v1",
         status: "running",
@@ -134,7 +124,7 @@ async function runSmoke(args) {
         runId: args.runId,
         apiUrl: args.apiUrl,
         authKeyPresent: Boolean(args.authKey),
-        configPath: path.resolve(repoRoot, args.configPath),
+        configPath: path.resolve(repoRoot, runtimeConfigPath),
         outputDir,
         startServer: args.startServer,
         session: null,
@@ -147,6 +137,7 @@ async function runSmoke(args) {
             "refinery-claim-scout",
         ],
         registry: [],
+        runtimeCapabilities: null,
         readinessSnapshots: [],
         finalSnapshot: null,
         messages: [],
@@ -159,11 +150,12 @@ async function runSmoke(args) {
     writeJson(artifactPath, artifact);
     try {
         if (args.startServer && !(await isServerReady(args.apiUrl, args.authKey))) {
-            child = startCoralServer(args, logs);
+            child = startCoralServer({ ...args, configPath: runtimeConfigPath }, logs);
         }
         const serverReady = await waitForServer(args.apiUrl, args.authKey, 60_000);
         if (!serverReady)
             throw new Error(`Coral server was not reachable at ${args.apiUrl} with the configured auth key.`);
+        artifact.runtimeCapabilities = await inspectCoralRuntimeCapabilities(args.apiUrl);
         for (const agentName of refineryCoralAgentNames) {
             try {
                 await getLocalAgent({ apiUrl: args.apiUrl, authKey: args.authKey }, agentName);
@@ -239,6 +231,8 @@ async function runSmoke(args) {
         if (session)
             await closeSession({ apiUrl: args.apiUrl, authKey: args.authKey }, session);
         await stopStartedServer(child);
+        if (generatedConfigPath)
+            cleanupRuntimeCoralConfigPath(generatedConfigPath);
         fs.mkdirSync(outputDir, { recursive: true });
         fs.writeFileSync(serverLogPath, `${logs.join("\n")}\n`);
         writeJson(artifactPath, artifact);

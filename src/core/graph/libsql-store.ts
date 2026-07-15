@@ -304,7 +304,7 @@ export class LibsqlGraphStore implements GraphStore {
   }
 
   #secureFiles(): void {
-    if (this.location === ":memory:") return;
+    if (this.location === ":memory:" || process.platform === "win32") return;
     fs.chmodSync(path.dirname(this.location), 0o700);
     for (const candidate of [this.location, `${this.location}-wal`, `${this.location}-shm`]) {
       if (fs.existsSync(candidate)) fs.chmodSync(candidate, 0o600);
@@ -315,7 +315,7 @@ export class LibsqlGraphStore implements GraphStore {
     if (this.#database) return this.#database;
     if (this.location !== ":memory:") {
       fs.mkdirSync(path.dirname(this.location), { recursive: true, mode: 0o700 });
-      fs.chmodSync(path.dirname(this.location), 0o700);
+      if (process.platform !== "win32") fs.chmodSync(path.dirname(this.location), 0o700);
     }
     const database = new Database(this.location, { timeout: 5_000 });
     database.pragma("foreign_keys = ON");

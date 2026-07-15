@@ -34,7 +34,10 @@
     "coral:worker": "node src/coral/worker.ts",
     "coral:smoke": "node src/coral/smoke.ts",
     "postinstall": "node scripts/postinstall.mjs",
-    "test": "node --test $(find src bench ui/src -name '*.test.ts' -print)",
+    "test": "node scripts/run-tests.mjs",
+    "acceptance:packed": "node scripts/acceptance.mjs",
+    "audit:licenses": "node scripts/license-audit.mjs",
+    "audit:release": "node scripts/release-audit.mjs",
     "benchmark:graph": "node --expose-gc bench/graph-benchmark.ts",
     "benchmark:sessions": "node bench/session-retrieval-benchmark.ts",
     "benchmark:coral-topology": "node bench/coral-topology-comparison.ts",
@@ -46,7 +49,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "libsql": "0.5.28"
   },
   "devDependencies": {

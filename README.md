@@ -17,20 +17,38 @@ surface.
 - Codex memories enabled under `~/.codex/memories`, or an explicitly provided
   directory named `memories`.
 - A Coral API key for live specialist model calls.
+- Java 24 or newer for the pinned local Coral Server runtime.
 
 ## Install
 
 ```bash
 npm i -g @itsshadowai/refinery
-refinery init --json
-refinery set auth coral
-refinery doctor --json
+refinery setup inspect --project "$PWD" --json
+refinery skill install --json
+refinery setup start --project "$PWD" --json
 ```
 
-`refinery init` creates global Refinery state under `~/.refinery` and installs
-the bundled `$refinery` Codex skill into
-`${CODEX_HOME:-~/.codex}/skills/refinery`. It preserves an existing installed
-skill unless `--force` is passed.
+`setup start` returns a short-lived loopback capability URL. Codex should open
+it in the in-app browser; without browser automation, open the URL manually.
+The human enters the Coral API key directly in that local page, confirms the
+owner-only local credential file, and chooses whether to provision the pinned
+Coral runtime and request the graph UI after syncs. The API key does not pass
+through chat, command arguments, the URL, logs, or browser storage.
+
+After the page completes, run:
+
+```bash
+refinery setup status --project "$PWD" --json
+```
+
+The result has stable issue codes, repair actions, and granular
+`readyFor.agent`, `readyFor.graph`, `readyFor.liveReview`, and `readyFor.ui`
+fields. Setup never opens a browser itself. It returns a URL and leaves browser
+control to Codex or the human.
+
+`refinery init` remains available to create global Refinery state under
+`~/.refinery` and install the bundled skill into
+`${CODEX_HOME:-~/.codex}/skills/refinery`.
 
 To install or refresh only the Codex skill:
 
@@ -39,9 +57,14 @@ refinery skill install --json
 refinery skill install --force --json
 ```
 
-`refinery set auth coral` stores the Coral API key under `~/.refinery` with file
-mode `0600` and does not print the secret. You can also provide
-`CORAL_API_KEY` in the environment for ephemeral sessions.
+Package-managed skill copies carry a content manifest. An unchanged older copy
+is refreshed automatically. A customized copy is preserved and reported as a
+conflict with an explicit `--force` repair action.
+
+The local credential store uses an owner-only directory and file, rejects
+symlinks and non-regular files, validates ownership and mode, and rotates via an
+atomic replacement. Use `refinery unset auth coral --json` to revoke it. You
+can also provide `CORAL_API_KEY` in the environment for development sessions.
 
 ## Version Checks
 
@@ -60,6 +83,11 @@ ignored and do not affect the requested command or JSON on stdout.
 ```bash
 # Verify the CLI, memory source, installed skill, and Coral auth status.
 refinery doctor --json
+
+# Inspect or start the agent-first setup contract.
+refinery setup inspect --project "$PWD" --json
+refinery setup start --project "$PWD" --json
+refinery setup status --project "$PWD" --json
 
 # Verify the installed CLI version.
 refinery version --json
@@ -303,6 +331,30 @@ When enabled, a successful graph sync may request the system browser. Failure
 to open a browser never makes the sync fail, and `ui url --json` remains the
 agent-friendly fallback.
 
+## Setup Gateway Security Boundary
+
+The setup gateway is separate from the persistent observability gateway. It is
+the only browser surface that accepts a credential, and it exists only for the
+bounded onboarding window.
+
+- It binds to `127.0.0.1` on an OS-selected port and expires within 15 minutes.
+- A 256-bit URL-fragment capability is exchanged once for a different session
+  token held only in page memory. Neither token appears in status output.
+- Every request validates `Host`; state-changing requests also validate the
+  exact `Origin`, content type, method, and a 16 KiB body limit.
+- The page uses a deny-by-default CSP, no third-party assets, no CORS, no
+  browser persistence, and no request-body logging.
+- Coral authorization uses authenticated registry and model-catalogue `GET`
+  requests. It does not perform a generation or spend inference tokens.
+- Completion or expiry shuts down the setup listener. Stale state is
+  quarantined without signalling an unverified process.
+
+The main residual local risk is a malicious process already running as the
+same OS user, which can generally read that user's files and inspect local
+processes. Refinery narrows exposure with owner-only state, one-time
+capabilities, loopback binding, short lifetimes, origin checks, and by never
+granting the observability gateway mutation authority.
+
 ## Review
 
 `refinery review` is dry-run only. It starts or targets Coral, creates bounded
@@ -386,6 +438,13 @@ Runtime state is global by default:
   config/
   credentials/
     coral-api-key
+  runtime/
+    coral/
+      1.2.0-SNAPSHOT-RC-3/
+  setup/
+    by-project/
+      <project-key>/
+        receipt.json
   runs/
     by-project/
       <project-key>/
@@ -431,6 +490,19 @@ The default runtime is Coral. Refinery ships executable Coral agent manifests
 under `coral/agents/*` and a packaged Coral config under
 `coral/refinery-config.toml`. The default model route is Coral's
 OpenAI-compatible endpoint with `gpt-5.4-nano`.
+
+Refinery pins `coralos-dev@1.2.0-SNAPSHOT-RC-3` and its npm registry integrity.
+Provisioning is an explicit, disclosed setup action of about 102 MB:
+
+```bash
+refinery setup provision coral --confirm --json
+```
+
+Ordinary review never invokes `npx`, follows a mutable dist-tag, or downloads a
+runtime. It launches only the integrity-checked local runtime above, or an
+explicit `--coral-jar` supplied by the user. Node is discovered from the
+running executable and Java from `PATH` (or `REFINERY_JAVA_BIN`); no
+machine-specific NVM or Homebrew path is a product contract.
 
 When Refinery owns the Coral process, it selects an available loopback port and
 an ephemeral 256-bit server auth key for that run. Neither `5555` nor the
@@ -533,7 +605,8 @@ The companion skill should be installed once in the Codex global skill root:
 ~/.codex/skills/refinery/SKILL.md
 ```
 
-Use `refinery skill install --force --json` to refresh the installed skill from
-the package. `$refinery` defaults to live `refinery review` and uses fixture mode
-only when the user explicitly asks for mock, fixture, deterministic, no-Coral,
-or rehearsal output.
+Use `refinery skill install --json` to install or upgrade an unchanged managed
+copy. Use `--force` only after reviewing a reported customized-copy conflict.
+`$refinery` defaults to live `refinery review` and uses fixture mode only when
+the user explicitly asks for mock, fixture, deterministic, no-Coral, or
+rehearsal output.

@@ -17,7 +17,9 @@ import { refineryReviewSchemaVersion } from "./core/types.js";
 import { asRefineryError, RefineryError, serializeRefineryError, } from "./core/errors.js";
 import { inspectReviewRun } from "./core/artifacts.js";
 import { resolveRefineryPaths } from "./core/paths.js";
-import { resolveModelApiKey, storedAuthStatus, writeStoredAuth } from "./core/credentials.js";
+import { removeStoredAuth, resolveModelApiKey, storedAuthStatus, writeStoredAuth } from "./core/credentials.js";
+import { resolveCodexHome as resolveConfiguredCodexHome } from "./core/codex-paths.js";
+import { installManagedCodexSkill } from "./core/skill-installer.js";
 import { parseReviewIntent } from "./core/intents.js";
 import { buildReviewPacket, inspectSources, parseSourceSpecs, parseTargetSurfaces } from "./core/packets.js";
 import {} from "./core/review.js";
@@ -30,12 +32,22 @@ import { readUiConfig, writeUiConfig } from "./gateway/config.js";
 import { gatewayStatus, notifyGatewayGraphSync, startGateway, stopGateway } from "./gateway/lifecycle.js";
 import { runCoralReview, startCoralConsoleRun } from "./coral/review-conductor.js";
 import { parseReviewTopology } from "./coral/topology.js";
+import { coralRuntimeLauncherPath } from "./coral/runtime.js";
+import { provisionCoralRuntime } from "./coral/runtime.js";
+import { inspectSetup } from "./setup/status.js";
+import { serveSetupLifecycle, setupLifecycleStatus, startSetupLifecycle, stopSetupLifecycle } from "./setup/lifecycle.js";
 const HELP = `refinery — Codex-first memory review CLI
 
 USAGE
   refinery init [--home <dir>] [--codex-home <dir>] [--skip-codex-skill] [--force] [--json]
   refinery skill install [--codex-home <dir>] [--force] [--json]
   refinery set auth coral [--home <dir>] [--value-stdin] [--json]
+  refinery unset auth coral [--home <dir>] [--json]
+  refinery setup inspect [--project <dir>] [--home <dir>] [--codex-home <dir>] [--memory-home <dir>] [--json]
+  refinery setup start [--project <dir>] [--home <dir>] [--codex-home <dir>] [--json]
+  refinery setup status [--project <dir>] [--home <dir>] [--codex-home <dir>] [--memory-home <dir>] [--json]
+  refinery setup stop [--project <dir>] [--home <dir>] [--json]
+  refinery setup provision coral --confirm [--project <dir>] [--home <dir>] [--json]
   refinery doctor [--memory-home <dir>] [--json]
   refinery version [--json]
   refinery sources inspect --source <spec>... [--project <dir>] [--memory-home <dir>] [--json]
@@ -57,9 +69,10 @@ USAGE
 
 Refinery builds a bounded ReviewPacket from source specs, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
 It does not approve, apply, or write durable memory. Runtime state defaults to ~/.refinery/runs/by-project/<project-key>.
+After installation, run setup inspect and setup start so Codex can open the one-time local authorization page.
 Run init once to create ~/.refinery and install the bundled $refinery Codex skill.
 Run skill install when you only want to install or refresh the bundled Codex skill.
-Run set auth coral once to store a Coral API key for live specialist model calls.
+Use setup start for browser-safe Coral authorization. The legacy set auth command remains available for non-browser environments.
 Use console run for local Coral Console trials that seed a live session without writing run artifacts.
 Use --no-update-check to suppress the best-effort public version notice.`;
 const UPDATE_CHECK_FLAG = "--no-update-check";
@@ -76,23 +89,10 @@ function bundledCodexSkillPath() {
     return path.join(bundledCodexSkillDir(), "SKILL.md");
 }
 function resolveCodexHome(codexHome, env = process.env) {
-    return path.resolve(codexHome ?? env.CODEX_HOME ?? path.join(os.homedir(), ".codex"));
+    return resolveConfiguredCodexHome(codexHome, env);
 }
 function installedCodexSkillPath(codexHome) {
     return path.join(resolveCodexHome(codexHome), "skills", "refinery", "SKILL.md");
-}
-function copyDirectory(src, dest) {
-    fs.mkdirSync(dest, { recursive: true });
-    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-        const sourcePath = path.join(src, entry.name);
-        const destPath = path.join(dest, entry.name);
-        if (entry.isDirectory()) {
-            copyDirectory(sourcePath, destPath);
-        }
-        else if (entry.isFile()) {
-            fs.copyFileSync(sourcePath, destPath);
-        }
-    }
 }
 function defaultRunId(prefix = "review") {
     return `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -234,6 +234,10 @@ function inferCommand(argv) {
         return "dev fixture";
     if (argv[0] === "set" && argv[1] === "auth")
         return "set auth";
+    if (argv[0] === "unset" && argv[1] === "auth")
+        return "unset auth";
+    if (argv[0] === "setup" && argv[1])
+        return `setup ${argv[1]}`;
     if (argv[0] === "skill" && argv[1] === "install")
         return "skill install";
     return argv[0] ?? "unknown";
@@ -252,7 +256,7 @@ function updateCheckDisabled(flagDisabled) {
     return flagDisabled || process.env.REFINERY_NO_UPDATE_CHECK === "1" || process.env.CI === "1" || process.env.CI === "true";
 }
 function supportsUpdateCheck(command) {
-    return ["doctor", "init", "set", "skill", "version", "sources", "graph", "gateway", "ui", "trial", "console", "dev", "review"].includes(command ?? "");
+    return ["doctor", "init", "set", "unset", "setup", "skill", "version", "sources", "graph", "gateway", "ui", "trial", "console", "dev", "review"].includes(command ?? "");
 }
 async function maybePrintUpdateNotice(flagDisabled) {
     if (updateCheckDisabled(flagDisabled))
@@ -285,25 +289,14 @@ function writeJsonFailure(argv, error) {
 }
 function installCodexSkill(options = {}) {
     const installPath = installedCodexSkillPath(options.codexHome);
-    if (options.skip) {
-        return { requested: false, action: "skipped", path: installPath };
-    }
     const sourceDir = bundledCodexSkillDir();
-    if (!fs.existsSync(bundledCodexSkillPath())) {
-        throw new RefineryError("SKILL_BUNDLE_NOT_FOUND", `Bundled Codex skill not found: ${sourceDir}`, {
-            phase: "init",
-        });
-    }
-    const destDir = path.dirname(installPath);
-    if (fs.existsSync(installPath) && !options.force) {
-        return { requested: true, action: "preserved", path: installPath };
-    }
-    const action = fs.existsSync(installPath) ? "overwritten" : "installed";
-    if (options.force && fs.existsSync(destDir)) {
-        fs.rmSync(destDir, { recursive: true, force: true });
-    }
-    copyDirectory(sourceDir, destDir);
-    return { requested: true, action, path: installPath };
+    return installManagedCodexSkill({
+        sourceDir,
+        installPath,
+        packageVersion: packageMetadata().version,
+        force: options.force,
+        skip: options.skip,
+    });
 }
 async function cmdInit(rest) {
     const values = parseOptionArgs(rest, {
@@ -336,7 +329,7 @@ async function cmdInit(rest) {
         force: Boolean(values.force),
         skip: Boolean(values["skip-codex-skill"]),
     });
-    const memoryHome = resolveCodexMemoryHome();
+    const memoryHome = resolveCodexMemoryHome(undefined, process.env);
     process.stdout.write(stableJson({
         ok: true,
         command: "init",
@@ -462,7 +455,7 @@ async function cmdSet(rest) {
             present: credential.present,
             path: credential.path,
             source: credential.source,
-            mode: "0600",
+            mode: credential.mode,
         },
         next: [
             "refinery doctor --json",
@@ -470,6 +463,112 @@ async function cmdSet(rest) {
         ],
     }));
     return 0;
+}
+async function cmdUnset(rest) {
+    const sub = rest[0];
+    const provider = rest[1];
+    if (sub !== "auth" || provider !== "coral") {
+        throw new RefineryError("INVALID_OPTION", "Unknown unset command. Use: refinery unset auth coral", { phase: "args" });
+    }
+    const values = parseOptionArgs(rest.slice(2), {
+        home: { type: "string" },
+        json: { type: "boolean", default: false },
+    });
+    const home = typeof values.home === "string" ? values.home : undefined;
+    const credential = removeStoredAuth("coral", { home, cwd: process.cwd() });
+    const receiptPath = resolveRefineryPaths({ home, cwd: process.cwd() }).setupReceiptPath;
+    fs.rmSync(receiptPath, { force: true });
+    process.stdout.write(stableJson({
+        ok: true,
+        command: "unset auth",
+        provider: "coral",
+        credential: {
+            present: credential.present,
+            path: credential.path,
+            source: credential.source,
+        },
+        revoked: true,
+    }));
+    return 0;
+}
+async function cmdSetup(rest) {
+    const sub = rest[0];
+    if (!sub)
+        throw new RefineryError("INVALID_OPTION", "Unknown setup command. Use: refinery setup inspect|start|status|stop|provision", { phase: "args" });
+    if (sub === "provision") {
+        if (rest[1] !== "coral")
+            throw new RefineryError("INVALID_OPTION", "Use: refinery setup provision coral --confirm", { phase: "args" });
+        const values = parseOptionArgs(rest.slice(2), {
+            project: { type: "string" },
+            home: { type: "string" },
+            confirm: { type: "boolean", default: false },
+            json: { type: "boolean", default: false },
+        });
+        const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
+        const runtime = await provisionCoralRuntime({
+            home: typeof values.home === "string" ? values.home : undefined,
+            cwd: project,
+            env: process.env,
+            confirmed: Boolean(values.confirm),
+        });
+        process.stdout.write(stableJson({ ok: true, command: "setup provision", provider: "coral", runtime }));
+        return 0;
+    }
+    const values = parseOptionArgs(rest.slice(1), {
+        project: { type: "string" },
+        home: { type: "string" },
+        "codex-home": { type: "string" },
+        "memory-home": { type: "string" },
+        "instance-id": { type: "string" },
+        json: { type: "boolean", default: false },
+    });
+    const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
+    const home = typeof values.home === "string" ? values.home : undefined;
+    const codexHome = typeof values["codex-home"] === "string" ? values["codex-home"] : undefined;
+    const common = { home, project, codexHome, env: process.env };
+    if (sub === "inspect" || sub === "status") {
+        const setup = inspectSetup({
+            ...common,
+            memoryHome: typeof values["memory-home"] === "string" ? values["memory-home"] : undefined,
+        });
+        const server = await setupLifecycleStatus(common);
+        process.stdout.write(stableJson({ ok: true, command: `setup ${sub}`, ...setup, server }));
+        return 0;
+    }
+    if (sub === "start") {
+        const server = await startSetupLifecycle(common);
+        process.stdout.write(stableJson({
+            ok: true,
+            command: "setup start",
+            schemaVersion: "refinery.setup-start.v1",
+            state: "awaiting-human",
+            project,
+            ...server,
+            browser: {
+                action: "open",
+                preferredHarness: "codex-in-app-browser",
+                fallback: "Open the returned loopback URL in any browser on this machine.",
+            },
+            next: [
+                "Open the one-time URL and let the human authorize Coral and local preferences.",
+                `Then run refinery setup status --project ${JSON.stringify(project)} --json.`,
+            ],
+        }));
+        return 0;
+    }
+    if (sub === "stop") {
+        const server = await stopSetupLifecycle(common);
+        process.stdout.write(stableJson({ ok: true, command: "setup stop", ...server }));
+        return 0;
+    }
+    if (sub === "serve") {
+        const instanceId = typeof values["instance-id"] === "string" ? values["instance-id"] : "";
+        if (!instanceId)
+            throw new RefineryError("INVALID_OPTION", "Internal setup server requires --instance-id.", { phase: "args" });
+        await serveSetupLifecycle({ ...common, instanceId });
+        return 0;
+    }
+    throw new RefineryError("INVALID_OPTION", "Unknown setup command. Use: refinery setup inspect|start|status|stop|provision", { phase: "args" });
 }
 function isMainModule() {
     if (!process.argv[1])
@@ -1009,7 +1108,6 @@ async function cmdConsole(rest) {
         "coral-namespace": { type: "string" },
         "coral-session-id": { type: "string" },
         "coral-thread-id": { type: "string" },
-        "coral-package": { type: "string" },
         "coral-jar": { type: "string" },
         "coral-llm-proxy": { type: "boolean", default: false },
         model: { type: "string" },
@@ -1035,9 +1133,6 @@ async function cmdConsole(rest) {
     }
     if (typeof values["model-provider"] === "string" && !values["coral-llm-proxy"]) {
         throw new RefineryError("INVALID_OPTION", "--model-provider requires --coral-llm-proxy", { phase: "args" });
-    }
-    if (typeof values["coral-jar"] === "string" && typeof values["coral-package"] === "string") {
-        throw new RefineryError("INVALID_OPTION", "Use only one of --coral-jar or --coral-package", { phase: "args" });
     }
     const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
     const sourceSpecs = parseSourceSpecs(values.source);
@@ -1074,7 +1169,10 @@ async function cmdConsole(rest) {
             namespace: typeof values["coral-namespace"] === "string" ? values["coral-namespace"] : undefined,
             sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
             threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
-            coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
+            coralRuntimeLauncher: coralRuntimeLauncherPath({
+                home: typeof values.home === "string" ? values.home : undefined,
+                cwd: project,
+            }),
             coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
             llmProxy: Boolean(values["coral-llm-proxy"]),
             modelName: typeof values.model === "string" ? values.model : undefined,
@@ -1129,7 +1227,6 @@ async function cmdReview(rest) {
         "coral-namespace": { type: "string" },
         "coral-session-id": { type: "string" },
         "coral-thread-id": { type: "string" },
-        "coral-package": { type: "string" },
         "coral-jar": { type: "string" },
         "coral-llm-proxy": { type: "boolean", default: false },
         model: { type: "string" },
@@ -1170,9 +1267,6 @@ async function cmdReview(rest) {
     if (typeof values["model-provider"] === "string" && !values["coral-llm-proxy"]) {
         throw new RefineryError("INVALID_OPTION", "--model-provider requires --coral-llm-proxy", { phase: "args" });
     }
-    if (typeof values["coral-jar"] === "string" && typeof values["coral-package"] === "string") {
-        throw new RefineryError("INVALID_OPTION", "Use only one of --coral-jar or --coral-package", { phase: "args" });
-    }
     const sourceSpecs = parseSourceSpecs(values.source);
     let packet = await buildReviewPacket({
         sourceSpecs,
@@ -1210,7 +1304,10 @@ async function cmdReview(rest) {
             namespace: typeof values["coral-namespace"] === "string" ? values["coral-namespace"] : undefined,
             sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
             threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
-            coralPackage: typeof values["coral-package"] === "string" ? values["coral-package"] : undefined,
+            coralRuntimeLauncher: coralRuntimeLauncherPath({
+                home: typeof values.home === "string" ? values.home : undefined,
+                cwd: project,
+            }),
             coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
             llmProxy: Boolean(values["coral-llm-proxy"]),
             modelName: typeof values.model === "string" ? values.model : undefined,
@@ -1243,6 +1340,10 @@ export async function main(argv = process.argv.slice(2)) {
         return cmdInit(commandArgs.slice(1));
     if (command === "set")
         return cmdSet(commandArgs.slice(1));
+    if (command === "unset")
+        return cmdUnset(commandArgs.slice(1));
+    if (command === "setup")
+        return cmdSetup(commandArgs.slice(1));
     if (command === "skill")
         return cmdSkill(commandArgs.slice(1));
     if (command === "version")

@@ -25,21 +25,26 @@ Verify the command and local setup:
 
 ```bash
 command -v refinery
-refinery init --json
+refinery setup inspect --project "$PWD" --json
 refinery skill install --json
-refinery doctor --json
+refinery setup status --project "$PWD" --json
 ```
 
-For packaged installs, the canonical Coral key setup is:
+For a fresh packaged install or an unverified Coral credential, start the
+one-time local setup page:
 
 ```bash
-refinery set auth coral
+refinery setup start --project "$PWD" --json
 ```
 
-Use this when `refinery doctor --json` reports `modelAuth.present: false` or
-when a live review fails with missing model auth. Do not ask the user to run
-Delve auth commands for Refinery, and do not print API keys in chat. Repo-local
-`.env` files with `CORAL_API_KEY` remain supported for development sessions.
+Open the returned loopback capability URL with the Codex in-app browser when
+that capability is available. Otherwise print the URL so the human can open it.
+The human enters the Coral key directly in the local page; never ask them to
+paste it into chat or place it in command arguments. After completion, run
+`refinery setup status --project "$PWD" --json`, follow its structured repair
+actions, then use `refinery ui url --project "$PWD" --json` when `readyFor.ui`
+is true. Repo-local `.env` files with `CORAL_API_KEY` remain supported only for
+development sessions.
 
 If `refinery` is not installed, install the package first:
 

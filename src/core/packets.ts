@@ -338,10 +338,7 @@ function findSkillFiles(roots: string[]): string[] {
 }
 
 function defaultSkillRoots(): string[] {
-  return [
-    path.join(os.homedir(), ".codex", "skills"),
-    path.join(os.homedir(), ".agents", "skills"),
-  ];
+  return resolveCodexSkillRoots();
 }
 
 async function loadCodexSkills(spec: SourceSpec, index: number, context: SourceLoadContext): Promise<LoadedSourceSet> {
@@ -611,3 +608,4 @@ export async function inspectSources(options: Omit<BuildReviewPacketOptions, "ta
     warnings: packet.warnings,
   };
 }
+import { resolveCodexSkillRoots } from "./codex-paths.ts";

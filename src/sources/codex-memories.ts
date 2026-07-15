@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { ActiveMemory } from "../core/types.ts";
 import { RefineryError } from "../core/errors.ts";
+import { resolveCodexMemoriesDir, type CodexPathEnvironment } from "../core/codex-paths.ts";
 
 export interface CodexMemorySourceDocument {
   id: string;
@@ -26,8 +26,8 @@ interface CodexMarkdownDocument {
 
 type CodexOriginKind = "memory-index" | "memory-summary" | "rollout-summary" | "ad-hoc-note" | "raw-memory" | "workspace-diff" | "other";
 
-export function resolveCodexMemoryHome(memoryHome?: string): string {
-  return path.resolve(memoryHome ?? path.join(os.homedir(), ".codex", "memories"));
+export function resolveCodexMemoryHome(memoryHome?: string, env: CodexPathEnvironment = process.env): string {
+  return resolveCodexMemoriesDir(memoryHome, env);
 }
 
 function hashId(prefix: string, parts: string[]): string {

@@ -44,7 +44,8 @@ async function acquireLifecycleLock(gatewayDir) {
                 mode: 0o600,
                 flag: "wx",
             });
-            fs.chmodSync(lockPath, 0o600);
+            if (process.platform !== "win32")
+                fs.chmodSync(lockPath, 0o600);
             return () => {
                 try {
                     const current = JSON.parse(fs.readFileSync(lockPath, "utf8"));
@@ -65,7 +66,8 @@ async function acquireLifecycleLock(gatewayDir) {
             if (stat.isFile() && !stat.isSymbolicLink() && Date.now() - stat.mtimeMs > LIFECYCLE_LOCK_STALE_MS) {
                 const stalePath = `${lockPath}.stale-${Date.now()}-${crypto.randomUUID()}`;
                 fs.renameSync(lockPath, stalePath);
-                fs.chmodSync(stalePath, 0o600);
+                if (process.platform !== "win32")
+                    fs.chmodSync(stalePath, 0o600);
                 continue;
             }
         }
@@ -134,7 +136,8 @@ function recoverStaleState(statePath) {
         return;
     const stalePath = `${statePath}.stale-${Date.now()}.json`;
     fs.renameSync(statePath, stalePath);
-    fs.chmodSync(stalePath, 0o600);
+    if (process.platform !== "win32")
+        fs.chmodSync(stalePath, 0o600);
 }
 export async function gatewayStatus(options) {
     const project = path.resolve(options.project);
@@ -154,7 +157,8 @@ export async function startGateway(options) {
     const project = path.resolve(options.project);
     const paths = resolveRefineryPaths({ home: options.home, cwd: project });
     fs.mkdirSync(paths.gatewayDir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(paths.gatewayDir, 0o700);
+    if (process.platform !== "win32")
+        fs.chmodSync(paths.gatewayDir, 0o700);
     const releaseLifecycleLock = await acquireLifecycleLock(paths.gatewayDir);
     try {
         let existing = null;
@@ -228,7 +232,8 @@ export async function stopGateway(options) {
     const project = path.resolve(options.project);
     const paths = resolveRefineryPaths({ home: options.home, cwd: project });
     fs.mkdirSync(paths.gatewayDir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(paths.gatewayDir, 0o700);
+    if (process.platform !== "win32")
+        fs.chmodSync(paths.gatewayDir, 0o700);
     const releaseLifecycleLock = await acquireLifecycleLock(paths.gatewayDir);
     try {
         let state;

@@ -24,9 +24,15 @@ test("resolveRefineryPaths defaults to globally organized project runs", () => {
   assert.equal(paths.gatewayStatePath, path.join(paths.gatewayDir, "state.json"));
   assert.equal(paths.gatewayLogPath, path.join(paths.gatewayDir, "gateway.jsonl"));
   assert.equal(paths.uiConfigPath, path.join(paths.configDir, "ui.json"));
+  assert.equal(paths.setupDir, path.join(os.homedir(), ".refinery", "setup", "by-project", projectKey));
+  assert.equal(paths.setupStatePath, path.join(paths.setupDir, "state.json"));
+  assert.equal(paths.setupReceiptPath, path.join(paths.setupDir, "receipt.json"));
+  assert.equal(paths.runtimeDir, path.join(os.homedir(), ".refinery", "runtime"));
+  assert.equal(paths.coralRuntimeRootDir, path.join(paths.runtimeDir, "coral"));
   assert.deepEqual(Object.keys(paths).sort(), [
     "cataloguesDir",
     "configDir",
+    "coralRuntimeRootDir",
     "credentialsDir",
     "gatewayDir",
     "gatewayLogPath",
@@ -38,7 +44,11 @@ test("resolveRefineryPaths defaults to globally organized project runs", () => {
     "projectKey",
     "runsDir",
     "runsRootDir",
+    "runtimeDir",
     "sessionCataloguePath",
+    "setupDir",
+    "setupReceiptPath",
+    "setupStatePath",
     "uiConfigPath",
   ]);
 });

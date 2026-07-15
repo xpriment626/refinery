@@ -145,6 +145,8 @@ function withinDays(timestamp, days, now) {
     return Number.isNaN(then) || then >= now.getTime() - days * 24 * 60 * 60 * 1_000;
 }
 function secureDatabaseFiles(location) {
+    if (process.platform === "win32")
+        return;
     fs.chmodSync(path.dirname(location), 0o700);
     for (const candidate of [location, `${location}-wal`, `${location}-shm`]) {
         if (fs.existsSync(candidate))
@@ -153,7 +155,8 @@ function secureDatabaseFiles(location) {
 }
 function openCatalogue(location) {
     fs.mkdirSync(path.dirname(location), { recursive: true, mode: 0o700 });
-    fs.chmodSync(path.dirname(location), 0o700);
+    if (process.platform !== "win32")
+        fs.chmodSync(path.dirname(location), 0o700);
     const database = new Database(location, { timeout: 5_000 });
     database.pragma("foreign_keys = ON");
     database.pragma("journal_mode = WAL");
@@ -496,7 +499,7 @@ function unitFromRow(row) {
     };
 }
 export async function loadCodexSessionsFromCatalogue(args) {
-    const sessionsDir = path.resolve(args.spec.params.home ?? path.join(os.homedir(), ".codex", "sessions"));
+    const sessionsDir = resolveCodexSessionsDir(args.spec.params.home);
     const scopeFilter = filterFor(args.spec, args.project, args.scope);
     const days = args.spec.params.days ? Number.parseInt(args.spec.params.days, 10) : null;
     if (days !== null && (!Number.isFinite(days) || days < 1)) {
@@ -664,4 +667,5 @@ export async function loadCodexSessionsFromCatalogue(args) {
         secureDatabaseFiles(cataloguePath);
     }
 }
+import { resolveCodexSessionsDir } from "../core/codex-paths.js";
 //# sourceMappingURL=codex-session-catalogue.js.map

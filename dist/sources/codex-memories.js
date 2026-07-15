@@ -1,10 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { RefineryError } from "../core/errors.js";
-export function resolveCodexMemoryHome(memoryHome) {
-    return path.resolve(memoryHome ?? path.join(os.homedir(), ".codex", "memories"));
+import { resolveCodexMemoriesDir } from "../core/codex-paths.js";
+export function resolveCodexMemoryHome(memoryHome, env = process.env) {
+    return resolveCodexMemoriesDir(memoryHome, env);
 }
 function hashId(prefix, parts) {
     const hash = crypto.createHash("sha256");

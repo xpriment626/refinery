@@ -181,7 +181,7 @@ export class JsonGraphStore implements GraphStore {
       fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
       fs.writeFileSync(temporary, `${JSON.stringify(index, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       fs.renameSync(temporary, this.location);
-      fs.chmodSync(this.location, 0o600);
+      if (process.platform !== "win32") fs.chmodSync(this.location, 0o600);
     } catch (error) {
       throw new RefineryError(
         "GRAPH_STORE_WRITE_FAILED",

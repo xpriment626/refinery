@@ -220,10 +220,7 @@ function findSkillFiles(roots) {
     });
 }
 function defaultSkillRoots() {
-    return [
-        path.join(os.homedir(), ".codex", "skills"),
-        path.join(os.homedir(), ".agents", "skills"),
-    ];
+    return resolveCodexSkillRoots();
 }
 async function loadCodexSkills(spec, index, context) {
     const roots = spec.params.home ? spec.params.home.split(",").map((root) => path.resolve(root)) : defaultSkillRoots();
@@ -478,4 +475,5 @@ export async function inspectSources(options) {
         warnings: packet.warnings,
     };
 }
+import { resolveCodexSkillRoots } from "./codex-paths.js";
 //# sourceMappingURL=packets.js.map

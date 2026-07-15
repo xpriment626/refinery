@@ -10,7 +10,8 @@ function atomicWrite(filePath, value) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, filePath);
-    fs.chmodSync(filePath, 0o600);
+    if (process.platform !== "win32")
+        fs.chmodSync(filePath, 0o600);
 }
 function readBootstrap() {
     const at = process.argv.indexOf("--bootstrap");

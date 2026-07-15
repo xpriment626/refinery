@@ -14,6 +14,11 @@ export interface RefineryPaths {
     gatewayStatePath: string;
     gatewayLogPath: string;
     uiConfigPath: string;
+    setupDir: string;
+    setupStatePath: string;
+    setupReceiptPath: string;
+    runtimeDir: string;
+    coralRuntimeRootDir: string;
 }
 export interface ResolveRefineryPathsOptions {
     home?: string;

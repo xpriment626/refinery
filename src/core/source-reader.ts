@@ -65,13 +65,13 @@ function sourceReadRoots(options: LoadSourceCorpusOptions): string[] {
   for (const spec of options.sourceSpecs) {
     switch (spec.kind) {
       case "codex:memories":
-        roots.add(path.resolve(spec.params.home ?? options.memoryHome ?? path.join(os.homedir(), ".codex", "memories")));
+        roots.add(resolveCodexMemoriesDir(spec.params.home ?? options.memoryHome));
         break;
       case "codex:sessions":
-        roots.add(path.resolve(spec.params.home ?? path.join(os.homedir(), ".codex", "sessions")));
+        roots.add(resolveCodexSessionsDir(spec.params.home));
         break;
       case "codex:skills":
-        for (const root of spec.params.home?.split(",") ?? [path.join(os.homedir(), ".codex", "skills"), path.join(os.homedir(), ".agents", "skills")]) {
+        for (const root of resolveCodexSkillRoots(spec.params.home)) {
           roots.add(path.resolve(root));
         }
         break;
@@ -87,7 +87,7 @@ function sourceReadRoots(options: LoadSourceCorpusOptions): string[] {
 }
 
 function sanitizedChildEnvironment(): NodeJS.ProcessEnv {
-  const allowed = ["HOME", "USERPROFILE", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TZ"];
+  const allowed = ["HOME", "USERPROFILE", "CODEX_HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TZ"];
   return Object.fromEntries([
     ...allowed.map((key) => [key, process.env[key]] as const).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     ["NODE_NO_WARNINGS", "1"],
@@ -312,3 +312,4 @@ export async function readSourceCorpusIsolated(
 export async function loadSourceCorpusIsolated(options: LoadSourceCorpusOptions): Promise<SourceCorpus> {
   return (await readSourceCorpusIsolated(options)).corpus;
 }
+import { resolveCodexMemoriesDir, resolveCodexSessionsDir, resolveCodexSkillRoots } from "./codex-paths.ts";

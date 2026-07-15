@@ -4,10 +4,13 @@ const message = `
 Refinery installed.
 
 Next steps:
-  refinery init --json
+  refinery setup inspect --json
   refinery skill install --json
-  refinery set auth coral
-  refinery doctor --json
+  refinery setup start --json
+
+The setup command returns a short-lived loopback URL. If an agent installed
+Refinery, it should open that URL in its in-app browser so the human can enter
+the Coral key without placing it in chat, shell arguments, or logs.
 
 Local graph observability:
   refinery ui url --json
