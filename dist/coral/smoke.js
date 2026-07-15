@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, evaluatePingPong, getExtended, getLocalAgent, inspectCoralRuntimeCapabilities, pollPingPong, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
 import { refineryCoralAgentNames, refineryCoralAuthKey, refineryCoralConfigPath, refineryCoralModelDefaults, refineryCoralPort, } from "./definitions.js";
 import { resolveRefineryPaths } from "../core/paths.js";
-import { coralRuntimeLauncherPath } from "./runtime.js";
+import { coralRuntimeJarPath } from "./runtime.js";
 import { cleanupRuntimeCoralConfigPath, resolveRuntimeCoralConfigPath } from "./review-conductor.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
@@ -25,7 +25,7 @@ function parseArgs(argv) {
         runId,
         outputDir: read("--output-dir") ?? path.join(resolveRefineryPaths({ cwd: repoRoot }).runsDir, runId),
         startServer: has("--start-server"),
-        coralRuntimeLauncher: read("--coral-runtime-launcher") ?? coralRuntimeLauncherPath({ cwd: repoRoot }),
+        coralRuntimeJar: read("--coral-runtime-jar") ?? coralRuntimeJarPath({ cwd: repoRoot }) ?? "",
         timeoutMs: Number.parseInt(read("--timeout-ms") ?? "180000", 10),
     };
 }
@@ -63,10 +63,10 @@ async function waitForServer(apiUrl, authKey, timeoutMs) {
 }
 function startCoralServer(args, logs) {
     const configAbs = path.resolve(repoRoot, args.configPath);
-    if (!fs.existsSync(args.coralRuntimeLauncher)) {
-        throw new Error("Pinned Coral runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
+    if (!args.coralRuntimeJar || !fs.existsSync(args.coralRuntimeJar)) {
+        throw new Error("Latest-stable Coral Server runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
     }
-    const child = spawn(process.execPath, [args.coralRuntimeLauncher, "server", "start"], {
+    const child = spawn(process.env.REFINERY_JAVA_BIN ?? "java", ["-jar", args.coralRuntimeJar], {
         cwd: repoRoot,
         env: {
             ...process.env,

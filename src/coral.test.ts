@@ -104,6 +104,8 @@ test("managed Coral runtime config accepts an ephemeral loopback port and auth k
   const config = fs.readFileSync(runtimeConfigPath, "utf8");
 
   assert.equal(Number.isSafeInteger(port) && port > 0 && port <= 65_535, true);
+  assert.match(config, /bind_address = "127\.0\.0\.1"/);
+  assert.match(config, /allow_any_host = false/);
   assert.match(config, new RegExp(`bind_port = ${port}`));
   assert.match(config, /keys = \["ephemeral-managed-auth"\]/);
   cleanupRuntimeCoralConfigPath(runtimeConfigPath);
@@ -147,6 +149,21 @@ test("Coral decision contract rejects proposals invented outside typed source ev
     sourceChunks,
     typedCandidates: [{ action: "create", source_refs: ["source:1"] }],
     proposals: [validProposal],
+  }));
+  assert.doesNotThrow(() => validateCoralDecisionContract({
+    sourceChunks: [{
+      id: "graph-node:ceae1aea5e3dedfada4a7298",
+      uri: "file:///tmp/README.md",
+      refs: [{ graph_node_id: "graph-node:ceae1aea5e3dedfada4a7298" }],
+    }],
+    typedCandidates: [{
+      action: "create",
+      source_refs: ["file:README.md (via graph-node:ceae1aea5e3dedfada4a7298)"],
+    }],
+    proposals: [{
+      action: "create",
+      sourceRefs: ["file:README.md (via graph-node:ceae1aea5e3dedfada4a7298)"],
+    }],
   }));
   assert.throws(
     () => validateCoralDecisionContract({ sourceChunks, typedCandidates: [], proposals: [validProposal] }),

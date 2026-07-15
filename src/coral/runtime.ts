@@ -1,15 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { RefineryError } from "../core/errors.ts";
 import { resolveRefineryPaths, type ResolveRefineryPathsOptions } from "../core/paths.ts";
 
-export const coralRuntimePackage = {
-  name: "coralos-dev",
-  version: "1.2.0-SNAPSHOT-RC-3",
-  integrity: "sha512-geD+suwgrj2X9oSVGNLCk3IFKQ8pwlTaebFyP2Zi1hlox7zw766fDGg+mWhtmYRqvNcZmoZiymz7h+84H7HdQQ==",
-  tarball: "https://registry.npmjs.org/coralos-dev/-/coralos-dev-1.2.0-SNAPSHOT-RC-3.tgz",
+export const coralRuntimeSource = {
+  repository: "Coral-Protocol/coral-server",
+  releaseChannel: "latest-stable",
+  releaseApi: "https://api.github.com/repos/Coral-Protocol/coral-server/releases/latest",
+  releaseBaseUrl: "https://github.com/Coral-Protocol/coral-server/releases/",
+  maximumAssetBytes: 256 * 1024 * 1024,
 } as const;
 
 export const minimumCoralJavaVersion = 24;
@@ -21,28 +22,85 @@ export interface JavaRuntimeStatus {
   sufficient: boolean;
 }
 
+export interface CoralReleaseArtifact {
+  version: string;
+  tag: string;
+  assetName: string;
+  assetUrl: string;
+  releaseUrl: string;
+  sha256: string;
+  size: number;
+}
+
+interface CoralRuntimeManifest extends CoralReleaseArtifact {
+  schemaVersion: "refinery.coral-runtime-manifest.v1";
+  source: "github-release";
+  repository: typeof coralRuntimeSource.repository;
+  releaseChannel: typeof coralRuntimeSource.releaseChannel;
+  provisionedAt: string;
+}
+
 export interface CoralRuntimeStatus {
-  schemaVersion: "refinery.coral-runtime.v1";
+  schemaVersion: "refinery.coral-runtime.v2";
+  source: "github-release";
+  repository: typeof coralRuntimeSource.repository;
+  releaseChannel: typeof coralRuntimeSource.releaseChannel;
   installed: boolean;
   verified: boolean;
-  installDir: string;
-  launcherPath: string;
-  packageName: typeof coralRuntimePackage.name;
-  expectedVersion: typeof coralRuntimePackage.version;
+  installDir: string | null;
+  jarPath: string | null;
   installedVersion: string | null;
-  expectedIntegrity: typeof coralRuntimePackage.integrity;
-  installedIntegrity: string | null;
-  installedTarball: string | null;
-  provenance: { registryTarball: typeof coralRuntimePackage.tarball };
+  installedTag: string | null;
+  expectedSha256: string | null;
+  actualSha256: string | null;
+  assetUrl: string | null;
+  releaseUrl: string | null;
+  provisionedAt: string | null;
   java: JavaRuntimeStatus;
 }
 
-export function coralRuntimeInstallDir(options: ResolveRefineryPathsOptions = {}): string {
-  return path.join(resolveRefineryPaths(options).coralRuntimeRootDir, coralRuntimePackage.version);
+export interface ProvisionCoralRuntimeOptions extends ResolveRefineryPathsOptions {
+  confirmed: boolean;
+  resolveRelease?: () => Promise<CoralReleaseArtifact>;
+  downloadRelease?: (artifact: CoralReleaseArtifact, destination: string) => Promise<void>;
 }
 
-export function coralRuntimeLauncherPath(options: ResolveRefineryPathsOptions = {}): string {
-  return path.join(coralRuntimeInstallDir(options), "node_modules", coralRuntimePackage.name, "npx", "coral-server.js");
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+function coralRuntimeManifestPath(options: ResolveRefineryPathsOptions = {}): string {
+  return path.join(resolveRefineryPaths(options).coralRuntimeRootDir, "active.json");
+}
+
+export function coralRuntimeInstallDir(
+  options: ResolveRefineryPathsOptions = {},
+  version?: string,
+): string {
+  const root = resolveRefineryPaths(options).coralRuntimeRootDir;
+  return version ? path.join(root, version) : root;
+}
+
+export function coralRuntimeJarPath(options: ResolveRefineryPathsOptions = {}): string | null {
+  const manifest = readRuntimeManifest(coralRuntimeManifestPath(options));
+  return manifest ? path.join(coralRuntimeInstallDir(options, manifest.version), manifest.assetName) : null;
+}
+
+export function verifyCoralRuntimeJarPath(jarPath: string): boolean {
+  const resolvedJar = path.resolve(jarPath);
+  const runtimeRoot = path.dirname(path.dirname(resolvedJar));
+  const manifest = readRuntimeManifest(path.join(runtimeRoot, "active.json"));
+  if (!manifest) return false;
+  const expectedJar = path.join(runtimeRoot, manifest.version, manifest.assetName);
+  if (resolvedJar !== expectedJar) return false;
+  try {
+    const stat = fs.lstatSync(resolvedJar);
+    return stat.isFile()
+      && !stat.isSymbolicLink()
+      && stat.size === manifest.size
+      && sha256File(resolvedJar) === manifest.sha256;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function parseJavaMajorVersion(output: string): number | null {
@@ -73,6 +131,8 @@ export function inspectJavaRuntime(
 
 function readJson(file: string): Record<string, unknown> | null {
   try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
     return JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return null;
@@ -80,132 +140,329 @@ function readJson(file: string): Record<string, unknown> | null {
   }
 }
 
-function installedPackageRecord(installDir: string): { version: string | null; integrity: string | null; resolved: string | null; launcher: string } {
-  const packageJson = readJson(path.join(installDir, "node_modules", coralRuntimePackage.name, "package.json"));
-  const packageLock = readJson(path.join(installDir, "package-lock.json"))
-    ?? readJson(path.join(installDir, "node_modules", ".package-lock.json"));
-  const packages = packageLock?.packages;
-  const packageRecords = packages && typeof packages === "object" ? packages as Record<string, unknown> : {};
-  const lockEntry = packageRecords[`node_modules/${coralRuntimePackage.name}`]
-    ?? Object.entries(packageRecords).find(([entry]) => entry.replaceAll("\\", "/").endsWith(`/node_modules/${coralRuntimePackage.name}`))?.[1]
-    ?? null;
-  return {
-    version: typeof packageJson?.version === "string" ? packageJson.version : null,
-    integrity: lockEntry && typeof lockEntry === "object" && typeof (lockEntry as Record<string, unknown>).integrity === "string"
-      ? String((lockEntry as Record<string, unknown>).integrity)
-      : null,
-    resolved: lockEntry && typeof lockEntry === "object" && typeof (lockEntry as Record<string, unknown>).resolved === "string"
-      ? String((lockEntry as Record<string, unknown>).resolved)
-      : null,
-    launcher: path.join(installDir, "node_modules", coralRuntimePackage.name, "npx", "coral-server.js"),
-  };
+function stableVersionFromTag(tag: string): string | null {
+  const match = tag.match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
+}
+
+function isSha256(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+
+function isOfficialAssetUrl(value: string, tag: string, assetName: string): boolean {
+  return value === `https://github.com/${coralRuntimeSource.repository}/releases/download/${tag}/${assetName}`;
+}
+
+function assertValidReleaseArtifact(artifact: CoralReleaseArtifact): void {
+  if (
+    stableVersionFromTag(artifact.tag) !== artifact.version
+    || artifact.assetName !== `coral-server-${artifact.version}.jar`
+    || !isOfficialAssetUrl(artifact.assetUrl, artifact.tag, artifact.assetName)
+    || artifact.releaseUrl !== `https://github.com/${coralRuntimeSource.repository}/releases/tag/${artifact.tag}`
+    || !isSha256(artifact.sha256)
+    || !Number.isSafeInteger(artifact.size)
+    || artifact.size <= 0
+    || artifact.size > coralRuntimeSource.maximumAssetBytes
+  ) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_PROVENANCE_INVALID",
+      "The resolved Coral Server release artifact did not have valid official stable-release provenance.",
+      { phase: "coral-runtime" },
+    );
+  }
+}
+
+function readRuntimeManifest(file: string): CoralRuntimeManifest | null {
+  const value = readJson(file);
+  if (!value) return null;
+  const version = typeof value.version === "string" ? value.version : "";
+  const tag = typeof value.tag === "string" ? value.tag : "";
+  const assetName = typeof value.assetName === "string" ? value.assetName : "";
+  const assetUrl = typeof value.assetUrl === "string" ? value.assetUrl : "";
+  const releaseUrl = typeof value.releaseUrl === "string" ? value.releaseUrl : "";
+  const sha256 = typeof value.sha256 === "string" ? value.sha256 : "";
+  const size = typeof value.size === "number" ? value.size : -1;
+  const provisionedAt = typeof value.provisionedAt === "string" ? value.provisionedAt : "";
+  if (
+    value.schemaVersion !== "refinery.coral-runtime-manifest.v1"
+    || value.source !== "github-release"
+    || value.repository !== coralRuntimeSource.repository
+    || value.releaseChannel !== coralRuntimeSource.releaseChannel
+    || stableVersionFromTag(tag) !== version
+    || assetName !== `coral-server-${version}.jar`
+    || !isOfficialAssetUrl(assetUrl, tag, assetName)
+    || releaseUrl !== `https://github.com/${coralRuntimeSource.repository}/releases/tag/${tag}`
+    || !isSha256(sha256)
+    || !Number.isSafeInteger(size)
+    || size <= 0
+    || size > coralRuntimeSource.maximumAssetBytes
+    || !Number.isFinite(Date.parse(provisionedAt))
+  ) return null;
+  return value as unknown as CoralRuntimeManifest;
+}
+
+function sha256File(file: string): string | null {
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const hash = crypto.createHash("sha256");
+    const descriptor = fs.openSync(file, "r");
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    try {
+      let read = 0;
+      while ((read = fs.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, read));
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    return hash.digest("hex");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 export function inspectCoralRuntime(options: ResolveRefineryPathsOptions = {}): CoralRuntimeStatus {
-  const installDir = coralRuntimeInstallDir(options);
-  const record = installedPackageRecord(installDir);
-  const installed = fs.existsSync(record.launcher) && record.version !== null;
-  const verified = installed
-    && record.version === coralRuntimePackage.version
-    && record.integrity === coralRuntimePackage.integrity
-    && record.resolved === coralRuntimePackage.tarball;
+  const manifest = readRuntimeManifest(coralRuntimeManifestPath(options));
+  const installDir = manifest ? coralRuntimeInstallDir(options, manifest.version) : null;
+  const jarPath = manifest && installDir ? path.join(installDir, manifest.assetName) : null;
+  const actualSha256 = jarPath ? sha256File(jarPath) : null;
+  let installed = false;
+  if (manifest && jarPath) {
+    try {
+      const stat = fs.lstatSync(jarPath);
+      installed = stat.isFile() && !stat.isSymbolicLink() && stat.size === manifest.size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   return {
-    schemaVersion: "refinery.coral-runtime.v1",
+    schemaVersion: "refinery.coral-runtime.v2",
+    source: "github-release",
+    repository: coralRuntimeSource.repository,
+    releaseChannel: coralRuntimeSource.releaseChannel,
     installed,
-    verified,
+    verified: installed && actualSha256 === manifest?.sha256,
     installDir,
-    launcherPath: record.launcher,
-    packageName: coralRuntimePackage.name,
-    expectedVersion: coralRuntimePackage.version,
-    installedVersion: record.version,
-    expectedIntegrity: coralRuntimePackage.integrity,
-    installedIntegrity: record.integrity,
-    installedTarball: record.resolved,
-    provenance: { registryTarball: coralRuntimePackage.tarball },
+    jarPath,
+    installedVersion: manifest?.version ?? null,
+    installedTag: manifest?.tag ?? null,
+    expectedSha256: manifest?.sha256 ?? null,
+    actualSha256,
+    assetUrl: manifest?.assetUrl ?? null,
+    releaseUrl: manifest?.releaseUrl ?? null,
+    provisionedAt: manifest?.provisionedAt ?? null,
     java: inspectJavaRuntime(options.env),
   };
 }
 
-function provisioningEnvironment(env: NodeJS.ProcessEnv | Record<string, string | undefined>): NodeJS.ProcessEnv {
-  const allowed = [
-    "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TMPDIR", "TEMP", "TMP",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "npm_config_registry", "NPM_CONFIG_REGISTRY",
-  ];
-  return Object.fromEntries(allowed
-    .map((name) => [name, env[name]] as const)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-}
-
-async function runNpmInstall(destination: string, env: NodeJS.ProcessEnv | Record<string, string | undefined>): Promise<void> {
-  const command = process.platform === "win32" ? "npm.cmd" : "npm";
-  const spec = `${coralRuntimePackage.name}@${coralRuntimePackage.version}`;
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, [
-      "install", "--prefix", destination, "--no-save", "--package-lock=true",
-      "--ignore-scripts", "--no-audit", "--no-fund", spec,
-    ], {
-      env: provisioningEnvironment(env),
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
+export async function resolveLatestCoralRelease(fetchImpl: FetchLike = fetch): Promise<CoralReleaseArtifact> {
+  let response: Response;
+  try {
+    response = await fetchImpl(coralRuntimeSource.releaseApi, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "refinery-coral-provisioner",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      signal: AbortSignal.timeout(15_000),
     });
-    const stderr: Buffer[] = [];
-    let stderrBytes = 0;
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderrBytes += chunk.length;
-      if (stderrBytes <= 32 * 1024) stderr.push(chunk);
-    });
-    child.on("error", (error) => reject(new RefineryError(
-      "CORAL_RUNTIME_PROVISION_FAILED",
-      `Could not start npm to provision the pinned Coral runtime: ${error.message}`,
-      { phase: "coral-runtime" },
-    )));
-    child.on("exit", (code) => code === 0 ? resolve() : reject(new RefineryError(
-      "CORAL_RUNTIME_PROVISION_FAILED",
-      `Pinned Coral runtime installation failed with exit code ${code ?? "unknown"}.`,
-      { phase: "coral-runtime", details: { stderr: Buffer.concat(stderr).toString("utf8").slice(0, 2_000) } },
-    )));
-  });
-}
-
-export async function provisionCoralRuntime(options: ResolveRefineryPathsOptions & { confirmed: boolean }): Promise<CoralRuntimeStatus> {
-  if (!options.confirmed) {
+  } catch (error) {
     throw new RefineryError(
-      "CORAL_RUNTIME_CONFIRMATION_REQUIRED",
-      `Provisioning downloads the pinned ${coralRuntimePackage.name}@${coralRuntimePackage.version} runtime (about 102 MB). Human confirmation is required.`,
+      "CORAL_RUNTIME_RELEASE_LOOKUP_FAILED",
+      `Could not resolve Coral Server's latest stable public release: ${(error as Error).message}`,
       { phase: "coral-runtime" },
     );
   }
-  const current = inspectCoralRuntime(options);
-  if (current.verified) return current;
-  const finalDir = coralRuntimeInstallDir(options);
-  const parent = path.dirname(finalDir);
+  if (!response.ok) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_RELEASE_LOOKUP_FAILED",
+      `Coral Server release lookup returned HTTP ${response.status}.`,
+      { phase: "coral-runtime" },
+    );
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await response.json() as Record<string, unknown>;
+  } catch {
+    throw new RefineryError(
+      "CORAL_RUNTIME_RELEASE_LOOKUP_FAILED",
+      "Coral Server release lookup returned malformed JSON.",
+      { phase: "coral-runtime" },
+    );
+  }
+  const tag = typeof body.tag_name === "string" ? body.tag_name : "";
+  const version = stableVersionFromTag(tag);
+  const assets = Array.isArray(body.assets) ? body.assets as Array<Record<string, unknown>> : [];
+  const assetName = version ? `coral-server-${version}.jar` : "";
+  const asset = assets.find((candidate) => candidate.name === assetName);
+  const digest = typeof asset?.digest === "string" ? asset.digest : "";
+  const sha256 = digest.startsWith("sha256:") ? digest.slice("sha256:".length).toLowerCase() : "";
+  const assetUrl = typeof asset?.browser_download_url === "string" ? asset.browser_download_url : "";
+  const releaseUrl = typeof body.html_url === "string" ? body.html_url : "";
+  const size = typeof asset?.size === "number" ? asset.size : -1;
+  if (
+    !version
+    || body.draft !== false
+    || body.prerelease !== false
+    || !asset
+    || !isOfficialAssetUrl(assetUrl, tag, assetName)
+    || releaseUrl !== `https://github.com/${coralRuntimeSource.repository}/releases/tag/${tag}`
+    || !isSha256(sha256)
+    || !Number.isSafeInteger(size)
+    || size <= 0
+    || size > coralRuntimeSource.maximumAssetBytes
+  ) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_PROVENANCE_INVALID",
+      "The latest Coral Server release did not expose one stable, digest-backed official JAR artifact.",
+      { phase: "coral-runtime" },
+    );
+  }
+  const artifact = { version, tag, assetName, assetUrl, releaseUrl, sha256, size };
+  assertValidReleaseArtifact(artifact);
+  return artifact;
+}
+
+async function downloadCoralRelease(
+  artifact: CoralReleaseArtifact,
+  destination: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchImpl(artifact.assetUrl, {
+      headers: { "User-Agent": "refinery-coral-provisioner" },
+      signal: AbortSignal.timeout(120_000),
+      redirect: "follow",
+    });
+  } catch (error) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_PROVISION_FAILED",
+      `Could not download Coral Server ${artifact.version}: ${(error as Error).message}`,
+      { phase: "coral-runtime" },
+    );
+  }
+  if (!response.ok || !response.body) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_PROVISION_FAILED",
+      `Coral Server artifact download returned HTTP ${response.status}.`,
+      { phase: "coral-runtime" },
+    );
+  }
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > 0 && contentLength !== artifact.size) {
+    throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Coral Server artifact size did not match release provenance.", { phase: "coral-runtime" });
+  }
+  const descriptor = fs.openSync(destination, "wx", 0o600);
+  const hash = crypto.createHash("sha256");
+  let bytes = 0;
+  try {
+    for await (const rawChunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+      const chunk = Buffer.from(rawChunk);
+      bytes += chunk.length;
+      if (bytes > artifact.size || bytes > coralRuntimeSource.maximumAssetBytes) {
+        throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Coral Server artifact exceeded its declared size.", { phase: "coral-runtime" });
+      }
+      hash.update(chunk);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const written = fs.writeSync(descriptor, chunk, offset, chunk.length - offset);
+        if (written <= 0) throw new RefineryError("CORAL_RUNTIME_PROVISION_FAILED", "Coral Server artifact write made no progress.", { phase: "coral-runtime" });
+        offset += written;
+      }
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (bytes !== artifact.size || hash.digest("hex") !== artifact.sha256) {
+    throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Coral Server artifact failed size or SHA-256 verification.", { phase: "coral-runtime" });
+  }
+}
+
+function runtimeManifest(artifact: CoralReleaseArtifact): CoralRuntimeManifest {
+  return {
+    schemaVersion: "refinery.coral-runtime-manifest.v1",
+    source: "github-release",
+    repository: coralRuntimeSource.repository,
+    releaseChannel: coralRuntimeSource.releaseChannel,
+    ...artifact,
+    provisionedAt: new Date().toISOString(),
+  };
+}
+
+function writePrivateJson(file: string, value: unknown): void {
+  const parent = path.dirname(file);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   const nonce = `${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
-  const staged = path.join(parent, `.${coralRuntimePackage.version}.${nonce}.stage`);
-  const backup = path.join(parent, `.${coralRuntimePackage.version}.${nonce}.backup`);
-  fs.mkdirSync(staged, { mode: 0o700 });
+  const staged = `${file}.${nonce}.stage`;
+  const backup = `${file}.${nonce}.backup`;
+  fs.writeFileSync(staged, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  const existed = fs.existsSync(file);
   try {
-    await runNpmInstall(staged, options.env ?? process.env);
-    const record = installedPackageRecord(staged);
-    if (
-      record.version !== coralRuntimePackage.version
-      || record.integrity !== coralRuntimePackage.integrity
-      || record.resolved !== coralRuntimePackage.tarball
-      || !fs.existsSync(record.launcher)
-    ) {
-      throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Provisioned Coral runtime did not match the pinned version and registry integrity.", { phase: "coral-runtime" });
+    if (existed) fs.renameSync(file, backup);
+    fs.renameSync(staged, file);
+    if (existed) fs.rmSync(backup, { force: true });
+  } catch (error) {
+    if (!fs.existsSync(file) && fs.existsSync(backup)) fs.renameSync(backup, file);
+    throw error;
+  } finally {
+    fs.rmSync(staged, { force: true });
+  }
+}
+
+export async function provisionCoralRuntime(options: ProvisionCoralRuntimeOptions): Promise<CoralRuntimeStatus> {
+  if (!options.confirmed) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_CONFIRMATION_REQUIRED",
+      "Provisioning downloads the latest stable Coral Server JAR from the official public GitHub release (currently about 110 MB). Human confirmation is required.",
+      { phase: "coral-runtime" },
+    );
+  }
+  const artifact = await (options.resolveRelease ?? (() => resolveLatestCoralRelease()))();
+  assertValidReleaseArtifact(artifact);
+  const current = inspectCoralRuntime(options);
+  if (
+    current.verified
+    && current.installedVersion === artifact.version
+    && current.expectedSha256 === artifact.sha256
+    && current.assetUrl === artifact.assetUrl
+  ) return current;
+
+  const root = coralRuntimeInstallDir(options);
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const nonce = `${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+  const finalDir = coralRuntimeInstallDir(options, artifact.version);
+  const staged = path.join(root, `.${artifact.version}.${nonce}.stage`);
+  const backup = path.join(root, `.${artifact.version}.${nonce}.backup`);
+  fs.mkdirSync(staged, { mode: 0o700 });
+  const stagedJar = path.join(staged, artifact.assetName);
+  let backedUp = false;
+  try {
+    await (options.downloadRelease ?? downloadCoralRelease)(artifact, stagedJar);
+    const stagedHash = sha256File(stagedJar);
+    const stagedStat = fs.lstatSync(stagedJar);
+    if (!stagedStat.isFile() || stagedStat.isSymbolicLink() || stagedStat.size !== artifact.size || stagedHash !== artifact.sha256) {
+      throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Downloaded Coral Server runtime failed post-download verification.", { phase: "coral-runtime" });
     }
-    const existed = fs.existsSync(finalDir);
-    if (existed) fs.renameSync(finalDir, backup);
+    const manifest = runtimeManifest(artifact);
+    writePrivateJson(path.join(staged, "provenance.json"), manifest);
+    if (fs.existsSync(finalDir)) {
+      fs.renameSync(finalDir, backup);
+      backedUp = true;
+    }
     try {
       fs.renameSync(staged, finalDir);
-      if (existed) fs.rmSync(backup, { recursive: true, force: true });
+      writePrivateJson(coralRuntimeManifestPath(options), manifest);
+      if (backedUp) fs.rmSync(backup, { recursive: true, force: true });
     } catch (error) {
-      if (!fs.existsSync(finalDir) && fs.existsSync(backup)) fs.renameSync(backup, finalDir);
+      if (backedUp && fs.existsSync(backup)) {
+        fs.rmSync(finalDir, { recursive: true, force: true });
+        fs.renameSync(backup, finalDir);
+      }
       throw error;
     }
     const result = inspectCoralRuntime(options);
-    if (!result.verified) throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Installed Coral runtime failed post-install verification.", { phase: "coral-runtime" });
+    if (!result.verified) throw new RefineryError("CORAL_RUNTIME_INTEGRITY_FAILED", "Installed Coral Server runtime failed activation verification.", { phase: "coral-runtime" });
     return result;
   } finally {
     fs.rmSync(staged, { recursive: true, force: true });

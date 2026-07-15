@@ -120,7 +120,7 @@ const setupHtml = `<!doctype html>
       <label for="coral-key">Coral API key</label>
       <input id="coral-key" name="coral-key" type="password" required autocomplete="off" spellcheck="false">
       <p class="hint">Sent only to this loopback process, checked with registry and model-catalogue GET requests, then stored in a private local file using POSIX mode 0600 or the Windows user-profile ACL. It is not an OS keychain, and is never placed in the URL, Codex transcript, logs, or browser storage.</p>
-      <label class="choice"><input id="provision-runtime" type="checkbox" checked> Provision the pinned local Coral runtime (about 102 MB)</label>
+      <label class="choice"><input id="provision-runtime" type="checkbox" checked> Provision the latest stable public Coral Server release with recorded SHA-256 verification (about 110 MB)</label>
       <label class="choice"><input id="browser-open" type="checkbox"> Let Refinery request the graph UI after graph changes</label>
       <button type="submit">Verify and finish setup</button>
       <p id="status" role="status" aria-live="polite"></p>

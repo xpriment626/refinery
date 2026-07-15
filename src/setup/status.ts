@@ -189,7 +189,7 @@ export function inspectSetup(args: {
   if (!runtime.verified) issues.push({
     code: "CORAL_RUNTIME_NOT_PROVISIONED",
     severity: "human",
-    message: `The pinned ${runtime.packageName}@${runtime.expectedVersion} runtime is not provisioned or failed integrity verification.`,
+    message: "The latest-stable Coral Server runtime is not provisioned or failed recorded SHA-256 verification.",
     repair: { command: "refinery setup provision coral --confirm --json", requiresHumanConfirmation: true },
   });
   if (!runtime.java.sufficient) issues.push({

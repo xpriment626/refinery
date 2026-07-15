@@ -17,7 +17,7 @@ surface.
 - Codex memories enabled under `~/.codex/memories`, or an explicitly provided
   directory named `memories`.
 - A Coral API key for live specialist model calls.
-- Java 24 or newer for the pinned local Coral Server runtime.
+- Java 24 or newer for the verified local Coral Server runtime.
 
 ## Install
 
@@ -31,7 +31,7 @@ refinery setup start --project "$PWD" --json
 `setup start` returns a short-lived loopback capability URL. Codex should open
 it in the in-app browser; without browser automation, open the URL manually.
 The human enters the Coral API key directly in that local page, confirms the
-private local credential file, and chooses whether to provision the pinned
+private local credential file, and chooses whether to provision the latest stable
 Coral runtime and request the graph UI after syncs. The API key does not pass
 through chat, command arguments, the URL, logs, or browser storage.
 
@@ -444,7 +444,10 @@ Runtime state is global by default:
     coral-api-key
   runtime/
     coral/
-      1.2.0-SNAPSHOT-RC-3/
+      active.json
+      <version>/
+        coral-server-<version>.jar
+        provenance.json
   setup/
     by-project/
       <project-key>/
@@ -495,18 +498,25 @@ under `coral/agents/*` and a packaged Coral config under
 `coral/refinery-config.toml`. The default model route is Coral's
 OpenAI-compatible endpoint with `gpt-5.4-nano`.
 
-Refinery pins `coralos-dev@1.2.0-SNAPSHOT-RC-3` and its npm registry integrity.
-Provisioning is an explicit, disclosed setup action of about 102 MB:
+Refinery resolves the latest non-prerelease release from the public
+`Coral-Protocol/coral-server` GitHub repository during explicit provisioning.
+It downloads that release's official JAR, requires GitHub's SHA-256 digest,
+records the exact tag, URL, size, and digest, then runs only the verified local
+artifact. At the v0.3.0 release-candidate audit this resolves to Coral Server
+v1.4.0 (about 109 MB):
 
 ```bash
 refinery setup provision coral --confirm --json
 ```
 
-Ordinary review never invokes `npx`, follows a mutable dist-tag, or downloads a
-runtime. It launches only the integrity-checked local runtime above, or an
-explicit `--coral-jar` supplied by the user. Node is discovered from the
-running executable and Java from `PATH` (or `REFINERY_JAVA_BIN`); no
-machine-specific NVM or Homebrew path is a product contract.
+This deliberately separates Coral's documented `npx coralos-dev@latest`
+developer launcher from Refinery's managed runtime. The npm launcher's package
+version is not the Coral Server release version and may lag the stable GitHub
+release. Ordinary review never invokes `npx`, resolves a release, or downloads
+a runtime. It launches only the recorded local JAR above, or an explicit
+`--coral-jar` supplied by the user. Java is discovered from `PATH` (or
+`REFINERY_JAVA_BIN`); no machine-specific NVM or Homebrew path is a product
+contract.
 
 When Refinery owns the Coral process, it selects an available loopback port and
 an ephemeral 256-bit server auth key for that run. Neither `5555` nor the

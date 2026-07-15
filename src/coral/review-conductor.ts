@@ -36,7 +36,7 @@ import {
   refineryCoralPort,
 } from "./definitions.ts";
 import { buildCoralCommunicationProjection, defaultReviewTopology, type CoralCommunicationProjection, type ReviewTopology } from "./topology.ts";
-import { coralRuntimeLauncherPath } from "./runtime.ts";
+import { coralRuntimeJarPath, verifyCoralRuntimeJarPath } from "./runtime.ts";
 import {
   createSparseBlackboard,
   routeSparseClaims,
@@ -96,7 +96,7 @@ export interface CoralReviewRuntimeOptions {
   threadId?: string;
   startServer?: boolean;
   noTeardown?: boolean;
-  coralRuntimeLauncher?: string;
+  coralRuntimeJar?: string;
   coralJar?: string;
   timeoutMs?: number;
   modelName?: string;
@@ -628,7 +628,11 @@ function parseDecisionSynthesizerOutput(runId: string, output: Record<string, un
 }
 
 function sourceReferenceTokens(value: unknown): string[] {
-  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (typeof value === "string" && value.trim()) {
+    const normalized = value.trim();
+    const embeddedIds = normalized.match(/(?:graph-node|graph-revision|responsibility-unit|source-doc):[A-Za-z0-9._-]+/g) ?? [];
+    return [...new Set([normalized, ...embeddedIds])];
+  }
   if (!isRecord(value)) return [];
   const identityKeys = [
     "source_id",
@@ -641,7 +645,7 @@ function sourceReferenceTokens(value: unknown): string[] {
   ];
   return identityKeys.flatMap((key) => {
     const candidate = value[key];
-    return typeof candidate === "string" && candidate.trim() ? [candidate.trim()] : [];
+    return sourceReferenceTokens(candidate);
   });
 }
 
@@ -839,25 +843,31 @@ async function waitForServer(apiUrl: string, authKey: string, timeoutMs: number)
 
 function startCoralServer(args: {
   configPath: string;
-  coralRuntimeLauncher?: string;
+  coralRuntimeJar?: string;
   coralJar?: string;
   secretEnv?: Record<string, string>;
   logSecrets?: string[];
   logs: string[];
 }): ChildProcessWithoutNullStreams {
   const configAbs = path.isAbsolute(args.configPath) ? args.configPath : path.resolve(repoRoot, args.configPath);
-  const launcher = args.coralRuntimeLauncher ?? coralRuntimeLauncherPath();
-  if (!args.coralJar && !fs.existsSync(launcher)) {
+  const managedJar = args.coralRuntimeJar ?? coralRuntimeJarPath();
+  const selectedJar = args.coralJar ? path.resolve(args.coralJar) : managedJar;
+  if (!selectedJar || !fs.existsSync(selectedJar)) {
     throw new RefineryError(
       "CORAL_RUNTIME_NOT_PROVISIONED",
-      "The pinned Coral runtime is not provisioned. Run `refinery setup provision coral --confirm --json` before live review.",
-      { phase: "coral-runtime", details: { launcher } },
+      "The latest-stable Coral Server runtime is not provisioned. Run `refinery setup provision coral --confirm --json` before live review.",
+      { phase: "coral-runtime", details: { jarPath: selectedJar } },
     );
   }
-  const command = args.coralJar ? (process.env.REFINERY_JAVA_BIN ?? "java") : process.execPath;
-  const commandArgs = args.coralJar
-    ? ["-jar", path.resolve(args.coralJar)]
-    : [launcher, "server", "start"];
+  if (!args.coralJar && !verifyCoralRuntimeJarPath(selectedJar)) {
+    throw new RefineryError(
+      "CORAL_RUNTIME_INTEGRITY_FAILED",
+      "The managed Coral Server JAR no longer matches its active release provenance. Re-run `refinery setup provision coral --confirm --json`.",
+      { phase: "coral-runtime", details: { jarPath: selectedJar } },
+    );
+  }
+  const command = process.env.REFINERY_JAVA_BIN ?? "java";
+  const commandArgs = ["-jar", selectedJar];
   const logSecrets = [refineryCoralAuthKey, ...(args.logSecrets ?? []), ...Object.values(args.secretEnv ?? {})];
   const inheritedEnv = { ...process.env };
   delete inheritedEnv.CORAL_API_KEY;
@@ -892,7 +902,7 @@ function defaultRuntimeCoralConfig(options: RuntimeCoralConfigOptions = {}): str
     'bind_address = "127.0.0.1"',
     'external_address = "127.0.0.1"',
     `bind_port = ${options.port ?? refineryCoralPort}`,
-    "allow_any_host = true",
+    "allow_any_host = false",
     "",
     "[auth]",
     `keys = [${JSON.stringify(options.authKey ?? refineryCoralAuthKey)}]`,
@@ -1595,13 +1605,6 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
   };
 
   try {
-    if (configuredModel.transport === "coral-server-proxy" && startServer && !coralJar) {
-      throw new RefineryError(
-        "CORAL_SERVER_PROXY_REQUIRES_MODERN_RUNTIME",
-        "Managed Coral LLM proxy mode requires Coral Server 1.4+ via --coral-jar or REFINERY_CORAL_SERVER_JAR.",
-        { phase: "coral", runId: options.runId },
-      );
-    }
     if (
       configuredModel.transport === "coral-server-proxy"
       && configuredModel.proxyProvider === deepSeekProxyProvider
@@ -1650,7 +1653,7 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
     if (startServer && !(await isServerReady(apiUrl, authKey))) {
       child = startCoralServer({
         configPath,
-        coralRuntimeLauncher: coral.coralRuntimeLauncher,
+        coralRuntimeJar: coral.coralRuntimeJar,
         coralJar,
         secretEnv: selectedServerSecretEnv,
         logSecrets: [authKey],
@@ -1963,13 +1966,6 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
 
   fs.mkdirSync(runDir, { recursive: true });
   try {
-    if (configuredModel.transport === "coral-server-proxy" && startServer && !coralJar) {
-      throw new RefineryError(
-        "CORAL_SERVER_PROXY_REQUIRES_MODERN_RUNTIME",
-        "Managed Coral LLM proxy mode requires Coral Server 1.4+ via --coral-jar or REFINERY_CORAL_SERVER_JAR.",
-        { phase: "coral", runId: options.runId, runDir },
-      );
-    }
     if (
       configuredModel.transport === "coral-server-proxy"
       && configuredModel.proxyProvider === deepSeekProxyProvider
@@ -2034,7 +2030,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
     if (startServer && !(await isServerReady(apiUrl, authKey))) {
       child = startCoralServer({
         configPath,
-        coralRuntimeLauncher: coral.coralRuntimeLauncher,
+        coralRuntimeJar: coral.coralRuntimeJar,
         coralJar,
         secretEnv: selectedServerSecretEnv,
         logSecrets: [authKey],

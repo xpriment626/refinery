@@ -30,7 +30,7 @@ import {
   refineryCoralPort,
 } from "./definitions.ts";
 import { resolveRefineryPaths } from "../core/paths.ts";
-import { coralRuntimeLauncherPath } from "./runtime.ts";
+import { coralRuntimeJarPath } from "./runtime.ts";
 import { cleanupRuntimeCoralConfigPath, resolveRuntimeCoralConfigPath } from "./review-conductor.ts";
 
 interface SmokeArgs {
@@ -41,7 +41,7 @@ interface SmokeArgs {
   runId: string;
   outputDir: string;
   startServer: boolean;
-  coralRuntimeLauncher: string;
+  coralRuntimeJar: string;
   timeoutMs: number;
 }
 
@@ -87,7 +87,7 @@ function parseArgs(argv: string[]): SmokeArgs {
     runId,
     outputDir: read("--output-dir") ?? path.join(resolveRefineryPaths({ cwd: repoRoot }).runsDir, runId),
     startServer: has("--start-server"),
-    coralRuntimeLauncher: read("--coral-runtime-launcher") ?? coralRuntimeLauncherPath({ cwd: repoRoot }),
+    coralRuntimeJar: read("--coral-runtime-jar") ?? coralRuntimeJarPath({ cwd: repoRoot }) ?? "",
     timeoutMs: Number.parseInt(read("--timeout-ms") ?? "180000", 10),
   };
 }
@@ -127,10 +127,10 @@ async function waitForServer(apiUrl: string, authKey: string, timeoutMs: number)
 
 function startCoralServer(args: SmokeArgs, logs: string[]): ChildProcessWithoutNullStreams {
   const configAbs = path.resolve(repoRoot, args.configPath);
-  if (!fs.existsSync(args.coralRuntimeLauncher)) {
-    throw new Error("Pinned Coral runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
+  if (!args.coralRuntimeJar || !fs.existsSync(args.coralRuntimeJar)) {
+    throw new Error("Latest-stable Coral Server runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
   }
-  const child = spawn(process.execPath, [args.coralRuntimeLauncher, "server", "start"], {
+  const child = spawn(process.env.REFINERY_JAVA_BIN ?? "java", ["-jar", args.coralRuntimeJar], {
     cwd: repoRoot,
     env: {
       ...process.env,

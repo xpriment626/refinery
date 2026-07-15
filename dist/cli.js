@@ -32,7 +32,7 @@ import { readUiConfig, writeUiConfig } from "./gateway/config.js";
 import { gatewayStatus, notifyGatewayGraphSync, startGateway, stopGateway } from "./gateway/lifecycle.js";
 import { runCoralReview, startCoralConsoleRun } from "./coral/review-conductor.js";
 import { parseReviewTopology } from "./coral/topology.js";
-import { coralRuntimeLauncherPath } from "./coral/runtime.js";
+import { coralRuntimeJarPath } from "./coral/runtime.js";
 import { provisionCoralRuntime } from "./coral/runtime.js";
 import { inspectSetup } from "./setup/status.js";
 import { serveSetupLifecycle, setupLifecycleStatus, startSetupLifecycle, stopSetupLifecycle } from "./setup/lifecycle.js";
@@ -1169,10 +1169,10 @@ async function cmdConsole(rest) {
             namespace: typeof values["coral-namespace"] === "string" ? values["coral-namespace"] : undefined,
             sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
             threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
-            coralRuntimeLauncher: coralRuntimeLauncherPath({
+            coralRuntimeJar: coralRuntimeJarPath({
                 home: typeof values.home === "string" ? values.home : undefined,
                 cwd: project,
-            }),
+            }) ?? undefined,
             coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
             llmProxy: Boolean(values["coral-llm-proxy"]),
             modelName: typeof values.model === "string" ? values.model : undefined,
@@ -1304,10 +1304,10 @@ async function cmdReview(rest) {
             namespace: typeof values["coral-namespace"] === "string" ? values["coral-namespace"] : undefined,
             sessionId: typeof values["coral-session-id"] === "string" ? values["coral-session-id"] : undefined,
             threadId: typeof values["coral-thread-id"] === "string" ? values["coral-thread-id"] : undefined,
-            coralRuntimeLauncher: coralRuntimeLauncherPath({
+            coralRuntimeJar: coralRuntimeJarPath({
                 home: typeof values.home === "string" ? values.home : undefined,
                 cwd: project,
-            }),
+            }) ?? undefined,
             coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
             llmProxy: Boolean(values["coral-llm-proxy"]),
             modelName: typeof values.model === "string" ? values.model : undefined,
