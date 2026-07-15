@@ -159,11 +159,14 @@ test("package surface does not publish experiment commands", () => {
 });
 
 test("npm pack allowlist contains runtime files only", () => {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(npm, ["pack", "--dry-run", "--json"], {
+  const npmCli = process.env.npm_execpath;
+  const command = npmCli ? process.execPath : (process.platform === "win32" ? "npm.cmd" : "npm");
+  const args = npmCli ? [npmCli, "pack", "--dry-run", "--json"] : ["pack", "--dry-run", "--json"];
+  const result = spawnSync(command, args, {
     cwd: repoRoot,
     encoding: "utf8",
     env: process.env,
+    shell: !npmCli && process.platform === "win32",
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const [pack] = JSON.parse(result.stdout) as Array<{ files: Array<{ path: string }> }>;

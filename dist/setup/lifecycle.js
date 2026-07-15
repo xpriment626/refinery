@@ -9,6 +9,7 @@ import { resolveRefineryPaths } from "../core/paths.js";
 import { startSetupHttpServer, setupCapabilityHash, setupProtocolVersion } from "./server.js";
 const setupStateSchemaVersion = "refinery.setup-daemon-state.v1";
 const maximumSetupTtlMs = 15 * 60 * 1_000;
+const setupStartupTimeoutMs = 20_000;
 function privateStateWrite(file, state) {
     const directory = path.dirname(file);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -202,8 +203,12 @@ export async function startSetupLifecycle(options) {
         windowsHide: true,
         env: setupDaemonEnvironment(env),
     });
+    let childExitCode = null;
+    let childSpawnError = null;
+    child.once("exit", (code) => { childExitCode = code; });
+    child.once("error", (error) => { childSpawnError = error.code ?? error.name; });
     child.unref();
-    const deadline = Date.now() + 8_000;
+    const deadline = Date.now() + setupStartupTimeoutMs;
     while (Date.now() < deadline) {
         const current = readState(paths.setupStatePath);
         if (current?.instanceId === state.instanceId && current.pid === child.pid && await health(current)) {
@@ -213,6 +218,8 @@ export async function startSetupLifecycle(options) {
                 humanConfirmationRequired: true,
             };
         }
+        if (childExitCode !== null || childSpawnError !== null)
+            break;
         await sleep(40);
     }
     if (child.pid) {
@@ -222,7 +229,14 @@ export async function startSetupLifecycle(options) {
         catch { /* already exited */ }
     }
     quarantineState(paths.setupStatePath);
-    throw new RefineryError("SETUP_SERVER_START_FAILED", "The local setup server did not become ready.", { phase: "setup-lifecycle" });
+    throw new RefineryError("SETUP_SERVER_START_FAILED", "The local setup server did not become ready.", {
+        phase: "setup-lifecycle",
+        details: {
+            timeoutMs: setupStartupTimeoutMs,
+            childExitCode,
+            childSpawnError,
+        },
+    });
 }
 export async function serveSetupLifecycle(options) {
     const project = path.resolve(options.project);
