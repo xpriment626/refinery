@@ -11,13 +11,15 @@ import {
   type GraphSourceItem,
 } from "./sync.ts";
 
+const project = path.resolve("/tmp/refinery-project");
+
 function sourceItem(content: string): GraphSourceItem {
   return {
     sourceAdapter: "test",
     sourceKey: "memory:stable-key",
     kind: "memory",
     scope: "project",
-    project: "/tmp/refinery-project",
+    project,
     label: "Stable memory",
     content,
     uri: "memory://stable-key",
@@ -31,7 +33,7 @@ function documentItem(): GraphSourceItem {
     sourceKey: "document:MEMORY.md",
     kind: "source_document",
     scope: "project",
-    project: "/tmp/refinery-project",
+    project,
     label: "MEMORY.md",
     content: "# Project memory",
     uri: "file:///tmp/memories/MEMORY.md",
@@ -46,7 +48,7 @@ test("unchanged graph sources keep stable node and revision identities", () => {
 
   const first = syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [sourceItem("Refinery keeps canonical memory outside its graph.")],
     edges: [],
@@ -54,7 +56,7 @@ test("unchanged graph sources keep stable node and revision identities", () => {
   });
   const second = syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [sourceItem("Refinery keeps canonical memory outside its graph.")],
     edges: [],
@@ -71,7 +73,7 @@ test("unchanged graph sources keep stable node and revision identities", () => {
   assert.equal(second.index.nodes[0]?.id, first.index.nodes[0]?.id);
   assert.equal(second.index.nodes[0]?.currentRevisionId, first.index.nodes[0]?.currentRevisionId);
   assert.equal(second.index.revisions.length, 1);
-  assert.equal(fs.statSync(graphPath).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal(fs.statSync(graphPath).mode & 0o777, 0o600);
 });
 
 test("changed sources replace revision-owned edges instead of retaining stale edges", () => {
@@ -90,7 +92,7 @@ test("changed sources replace revision-owned edges instead of retaining stale ed
 
   const first = syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [sourceItem("Old memory body."), documentItem()],
     edges: [edge],
@@ -101,7 +103,7 @@ test("changed sources replace revision-owned edges instead of retaining stale ed
 
   const second = syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [sourceItem("New memory body."), documentItem()],
     edges: [edge],
@@ -124,7 +126,7 @@ test("same-identity edge attribute changes are reported as updates", () => {
   const store = new JsonGraphStore(path.join(home, "graph.json"));
   const syncWithConfidence = (confidence: number, day: number) => syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [sourceItem("Stable body."), documentItem()],
     edges: [{
@@ -154,7 +156,7 @@ test("deleted sources remove their nodes, revisions, and incident edges from the
   const store = new JsonGraphStore(path.join(home, "graph.json"));
   const first = syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [sourceItem("Memory that will be deleted."), documentItem()],
     edges: [{
@@ -173,7 +175,7 @@ test("deleted sources remove their nodes, revisions, and incident edges from the
 
   const second = syncMemoryGraph({
     store,
-    project: "/tmp/refinery-project",
+    project,
     sourceSpecs: ["test:memories"],
     items: [documentItem()],
     edges: [],

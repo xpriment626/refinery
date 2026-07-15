@@ -26,6 +26,7 @@ import {
   refineryCoralAgentVersion,
   refineryCoralModelDefaults,
   refineryCoralAgentGlobForRepo,
+  refineryCoralModernAgentGlobForRepo,
   getCoralAgentBySpecialistName,
 } from "./coral/definitions.ts";
 import {
@@ -71,10 +72,7 @@ test("runtime Coral config materializes an absolute packaged agent glob", () => 
   const config = fs.readFileSync(runtimeConfigPath, "utf8");
 
   assert.match(config, /include_coral_home_agents = false/);
-  assert.match(
-    config,
-    new RegExp(`local_agents = \\["${refineryCoralAgentGlobForRepo(repoRoot).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\]`),
-  );
+  assert.equal(config.includes(`local_agents = [${JSON.stringify(refineryCoralAgentGlobForRepo(repoRoot))}]`), true);
   fs.rmSync(path.dirname(runtimeConfigPath), { recursive: true, force: true });
 });
 
@@ -86,11 +84,11 @@ test("modern runtime config is secretless, private, and selects the Coral 1.4 re
   });
   const config = fs.readFileSync(runtimeConfigPath, "utf8");
   assert.equal(refineryCoralModernAgentGlob, "coral/agents-v1.4/*");
-  assert.match(config, /coral\/agents-v1\.4\/\*/);
+  assert.equal(config.includes(`local_agents = [${JSON.stringify(refineryCoralModernAgentGlobForRepo(repoRoot))}]`), true);
   assert.match(config, /api_key = "\$\{CORAL_API_KEY\}"/);
   assert.match(config, /api_key = "\$\{DEEPSEEK_API_KEY\}"/);
   assert.doesNotMatch(config, /coral-secret|deepseek-secret/);
-  assert.equal(fs.statSync(runtimeConfigPath).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal(fs.statSync(runtimeConfigPath).mode & 0o777, 0o600);
   cleanupRuntimeCoralConfigPath(runtimeConfigPath);
   assert.equal(fs.existsSync(runtimeConfigPath), false);
 });

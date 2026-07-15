@@ -159,7 +159,8 @@ test("package surface does not publish experiment commands", () => {
 });
 
 test("npm pack allowlist contains runtime files only", () => {
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const result = spawnSync(npm, ["pack", "--dry-run", "--json"], {
     cwd: repoRoot,
     encoding: "utf8",
     env: process.env,
@@ -474,7 +475,7 @@ test("set auth coral stores a redacted Coral credential under Refinery home", ()
     present: true,
     path: credentialPath,
     source: "credentials",
-    mode: "0600",
+    mode: process.platform === "win32" ? "platform-managed" : "0600",
   });
   assert.equal(fs.readFileSync(credentialPath, "utf8"), "coral-test-secret\n");
   assert.doesNotMatch(result.stdout, /coral-test-secret/);
@@ -546,7 +547,7 @@ test("bundled Codex skill is the single $refinery instruction surface", () => {
   const skill = fs.readFileSync(bundledSkillPath, "utf8");
   const openai = fs.readFileSync(bundledSkillOpenAiPath, "utf8");
 
-  assert.match(skill, /^---\nname: refinery/m);
+  assert.match(skill, /^---\r?\nname: refinery/m);
   assert.match(skill, /Use whenever Codex is asked to inspect, audit, summarize, or propose edits from Codex memories, sessions, skills, files, or mixed source sets using Refinery/);
   assert.match(skill, /debate-critique is the default/i);
   assert.doesNotMatch(skill, /--topology\s+debate-critique/);
@@ -571,7 +572,7 @@ test("init creates global state directories and installs bundled Codex skill", (
   assert.equal(fs.statSync(path.join(home, "runs/by-project")).isDirectory(), true);
   assert.equal(fs.statSync(path.join(home, "graphs/by-project")).isDirectory(), true);
   assert.equal(fs.statSync(installedSkill).isFile(), true);
-  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
+  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\r?\nname: refinery/m);
   const codexSkill = parsed.codexSkill as Record<string, unknown>;
   assert.equal(codexSkill.requested, true);
   assert.equal(codexSkill.action, "installed");
@@ -599,7 +600,7 @@ test("init preserves existing Codex skill unless force is set", () => {
   const forced = runCli(["init", "--home", home, "--codex-home", codexHome, "--force", "--json"]);
   const forcedJson = parseJson(forced.stdout);
   assert.equal(forced.status, 0, forced.stderr || forced.stdout);
-  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
+  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\r?\nname: refinery/m);
   assert.equal((forcedJson.codexSkill as { action?: string }).action, "overwritten");
 });
 
@@ -614,7 +615,7 @@ test("skill install installs bundled Codex skill without initializing Refinery s
   assert.equal(parsed.ok, true);
   assert.equal(parsed.command, "skill install");
   assert.equal(fs.statSync(installedSkill).isFile(), true);
-  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\nname: refinery/m);
+  assert.match(fs.readFileSync(installedSkill, "utf8"), /^---\r?\nname: refinery/m);
   const codexSkill = parsed.codexSkill as Record<string, unknown>;
   assert.equal(codexSkill.requested, true);
   assert.equal(codexSkill.action, "installed");

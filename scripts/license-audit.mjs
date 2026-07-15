@@ -6,16 +6,6 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
 const allowed = new Set(["MIT", "ISC", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause"]);
-const reviewedOptionalPlatformLicenses = new Map([
-  ["@libsql/darwin-x64@0.5.28", "MIT"],
-  ["@libsql/linux-arm-gnueabihf@0.5.28", "MIT"],
-  ["@libsql/linux-arm-musleabihf@0.5.28", "MIT"],
-  ["@libsql/linux-arm64-gnu@0.5.28", "MIT"],
-  ["@libsql/linux-arm64-musl@0.5.28", "MIT"],
-  ["@libsql/linux-x64-gnu@0.5.28", "MIT"],
-  ["@libsql/linux-x64-musl@0.5.28", "MIT"],
-  ["@libsql/win32-x64-msvc@0.5.28", "MIT"],
-]);
 const licenses = new Map();
 const failures = [];
 const absentOptional = [];
@@ -26,8 +16,8 @@ for (const [entry, metadata] of Object.entries(lock.packages ?? {})) {
   if (!fs.existsSync(packagePath)) {
     const name = entry.slice("node_modules/".length);
     const identity = `${name}@${metadata.version ?? "unknown"}`;
-    const reviewedLicense = reviewedOptionalPlatformLicenses.get(identity);
-    if (metadata.optional === true && reviewedLicense) {
+    const reviewedLicense = typeof metadata.license === "string" ? metadata.license : null;
+    if (metadata.optional === true && reviewedLicense && allowed.has(reviewedLicense)) {
       absentOptional.push(identity);
       licenses.set(identity, reviewedLicense);
       continue;

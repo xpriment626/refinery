@@ -141,8 +141,10 @@ test("incremental session catalogue excludes foreign and mixed-scope content bef
     root: labRoot,
     limit: 10,
   }), []);
-  assert.equal(fs.statSync(cataloguePath).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(cataloguePath)).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(cataloguePath).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(cataloguePath)).mode & 0o777, 0o700);
+  }
 });
 
 test("a narrower root reuses unchanged full scans without content reads or catalogue downgrade", async () => {

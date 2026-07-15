@@ -109,7 +109,7 @@ test("Codex memory source reader parses memory index, summaries, rollout metadat
   assert.equal(preference.type, "operational");
   assert.equal(preference.scope, "project");
   assert.equal(preference.provenance?.originKind, "memory-index");
-  assert.equal(preference.provenance?.projectPath, "/Users/example/Lab/Research-Desk/refinery");
+  assert.equal(preference.provenance?.projectPath, path.resolve("/Users/example/Lab/Research-Desk/refinery"));
   assert.equal(preference.provenance?.threadId, null);
   const rolloutReference = memories.find((memory) => memory.body.startsWith("rollout_summaries/"));
   assert.ok(rolloutReference);

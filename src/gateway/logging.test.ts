@@ -18,8 +18,10 @@ test("gateway logger rotates continuously and keeps private bounded files", () =
   assert.equal(fs.existsSync(backupPath), true);
   assert.equal(fs.statSync(logPath).size <= 512, true);
   assert.equal(fs.statSync(backupPath).size <= 512, true);
-  assert.equal(fs.statSync(logPath).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(backupPath).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(logPath).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(backupPath).mode & 0o777, 0o600);
+  }
   for (const line of fs.readFileSync(logPath, "utf8").trim().split("\n")) {
     assert.doesNotThrow(() => JSON.parse(line));
   }

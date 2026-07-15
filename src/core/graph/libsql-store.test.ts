@@ -11,7 +11,7 @@ import {
 } from "./libsql-store.ts";
 import { syncMemoryGraph, type GraphSourceItem } from "./sync.ts";
 
-const project = "/tmp/refinery-libsql-project";
+const project = path.resolve("/tmp/refinery-libsql-project");
 
 function item(sourceKey: string, content: string): GraphSourceItem {
   return {
@@ -43,8 +43,10 @@ test("embedded libSQL store migrates, round-trips deterministic graph state, and
 
   assert.deepEqual(store.read(), synced.index);
   assert.equal(store.diagnostics().schemaVersion, graphDatabaseSchemaVersion);
-  assert.equal(fs.statSync(databasePath).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(databasePath)).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(databasePath).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(databasePath)).mode & 0o777, 0o700);
+  }
 
   const database = new Database(databasePath, { readonly: true });
   const indexes = database.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{ name: string }>;

@@ -21,7 +21,7 @@ test("gateway lifecycle starts a detached authenticated daemon, reports status, 
     const status = await gatewayStatus({ home, project });
     assert.equal(status.running, true);
     const paths = resolveRefineryPaths({ home, cwd: project });
-    assert.equal(fs.statSync(paths.gatewayStatePath).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(fs.statSync(paths.gatewayStatePath).mode & 0o777, 0o600);
   } finally {
     const stopped = await stopGateway({ home, project });
     assert.equal(stopped.running, false);

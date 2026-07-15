@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import type { ActiveMemory, SourceDocument, SourceSet } from "../core/types.ts";
 import { buildCodexGraphSnapshot } from "./codex-graph.ts";
 
-const project = "/tmp/refinery-project";
+const project = path.resolve("/tmp/refinery-project");
+const labRoot = path.resolve("/tmp/Lab");
+const labProject = path.join(labRoot, "refinery");
 
 const sourceSets: SourceSet[] = [{
   id: "source-set:memories",
@@ -90,10 +93,10 @@ test("responsibility units attach to one sparse session parent and keep thread p
   const rootSource: SourceSet = {
     id: "source-set:root-sessions",
     spec: {
-      raw: "codex:sessions?root=%2Ftmp%2FLab",
+      raw: `codex:sessions?root=${encodeURIComponent(labRoot)}`,
       kind: "codex:sessions",
       value: null,
-      params: { root: "/tmp/Lab" },
+      params: { root: labRoot },
     },
     label: "Lab sessions",
     role: "codex-sessions",
@@ -109,27 +112,27 @@ test("responsibility units attach to one sparse session parent and keep thread p
       sessionId: "session-1",
       unitId: `unit-${ordinal}`,
       unitOrdinal: ordinal,
-      cwdSet: ["/tmp/Lab/refinery"],
+      cwdSet: [labProject],
       endTimestamp: `2026-07-14T01:0${ordinal}:00.000Z`,
     },
   }));
   const snapshot = buildCodexGraphSnapshot({
-    project: "/tmp/Lab",
+    project: labRoot,
     sourceSets: [rootSource],
     documents: unitDocuments,
     activeMemories: [
       {
         ...memories[0],
-        provenance: { ...memories[0].provenance, projectPath: "/tmp/Lab/refinery" },
+        provenance: { ...memories[0].provenance, projectPath: labProject },
       },
       { ...memories[0], id: "global-root-exclusion", scope: "global", provenance: { threadId: "session-1" } },
-      { ...memories[0], id: "other-root-exclusion", provenance: { projectPath: "/tmp/other" } },
+      { ...memories[0], id: "other-root-exclusion", provenance: { projectPath: path.resolve("/tmp/other") } },
     ],
   });
   const parent = snapshot.items.filter((item) => item.sourceKey === "session:session-1");
   const units = snapshot.items.filter((item) => item.sourceKey.startsWith("session:session-1:responsibility:"));
   assert.equal(parent.length, 1);
-  assert.equal(parent[0]?.project, "/tmp/Lab");
+  assert.equal(parent[0]?.project, labRoot);
   assert.equal(units.length, 2);
   assert.ok(units.every((unit) => unit.kind === "source_document"));
   assert.equal(snapshot.edges.filter((candidate) => candidate.derivation === "codex-responsibility-unit-session").length, 2);
@@ -137,7 +140,7 @@ test("responsibility units attach to one sparse session parent and keep thread p
   assert.equal(observed?.targetKey, "session:session-1");
   const memoryItems = snapshot.items.filter((item) => item.kind === "memory");
   assert.equal(memoryItems.length, 1);
-  assert.equal(memoryItems[0]?.project, "/tmp/Lab");
+  assert.equal(memoryItems[0]?.project, labRoot);
 });
 
 test("Codex memory graph identity remains stable when body-derived Codex memory ids change", () => {
