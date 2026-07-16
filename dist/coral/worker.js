@@ -4,6 +4,7 @@ import { refineryReviewSchemaVersion } from "../core/types.js";
 import { claimScoutSpecialist, decisionSynthesizerSpecialist, evidenceAuditorSpecialist, memoryCartographerSpecialist, proposalEditorSpecialist, } from "../core/specialists/index.js";
 import { callCoralChatWithMetadata } from "../core/model-client.js";
 import { resolveModelApiKey } from "../core/credentials.js";
+import { resolveModelSelection } from "../core/model-selection.js";
 import { getCoralAgentBySpecialistName, getSpecialistNameArg, refineryCoralAgentNames, refineryCoralProxyRequestName, refineryCoralModelDefaults, } from "./definitions.js";
 import { connectCoralMcp, parseWaitForMentionResult, readCoralState } from "./mcp.js";
 import { defaultReviewTopology, isReviewTopology } from "./topology.js";
@@ -18,7 +19,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()) {
     if (proxyUrl) {
         return {
             provider: "coral",
-            modelName: proxyModel ?? readEnv("MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
+            modelName: proxyModel ?? resolveModelSelection({ cwd, env: process.env, localEnv }).modelName,
             baseUrl: `${proxyUrl.replace(/\/$/, "")}/v1`,
             apiKey: "",
             authMode: "coral-agent-proxy",
@@ -34,7 +35,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()) {
     });
     return {
         provider: "coral",
-        modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
+        modelName: resolveModelSelection({ cwd, env: process.env, localEnv }).modelName,
         baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
         apiKey: modelAuth.apiKey,
         authMode: "bearer",

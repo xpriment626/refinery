@@ -25,125 +25,27 @@ Verify the command and local setup:
 
 ```bash
 command -v refinery
-refinery setup inspect --project "$PWD" --json
-refinery skill status --json
-refinery setup status --project "$PWD" --json
+refinery init --json
+refinery skill install --json
+refinery doctor --json
 ```
 
-For a fresh packaged install or an unverified Coral credential, start the
-one-time local setup page:
+For packaged installs, the canonical Coral key setup is:
 
 ```bash
-refinery setup start --project "$PWD" --json
+refinery set auth coral
 ```
 
-Open the returned loopback capability URL with the Codex in-app browser when
-that capability is available. Otherwise print the URL so the human can open it.
-The human enters the Coral key directly in the local page; never ask them to
-paste it into chat or place it in command arguments. After completion, run
-`refinery setup status --project "$PWD" --json`, follow its structured repair
-actions, then use `refinery ui url --project "$PWD" --json` when `readyFor.ui`
-is true. Repo-local `.env` files with `CORAL_API_KEY` remain supported only for
-development sessions.
-
-After authorization, inspect the live Coral model catalogue and current
-selection:
-
-```bash
-refinery models list --project "$PWD" --json
-refinery models get --project "$PWD" --json
-```
-
-The catalogue output distinguishes models Coral currently advertises from
-model families whose request shape Refinery has validated. When the human asks
-for a different advertised compatible model, persist it with
-`refinery models set <exact-model-id> --project "$PWD" --json`. Use
-`refinery models reset --project "$PWD" --json` to return to environment or
-built-in defaults. A per-run `--model <id>` takes precedence over environment,
-persisted, and built-in defaults. Do not guess model IDs or maintain a model
-list from memory; query the live catalogue first.
-
-If setup reports `CORAL_MODEL_UNAVAILABLE`, keep the credential verified and
-repair the selection with `models list` plus `models set` or `models reset`.
-Do not ask the human to reauthorize unless setup separately reports an auth
-problem. `--model-provider` is an advanced Coral Server provider override, not
-required for ordinary Coral Cloud catalogue models. DeepSeek remains an
-advanced provider route unless the live catalogue advertises it.
-
-When setup reports all readiness fields true, give the human a concise rundown:
-
-- Refinery can inspect bounded Codex memory, session, skill, file, and glob
-  sources without changing them.
-- It can build and display a derived local responsibility graph with provenance
-  and retrieval state.
-- Coral-coordinated specialists can produce evidence-backed dry-run memory or
-  skill proposals for human review.
-- Canonical Codex sources remain read-only; graph state, run evidence, and
-  proposals stay in Refinery-managed local storage.
-- Future requests can be made naturally in chat and routed through `$refinery`.
+Use this when `refinery doctor --json` reports `modelAuth.present: false` or
+when a live review fails with missing model auth. Do not ask the user to run
+Delve auth commands for Refinery, and do not print API keys in chat. Repo-local
+`.env` files with `CORAL_API_KEY` remain supported for development sessions.
 
 If `refinery` is not installed, install the package first:
 
 ```bash
 npm i -g @itsshadowai/refinery
 ```
-
-## Update Notices
-
-The CLI may print a best-effort notice on stderr when a newer public npm
-version is available. Treat that as a prompt to ask the human user whether to
-install the suggested version. Never install or publish an update without
-explicit human confirmation. Use `--no-update-check` or
-`REFINERY_NO_UPDATE_CHECK=1` when the user wants the check disabled.
-
-After a human-approved package update, run:
-
-```bash
-refinery skill status --json
-```
-
-If state is `stale-managed`, the agent may run the non-conflicting repair
-`refinery skill install --json`; then start a new Codex task or refresh the app
-so the new instructions are loaded. If state is `customized`, preserve it and
-show the human the conflict. Run `refinery skill install --force --json` only
-after the human explicitly confirms replacing those customizations. Skill
-status and ordinary notices are local inspections; they never download or
-execute a remote skill feed.
-
-## Local Graph UI
-
-Use the local observability UI when the user asks to see the graph, retrieval
-reasoning, provenance, revisions, sync activity, or gateway health. Prefer the
-agent-readable URL flow:
-
-```bash
-refinery ui url --project "$PWD" --json
-```
-
-Open the returned local capability URL in Codex's in-app browser when browser
-control is available. Otherwise report the URL so the human can paste it into a
-browser. Treat the full capability URL as a local secret: do not publish it,
-include it in logs or artifacts, or send it outside the local machine.
-
-The UI is observability-only. Do not describe it as editing memory, approving
-proposals, or coordinating agents. Use these commands for explicit lifecycle
-and diagnostics:
-
-```bash
-refinery gateway start --project "$PWD" --json
-refinery gateway status --project "$PWD" --json
-refinery gateway stop --project "$PWD" --json
-```
-
-Automatic browser opening after graph sync is off by default. If enabling it
-would help, ask the human first, then apply their choice with:
-
-```bash
-refinery ui config --browser-open on --project "$PWD" --json
-```
-
-Use `--browser-open off` to disable it. A browser-open failure is non-fatal;
-fall back to `refinery ui url --json`.
 
 ## Slice Controls
 
@@ -186,29 +88,6 @@ refinery sources inspect \
   --project "$PWD" \
   --json
 ```
-
-For graph-backed retrieval, inspect the derived project graph and the bounded
-responsibility plan without invoking Coral:
-
-```bash
-refinery graph sync \
-  --source "<source spec>" \
-  --project "$PWD" \
-  --json
-
-refinery graph plan \
-  --project "$PWD" \
-  --request "<user slice and review request>" \
-  --max-nodes 12 \
-  --max-edges 24 \
-  --max-hops 2 \
-  --json
-```
-
-Normal `refinery review` runs sync and use the responsibility graph by default.
-Do not add `--no-graph` unless the user explicitly requests legacy behavior.
-If graph preparation fails, report the structured graph error; do not retry by
-broadening to the pre-graph source context.
 
 ## Live Review Command
 
@@ -286,9 +165,8 @@ refinery trial inspect --run-dir "<runDir>" --json
 ```
 
 For failed live runs, inspect `status.json`, `review.json`, `coral.json`,
-`responsibility-plan.json`, `graph-context.json`, `server.log`, and
-`steps/*/messages/*/` inside `runDir` before deciding whether the failure was
-graph preparation, startup, model output, merge, or timeout related.
+`server.log`, and `steps/*/messages/*/` inside `runDir` before deciding whether
+the failure was startup, model output, merge, or timeout related.
 
 ## Reporting
 
@@ -296,8 +174,6 @@ Summarize the Refinery result in plain language:
 
 - live or fixture mode, run id, and run directory
 - source specs, target surfaces, and slice controls used
-- responsibility-plan id, awake seeds, sleeping one-hop units, exclusions, and
-  exhausted traversal budgets when graph context is present
 - counts for proposals, rejected candidates, claims, challenges, and unresolved
   challenges when present
 - each proposed edit: action, memory type, scope, target memory id(s), body or

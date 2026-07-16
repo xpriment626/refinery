@@ -24,11 +24,29 @@ test("Coral credential verification uses registry and model catalogue without ge
   });
 
   assert.equal(result.verified, true);
-  assert.equal(result.modelCatalogue.modelName, "gpt-5.4-nano");
+  assert.equal(result.modelCatalogue.count, 1);
+  assert.deepEqual(result.modelCatalogue.modelIds, ["gpt-5.4-nano"]);
+  assert.equal(result.modelCatalogue.requestedModelName, null);
+  assert.equal(result.modelCatalogue.requestedModelAvailable, null);
   assert.deepEqual(requests.map((request) => request.method), ["GET", "GET"]);
   assert.equal(requests.every((request) => request.auth === "Bearer coral-test-secret"), true);
   assert.equal(requests.some((request) => /chat|completion|response/i.test(request.url)), false);
   assert.doesNotMatch(JSON.stringify(result), /coral-test-secret/);
+});
+
+test("Coral credential verification remains valid when a requested model is not advertised", async () => {
+  const fetchImpl: typeof fetch = async (input) => String(input).endsWith("/api/v1/registry")
+    ? Response.json([])
+    : Response.json({ object: "list", data: [{ id: "gpt-5.4-nano" }] });
+  const result = await verifyCoralCredential({
+    apiKey: "coral-test-secret",
+    cloudApiUrl: "http://127.0.0.1:4111",
+    modelBaseUrl: "http://127.0.0.1:4222/openai/v1",
+    modelName: "retired-model",
+    fetchImpl,
+  });
+  assert.equal(result.verified, true);
+  assert.equal(result.modelCatalogue.requestedModelAvailable, false);
 });
 
 test("Coral credential verification rejects auth failures without reflecting secrets", async () => {

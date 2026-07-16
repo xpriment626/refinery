@@ -78,6 +78,7 @@ import {
   type ReviewSinkResult,
 } from "../core/review.ts";
 import { defaultReviewIntent, describeReviewIntent, type ReviewIntent } from "../core/intents.ts";
+import { resolveModelSelection } from "../core/model-selection.ts";
 
 const DEFAULT_PIPELINE_WAIT_TIMEOUT_MS = 180_000;
 const DEFAULT_DEBATE_CRITIQUE_WAIT_TIMEOUT_MS = 600_000;
@@ -106,6 +107,8 @@ export interface CoralReviewRuntimeOptions {
   llmProxy?: boolean;
   modelProxyProvider?: string;
   topology?: ReviewTopology;
+  modelHome?: string;
+  modelCwd?: string;
 }
 
 export interface CoralReviewRunOptions {
@@ -295,9 +298,16 @@ function resolveConfiguredModel(coral: CoralReviewRuntimeOptions): {
   transport: "direct" | "coral-server-proxy";
   proxyProvider: string | null;
 } {
-  const localEnv = loadLocalEnv(repoRoot);
+  const modelCwd = coral.modelCwd ?? repoRoot;
+  const localEnv = loadLocalEnv(modelCwd);
   const readConfig = (name: string): string | undefined => process.env[name] ?? localEnv[name];
-  const modelName = coral.modelName ?? readConfig("MODEL_NAME") ?? readConfig("REFINERY_MODEL_NAME") ?? refineryCoralModelDefaults.modelName;
+  const modelName = resolveModelSelection({
+    explicit: coral.modelName,
+    home: coral.modelHome,
+    cwd: modelCwd,
+    env: process.env,
+    localEnv,
+  }).modelName;
   const llmProxy = coral.llmProxy ?? false;
   return {
     provider: "coral",
@@ -962,9 +972,10 @@ export function cleanupRuntimeCoralConfigPath(configPath: string): void {
   fs.rmSync(configDir, { recursive: true, force: true });
 }
 
-function resolveCoralServerSecrets(): { coralApiKey: string; deepSeekApiKey: string } {
-  const localEnv = loadLocalEnv(repoRoot);
-  const coralApiKey = resolveModelApiKey({ env: process.env, localEnv, cwd: repoRoot }).apiKey;
+function resolveCoralServerSecrets(coral: CoralReviewRuntimeOptions): { coralApiKey: string; deepSeekApiKey: string } {
+  const cwd = coral.modelCwd ?? repoRoot;
+  const localEnv = loadLocalEnv(cwd);
+  const coralApiKey = resolveModelApiKey({ env: process.env, localEnv, home: coral.modelHome, cwd }).apiKey;
   return {
     coralApiKey,
     deepSeekApiKey: process.env.DEEPSEEK_API_KEY ?? localEnv.DEEPSEEK_API_KEY ?? "",
@@ -1568,7 +1579,7 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
   const timeoutMs = coral.timeoutMs ?? defaultCoralReviewTimeoutMs(topology);
   const configuredModel = resolveConfiguredModel(coral);
   const coralJar = coral.coralJar ?? process.env.REFINERY_CORAL_SERVER_JAR;
-  const serverSecrets = resolveCoralServerSecrets();
+  const serverSecrets = resolveCoralServerSecrets(coral);
   const selectedServerSecretEnv = selectCoralServerSecretEnv(configuredModel, serverSecrets);
   const requestedConfigPath = coral.configPath ?? refineryCoralConfigPath;
   const generatedDefaultConfig = startServer && requestedConfigPath === refineryCoralConfigPath;
@@ -1936,7 +1947,7 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
   const timeoutMs = coral.timeoutMs ?? defaultCoralReviewTimeoutMs(topology);
   const configuredModel = resolveConfiguredModel(coral);
   const coralJar = coral.coralJar ?? process.env.REFINERY_CORAL_SERVER_JAR;
-  const serverSecrets = resolveCoralServerSecrets();
+  const serverSecrets = resolveCoralServerSecrets(coral);
   const selectedServerSecretEnv = selectCoralServerSecretEnv(configuredModel, serverSecrets);
   const requestedConfigPath = coral.configPath ?? refineryCoralConfigPath;
   const generatedDefaultConfig = startServer && requestedConfigPath === refineryCoralConfigPath;

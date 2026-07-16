@@ -24,6 +24,7 @@ test("resolveRefineryPaths defaults to globally organized project runs", () => {
   assert.equal(paths.gatewayStatePath, path.join(paths.gatewayDir, "state.json"));
   assert.equal(paths.gatewayLogPath, path.join(paths.gatewayDir, "gateway.jsonl"));
   assert.equal(paths.uiConfigPath, path.join(paths.configDir, "ui.json"));
+  assert.equal(paths.modelSelectionPath, path.join(paths.configDir, "model.json"));
   assert.equal(paths.setupDir, path.join(os.homedir(), ".refinery", "setup", "by-project", projectKey));
   assert.equal(paths.setupStatePath, path.join(paths.setupDir, "state.json"));
   assert.equal(paths.setupReceiptPath, path.join(paths.setupDir, "receipt.json"));
@@ -41,6 +42,7 @@ test("resolveRefineryPaths defaults to globally organized project runs", () => {
     "graphsDir",
     "home",
     "legacyGraphIndexPath",
+    "modelSelectionPath",
     "projectKey",
     "runsDir",
     "runsRootDir",

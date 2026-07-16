@@ -18,6 +18,7 @@ export interface RefineryPaths {
   gatewayStatePath: string;
   gatewayLogPath: string;
   uiConfigPath: string;
+  modelSelectionPath: string;
   setupDir: string;
   setupStatePath: string;
   setupReceiptPath: string;
@@ -82,6 +83,7 @@ export function resolveRefineryPaths(options: ResolveRefineryPathsOptions = {}):
     gatewayStatePath: path.join(gatewayDir, "state.json"),
     gatewayLogPath: path.join(gatewayDir, "gateway.jsonl"),
     uiConfigPath: path.join(home, "config", "ui.json"),
+    modelSelectionPath: path.join(home, "config", "model.json"),
     setupDir,
     setupStatePath: path.join(setupDir, "state.json"),
     setupReceiptPath: path.join(setupDir, "receipt.json"),

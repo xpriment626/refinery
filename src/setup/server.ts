@@ -7,7 +7,8 @@ import { asRefineryError, RefineryError } from "../core/errors.ts";
 import { removeStoredAuth, writeStoredAuth } from "../core/credentials.ts";
 import { resolveRefineryPaths } from "../core/paths.ts";
 import { provisionCoralRuntime } from "../coral/runtime.ts";
-import { releaseCoralModelName, verifyCoralCredential } from "../coral/verification.ts";
+import { verifyCoralCredential } from "../coral/verification.ts";
+import { resolveModelSelection } from "../core/model-selection.ts";
 import { writeUiConfig } from "../gateway/config.ts";
 import { inspectSetup, writeSetupReceipt } from "./status.ts";
 
@@ -168,7 +169,7 @@ async function boot() {
   values[1].textContent = setup.memoryHome.path + " (read-only)";
   values[2].textContent = setup.graph.path + " (Refinery-managed)";
   values[3].textContent = setup.credential.path + " (" + setup.credential.protection + ")";
-  values[4].textContent = "gpt-5.4-nano through Coral-coordinated specialists";
+  values[4].textContent = setup.model.selected.modelName + " (" + setup.model.selected.source + ") through Coral-coordinated specialists";
   document.querySelector("#browser-open").checked = Boolean(setup.ui?.browserOpenOnSync);
   loading.hidden = true;
   form.hidden = false;
@@ -323,11 +324,12 @@ export async function startSetupHttpServer(options: SetupServerOptions): Promise
         ) {
           throw new RefineryError("SETUP_FIELDS_INVALID", "Setup request fields are invalid.", { phase: "setup-server" });
         }
+        const selectedModel = resolveModelSelection({ home: options.home, cwd: options.project, env });
         const coral = await verifyCoralCredential({
           apiKey: body.coralApiKey,
           cloudApiUrl: env.CORAL_CLOUD_API_URL,
           modelBaseUrl: env.REFINERY_MODEL_BASE_URL,
-          modelName: releaseCoralModelName,
+          modelName: selectedModel.modelName,
         });
         writeStoredAuth("coral", body.coralApiKey, { home: options.home, cwd: options.project, env });
         writeSetupReceipt({ home: options.home, project: options.project, coral });

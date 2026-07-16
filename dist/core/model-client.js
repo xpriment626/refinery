@@ -1,6 +1,12 @@
 import { defaultModelMaxTokens, redactModelBaseUrl } from "../env.js";
-function chatRequestBody(request) {
-    const tokenLimitField = request.model.modelName.startsWith("gpt-") ? "max_completion_tokens" : "max_tokens";
+import { classifyModelCompatibility } from "./model-selection.js";
+export function buildChatRequestBody(request) {
+    const compatibility = classifyModelCompatibility(request.model.modelName);
+    if (!compatibility.supported) {
+        throw new Error(`Unsupported model family for ${request.model.modelName}: ${compatibility.reason}`);
+    }
+    const usesCompletionTokens = compatibility.family === "openai-gpt" || compatibility.family === "openai-reasoning";
+    const tokenLimitField = usesCompletionTokens ? "max_completion_tokens" : "max_tokens";
     const body = {
         model: request.model.modelName,
         messages: [
@@ -11,11 +17,11 @@ function chatRequestBody(request) {
         stream: true,
         stream_options: { include_usage: true },
     };
-    if (!request.model.modelName.startsWith("gpt-5"))
+    if (compatibility.family === "openai-gpt" && !request.model.modelName.startsWith("gpt-5"))
         body.temperature = 0.1;
     if (request.model.reasoningEffort)
         body.reasoning_effort = request.model.reasoningEffort;
-    if (request.model.modelName.startsWith("deepseek-v4"))
+    if (compatibility.family === "deepseek-v4")
         body.thinking = { type: "enabled" };
     return body;
 }
@@ -102,7 +108,7 @@ export async function callCoralChatWithMetadata(request) {
     const response = await fetch(`${request.model.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers,
-        body: JSON.stringify(chatRequestBody(request)),
+        body: JSON.stringify(buildChatRequestBody(request)),
     });
     if (!response.ok) {
         const body = await response.text();

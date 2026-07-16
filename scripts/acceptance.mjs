@@ -77,7 +77,10 @@ async function startMockCoral() {
     } else if (request.method === "GET" && request.url === "/api/v1/registry") {
       response.end("[]");
     } else if (request.method === "GET" && request.url === "/models") {
-      response.end(JSON.stringify({ object: "list", data: [{ id: "gpt-5.4-nano" }] }));
+      response.end(JSON.stringify({ object: "list", data: [
+        { id: "gpt-5.4-nano", object: "model", owned_by: "fixture", created: 1 },
+        { id: "o4-mini", object: "model", owned_by: "fixture", created: 2 },
+      ] }));
     } else {
       response.statusCode = 404;
       response.end("{}");
@@ -136,7 +139,8 @@ try {
     REFINERY_HOME: refineryHome,
     CORAL_CLOUD_API_URL: mock.baseUrl,
     REFINERY_MODEL_BASE_URL: mock.baseUrl,
-    REFINERY_MODEL_NAME: "gpt-5.4-nano",
+    MODEL_NAME: undefined,
+    REFINERY_MODEL_NAME: undefined,
     REFINERY_NO_UPDATE_CHECK: "1",
     CI: "true",
   };
@@ -148,6 +152,9 @@ try {
   assert.equal(installedSkill.codexSkill.action, "installed");
   assert.equal(installedSkill.codexSkill.managed, true);
   assert.equal(fs.existsSync(path.join(codexHome, "skills", "refinery", "SKILL.md")), true);
+  const currentSkill = parseJson(await cliRun(["skill", "status", "--json"]));
+  assert.equal(currentSkill.codexSkill.state, "current");
+  assert.equal(currentSkill.codexSkill.installedTreeHash, currentSkill.codexSkill.bundledTreeHash);
 
   const inspected = parseJson(await cliRun(["setup", "inspect", "--project", project, "--json"]));
   assert.equal(inspected.schemaVersion, "refinery.setup-status.v1");
@@ -202,6 +209,15 @@ try {
   assert.doesNotMatch(completionText, new RegExp(secret));
   assert.deepEqual(mock.requests.map((request) => [request.method, request.url]), [["GET", "/api/v1/registry"], ["GET", "/models"]]);
 
+  const models = parseJson(await cliRun(["models", "list", "--project", project, "--json"]));
+  assert.deepEqual(models.models.map((model) => model.id), ["gpt-5.4-nano", "o4-mini"]);
+  assert.equal(models.selected.modelName, "gpt-5.4-nano");
+  assert.equal(models.builtInFallback, "gpt-5.4-nano");
+  assert.equal(models.models.find((model) => model.id === "o4-mini").compatibility.family, "openai-reasoning");
+  const selectedModel = parseJson(await cliRun(["models", "set", "o4-mini", "--project", project, "--json"]));
+  assert.equal(selectedModel.selection.modelName, "o4-mini");
+  assert.equal(parseJson(await cliRun(["models", "get", "--project", project, "--json"])).selected.modelName, "o4-mini");
+
   const credentialPath = path.join(refineryHome, "credentials", "coral-api-key");
   const credentialStat = fs.lstatSync(credentialPath);
   assert.equal(credentialStat.isFile(), true);
@@ -222,7 +238,8 @@ try {
     setupStatus.credential.protection,
     process.platform === "win32" ? "platform-managed user-profile ACL" : "owner-only POSIX mode 0600",
   );
-  assert.equal(setupStatus.credential.modelName, "gpt-5.4-nano");
+  assert.equal(setupStatus.credential.modelName, "o4-mini");
+  assert.equal(setupStatus.model.advertisedByVerifiedCatalogue, true);
   assert.equal(setupStatus.server.running, false);
 
   const packedSetupServer = await import(pathToFileURL(path.join(packageDir, "dist", "setup", "server.js")).href);
@@ -267,6 +284,8 @@ try {
   packageJson.version = "0.3.1-fixture";
   fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
   fs.appendFileSync(bundledSkillPath, "\n<!-- packed managed upgrade fixture -->\n");
+  const staleManaged = parseJson(await cliRun(["skill", "status", "--json"]));
+  assert.equal(staleManaged.codexSkill.state, "stale-managed");
   const upgraded = parseJson(await cliRun(["skill", "install", "--json"]));
   assert.equal(upgraded.codexSkill.action, "upgraded");
   const installedSkillPath = path.join(codexHome, "skills", "refinery", "SKILL.md");
@@ -276,6 +295,16 @@ try {
   assert.equal(preserved.codexSkill.action, "preserved");
   assert.equal(preserved.codexSkill.conflict, true);
   assert.match(fs.readFileSync(installedSkillPath, "utf8"), /local customization/);
+  const customized = parseJson(await cliRun(["skill", "status", "--json"]));
+  assert.equal(customized.codexSkill.state, "customized");
+  assert.equal(customized.repair.requiresHumanConfirmation, true);
+  const forced = parseJson(await cliRun(["skill", "install", "--force", "--json"]));
+  assert.equal(forced.codexSkill.action, "overwritten");
+  assert.doesNotMatch(fs.readFileSync(installedSkillPath, "utf8"), /local customization/);
+
+  const resetModel = parseJson(await cliRun(["models", "reset", "--project", project, "--json"]));
+  assert.equal(resetModel.reset.removed, true);
+  assert.equal(resetModel.selected.modelName, "gpt-5.4-nano");
 
   const outputText = capturedOutput.join("\n") + completionText;
   assert.doesNotMatch(outputText, new RegExp(secret));
@@ -293,7 +322,8 @@ try {
     setup: { oneTimeCapability: true, malformedRejected: true, expiredClosed: true, credentialVerified: true, model: "gpt-5.4-nano" },
     graph: { nodes: graph.summary.nodes, edges: graph.summary.edges, canonicalSourcesMutated: false },
     ui: { pageStatus: page.status, healthStatus: health.status },
-    skill: { installed: true, managedUpgrade: true, customizationPreserved: true },
+    models: { exactRecords: 2, selected: true, reset: true },
+    skill: { installed: true, status: true, managedUpgrade: true, customizationPreserved: true, forceCoveredInFixture: true },
     commands: receipts.length,
   }, null, 2)}\n`);
 } finally {

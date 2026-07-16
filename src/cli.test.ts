@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { LibsqlGraphStore } from "./core/graph/libsql-store.ts";
+import { hashSkillTree } from "./core/skill-installer.ts";
 
 const cliPath = path.resolve(import.meta.dirname, "cli.ts");
 const packagePath = path.resolve(import.meta.dirname, "..", "package.json");
@@ -29,6 +30,39 @@ function runCli(args: string[], options: { cwd?: string; env?: Record<string, st
 function parseJson(stdout: string): Record<string, unknown> {
   assert.doesNotThrow(() => JSON.parse(stdout), stdout);
   return JSON.parse(stdout) as Record<string, unknown>;
+}
+
+async function startModelFixtureServer(): Promise<{ child: ChildProcessWithoutNullStreams; baseUrl: string }> {
+  const script = `
+    const http = require("node:http");
+    const server = http.createServer((request, response) => {
+      if (request.url !== "/openai/v1/models") { response.statusCode = 404; return response.end(); }
+      if (request.headers.authorization !== "Bearer fixture-key") { response.statusCode = 401; return response.end("denied"); }
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ object: "list", data: [
+        { id: "gpt-5.5", object: "model", owned_by: "fixture", created: 55 },
+        { id: "o4-mini", object: "model", owned_by: "fixture", created: 44 },
+        { id: "future-model", object: "model", owned_by: "fixture", created: 99 }
+      ] }));
+    });
+    server.listen(0, "127.0.0.1", () => process.stdout.write(String(server.address().port) + "\\n"));
+    process.on("SIGTERM", () => server.close(() => process.exit(0)));
+  `;
+  const child = spawn(process.execPath, ["-e", script], { stdio: ["pipe", "pipe", "pipe"] });
+  const port = await new Promise<string>((resolve, reject) => {
+    let buffer = "";
+    const timer = setTimeout(() => reject(new Error("model fixture server did not start")), 5_000);
+    child.once("error", reject);
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      const newline = buffer.indexOf("\n");
+      if (newline >= 0) {
+        clearTimeout(timer);
+        resolve(buffer.slice(0, newline));
+      }
+    });
+  });
+  return { child, baseUrl: `http://127.0.0.1:${port}/openai/v1` };
 }
 
 function seedCodexMemoryHome(): string {
@@ -77,6 +111,9 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /refinery init/);
   assert.match(result.stdout, /refinery skill install/);
+  assert.match(result.stdout, /refinery skill status/);
+  assert.match(result.stdout, /refinery models list/);
+  assert.match(result.stdout, /refinery models set <model-id>/);
   assert.match(result.stdout, /refinery set auth coral/);
   assert.match(result.stdout, /refinery unset auth coral/);
   assert.match(result.stdout, /refinery setup inspect/);
@@ -144,6 +181,10 @@ test("package surface does not publish experiment commands", () => {
   const postinstall = fs.readFileSync(path.join(repoRoot, "scripts/postinstall.mjs"), "utf8");
   assert.match(postinstall, /refinery setup inspect/);
   assert.match(postinstall, /refinery setup start/);
+  assert.match(postinstall, /refinery skill status --json/);
+  assert.match(postinstall, /refinery models list --json/);
+  assert.match(postinstall, /refinery models set <model-id> --json/);
+  assert.match(postinstall, /Customized skills are preserved/);
   assert.match(postinstall, /without placing it in chat, shell arguments, or logs/i);
   assert.doesNotMatch(postinstall, /spawn|exec|openExternal|writeFile/);
   assert.match(postinstall, /refinery ui url --json/);
@@ -211,6 +252,58 @@ test("version returns package metadata as structured JSON", () => {
   assert.equal(parsed.version, pkg.version);
 });
 
+test("models CLI lists exact live IDs and persists only advertised compatible selections", async () => {
+  const fixture = await startModelFixtureServer();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-models-cli-"));
+  const home = path.join(tmp, "home");
+  const project = path.join(tmp, "project");
+  fs.mkdirSync(project);
+  const env = {
+    CORAL_API_KEY: "fixture-key",
+    REFINERY_MODEL_BASE_URL: fixture.baseUrl,
+    MODEL_NAME: undefined,
+    REFINERY_MODEL_NAME: undefined,
+    REFINERY_HOME: undefined,
+    CODEX_HOME: path.join(tmp, "codex-home"),
+  };
+  const common = ["--home", home, "--project", project, "--json"];
+  try {
+    const listed = runCli(["models", "list", ...common], { cwd: project, env });
+    const listJson = parseJson(listed.stdout);
+    assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+    assert.deepEqual((listJson.models as Array<Record<string, unknown>>).map((model) => model.id), ["gpt-5.5", "o4-mini", "future-model"]);
+    assert.equal((((listJson.models as Array<Record<string, unknown>>)[2].compatibility as Record<string, unknown>).supported), false);
+    assert.equal(JSON.stringify(listJson).includes("fixture-key"), false);
+    assert.equal(listJson.builtInFallback, "gpt-5.4-nano");
+    assert.equal(listed.stderr, "");
+
+    const selected = runCli(["models", "set", "o4-mini", ...common], { cwd: project, env });
+    assert.equal(selected.status, 0, selected.stderr || selected.stdout);
+    assert.equal((parseJson(selected.stdout).selection as Record<string, unknown>).modelName, "o4-mini");
+    const modelPath = path.join(home, "config", "model.json");
+    assert.equal(fs.statSync(modelPath).isFile(), true);
+    const beforeFailure = fs.readFileSync(modelPath, "utf8");
+
+    const absent = runCli(["models", "set", "missing-model", ...common], { cwd: project, env });
+    assert.notEqual(absent.status, 0);
+    assert.equal((parseJson(absent.stdout).error as Record<string, unknown>).code, "MODEL_NOT_ADVERTISED");
+    assert.equal(fs.readFileSync(modelPath, "utf8"), beforeFailure);
+
+    const unsupported = runCli(["models", "set", "future-model", ...common], { cwd: project, env });
+    assert.notEqual(unsupported.status, 0);
+    assert.equal((parseJson(unsupported.stdout).error as Record<string, unknown>).code, "MODEL_UNSUPPORTED");
+    assert.equal(fs.readFileSync(modelPath, "utf8"), beforeFailure);
+
+    const got = runCli(["models", "get", ...common], { cwd: project, env });
+    assert.equal((parseJson(got.stdout).selected as Record<string, unknown>).modelName, "o4-mini");
+    const reset = runCli(["models", "reset", ...common], { cwd: project, env });
+    assert.equal((parseJson(reset.stdout).reset as Record<string, unknown>).removed, true);
+    assert.equal(fs.existsSync(modelPath), false);
+  } finally {
+    fixture.child.kill("SIGTERM");
+  }
+});
+
 test("CLI reports a cached update before running and supports the global opt-out", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-update-cli-"));
   const cachePath = path.join(home, "cache", "update-check.json");
@@ -221,13 +314,19 @@ test("CLI reports a cached update before running and supports the global opt-out
     latestVersion: "0.4.0",
   }));
 
-  const env = { REFINERY_HOME: home, CI: undefined, REFINERY_NO_UPDATE_CHECK: undefined };
+  const env = {
+    REFINERY_HOME: home,
+    CODEX_HOME: path.join(home, "codex-home"),
+    CI: undefined,
+    REFINERY_NO_UPDATE_CHECK: undefined,
+  };
   const noticed = runCli(["version", "--json"], { env, updateCheck: true });
   const noticedJson = parseJson(noticed.stdout);
   assert.equal(noticed.status, 0, noticed.stderr || noticed.stdout);
   assert.equal(noticedJson.version, "0.3.0");
   assert.match(noticed.stderr, /A newer Refinery version is available: 0\.3\.0 -> 0\.4\.0/);
   assert.match(noticed.stderr, /No update was installed automatically/);
+  assert.match(noticed.stderr, /refinery skill status --json/);
 
   const suppressed = runCli(["version", "--no-update-check", "--json"], { env, updateCheck: true });
   assert.equal(suppressed.status, 0, suppressed.stderr || suppressed.stdout);
@@ -626,6 +725,73 @@ test("skill install installs bundled Codex skill without initializing Refinery s
   assert.equal(codexSkill.managed, true);
   assert.equal(codexSkill.conflict, false);
   assert.equal(fs.existsSync(path.join(tmp, "refinery-home")), false);
+});
+
+test("skill status reports missing then current state with package and tree hashes", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-skill-state-"));
+  const codexHome = path.join(tmp, "codex-home");
+  const missing = parseJson(runCli(["skill", "status", "--codex-home", codexHome, "--json"]).stdout);
+  assert.equal((missing.codexSkill as Record<string, unknown>).state, "missing");
+  assert.equal(missing.packageVersion, "0.3.0");
+  assert.match(String((missing.codexSkill as Record<string, unknown>).bundledTreeHash), /^[a-f0-9]{64}$/);
+  assert.equal((missing.repair as Record<string, unknown>).command, "refinery skill install --json");
+
+  assert.equal(runCli(["skill", "install", "--codex-home", codexHome, "--json"]).status, 0);
+  const current = parseJson(runCli(["skill", "status", "--codex-home", codexHome, "--json"]).stdout);
+  const currentSkill = current.codexSkill as Record<string, unknown>;
+  assert.equal(currentSkill.state, "current");
+  assert.equal(currentSkill.installedTreeHash, currentSkill.bundledTreeHash);
+  assert.equal(currentSkill.installedPackageVersion, "0.3.0");
+  assert.equal(current.repair, null);
+  assert.match(String(current.reloadAfterInstall), /new Codex task/i);
+});
+
+test("skill status and ordinary CLI use report stale managed skills without mutating them", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-skill-status-"));
+  const codexHome = path.join(tmp, "codex-home");
+  const skillDir = path.join(codexHome, "skills/refinery");
+  const installedSkill = path.join(skillDir, "SKILL.md");
+  const installed = runCli(["skill", "install", "--codex-home", codexHome, "--json"]);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+
+  fs.appendFileSync(installedSkill, "\n# older package-managed fixture\n");
+  const installedTreeHash = hashSkillTree(skillDir);
+  fs.writeFileSync(path.join(skillDir, ".refinery-managed.json"), `${JSON.stringify({
+    schemaVersion: "refinery.managed-skill.v1",
+    packageName: "@itsshadowai/refinery",
+    packageVersion: "0.2.0",
+    installedTreeHash,
+  }, null, 2)}\n`);
+  const before = fs.readFileSync(installedSkill, "utf8");
+
+  const status = runCli(["skill", "status", "--codex-home", codexHome, "--json"]);
+  const statusJson = parseJson(status.stdout);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.equal((statusJson.codexSkill as Record<string, unknown>).state, "stale-managed");
+  assert.equal((statusJson.repair as Record<string, unknown>).command, "refinery skill install --json");
+
+  const ordinary = runCli(["version", "--json"], { env: { CODEX_HOME: codexHome } });
+  assert.equal(ordinary.status, 0, ordinary.stderr || ordinary.stdout);
+  assert.equal(parseJson(ordinary.stdout).version, "0.3.0");
+  assert.match(ordinary.stderr, /package-managed Refinery Codex skill is stale/);
+  assert.match(ordinary.stderr, /refinery skill install --json/);
+  assert.match(ordinary.stderr, /No skill files were changed automatically/);
+  assert.equal(fs.readFileSync(installedSkill, "utf8"), before);
+});
+
+test("customized skill notice requires explicit human confirmation before force replacement", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-skill-customized-"));
+  const codexHome = path.join(tmp, "codex-home");
+  const installedSkill = path.join(codexHome, "skills/refinery/SKILL.md");
+  assert.equal(runCli(["skill", "install", "--codex-home", codexHome, "--json"]).status, 0);
+  fs.appendFileSync(installedSkill, "\n# user customization\n");
+
+  const ordinary = runCli(["version", "--json"], { env: { CODEX_HOME: codexHome } });
+  assert.equal(ordinary.status, 0, ordinary.stderr || ordinary.stdout);
+  assert.match(ordinary.stderr, /differs from the package bundle/);
+  assert.match(ordinary.stderr, /Only after the human confirms/);
+  assert.match(ordinary.stderr, /refinery skill install --force --json/);
+  assert.match(fs.readFileSync(installedSkill, "utf8"), /user customization/);
 });
 
 test("repo does not publish duplicate local Codex skill names", () => {

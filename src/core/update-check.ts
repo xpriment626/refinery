@@ -160,6 +160,7 @@ export function formatUpdateNotice(packageName: string, result: UpdateCheckResul
   return [
     `A newer Refinery version is available: ${result.currentVersion} -> ${result.latestVersion}.`,
     `Ask the user whether to install it with: npm i -g ${packageName}@${result.latestVersion}`,
+    "After upgrading, check the bundled agent skill with: refinery skill status --json",
     "No update was installed automatically.",
   ].join(" ");
 }

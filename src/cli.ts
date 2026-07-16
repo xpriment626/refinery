@@ -15,7 +15,15 @@ import { inspectReviewRun } from "./core/artifacts.ts";
 import { resolveRefineryPaths } from "./core/paths.ts";
 import { removeStoredAuth, resolveModelApiKey, storedAuthStatus, writeStoredAuth } from "./core/credentials.ts";
 import { resolveCodexHome as resolveConfiguredCodexHome } from "./core/codex-paths.ts";
-import { installManagedCodexSkill, type CodexSkillInstallResult } from "./core/skill-installer.ts";
+import { inspectManagedCodexSkill, installManagedCodexSkill, type CodexSkillInstallResult } from "./core/skill-installer.ts";
+import {
+  classifyModelCompatibility,
+  fetchCoralModelCatalogue,
+  resetPersistedModelSelection,
+  resolveCatalogueAccess,
+  resolveModelSelection,
+  writePersistedModelSelection,
+} from "./core/model-selection.ts";
 import { parseReviewIntent } from "./core/intents.ts";
 import { buildReviewPacket, inspectSources, parseSourceSpecs, parseTargetSurfaces } from "./core/packets.ts";
 import { type ReviewSinkOptions } from "./core/review.ts";
@@ -29,7 +37,7 @@ import {
   syncCodexMemoryGraph,
 } from "./core/graph/service.ts";
 import { memoryGraphEdgeKinds, type GraphEdgeKind } from "./core/graph/sync.ts";
-import { loadLocalEnv } from "./env.ts";
+import { defaultModelName, loadLocalEnv } from "./env.ts";
 import { resolveCodexMemoryHome } from "./sources/codex-memories.ts";
 import { readUiConfig, writeUiConfig } from "./gateway/config.ts";
 import { gatewayStatus, notifyGatewayGraphSync, startGateway, stopGateway } from "./gateway/lifecycle.ts";
@@ -45,6 +53,11 @@ const HELP = `refinery — Codex-first memory review CLI
 USAGE
   refinery init [--home <dir>] [--codex-home <dir>] [--skip-codex-skill] [--force] [--json]
   refinery skill install [--codex-home <dir>] [--force] [--json]
+  refinery skill status [--codex-home <dir>] [--json]
+  refinery models list [--project <dir>] [--home <dir>] [--json]
+  refinery models get [--project <dir>] [--home <dir>] [--json]
+  refinery models set <model-id> [--project <dir>] [--home <dir>] [--json]
+  refinery models reset [--project <dir>] [--home <dir>] [--json]
   refinery set auth coral [--home <dir>] [--value-stdin] [--json]
   refinery unset auth coral [--home <dir>] [--json]
   refinery setup inspect [--project <dir>] [--home <dir>] [--codex-home <dir>] [--memory-home <dir>] [--json]
@@ -78,6 +91,7 @@ Run init once to create ~/.refinery and install the bundled $refinery Codex skil
 Run skill install when you only want to install or refresh the bundled Codex skill.
 Use setup start for browser-safe Coral authorization. The legacy set auth command remains available for non-browser environments.
 Use console run for local Coral Console trials that seed a live session without writing run artifacts.
+Use models list to read the live Coral LLM proxy catalogue, then models set to persist a validated default.
 Use --no-update-check to suppress the best-effort public version notice.`;
 
 const UPDATE_CHECK_FLAG = "--no-update-check";
@@ -268,7 +282,8 @@ function inferCommand(argv: string[]): string {
   if (argv[0] === "set" && argv[1] === "auth") return "set auth";
   if (argv[0] === "unset" && argv[1] === "auth") return "unset auth";
   if (argv[0] === "setup" && argv[1]) return `setup ${argv[1]}`;
-  if (argv[0] === "skill" && argv[1] === "install") return "skill install";
+  if (argv[0] === "skill" && argv[1]) return `skill ${argv[1]}`;
+  if (argv[0] === "models" && argv[1]) return `models ${argv[1]}`;
   return argv[0] ?? "unknown";
 }
 
@@ -289,7 +304,7 @@ function updateCheckDisabled(flagDisabled: boolean): boolean {
 }
 
 function supportsUpdateCheck(command: string | undefined): boolean {
-  return ["doctor", "init", "set", "unset", "setup", "skill", "version", "sources", "graph", "gateway", "ui", "trial", "console", "dev", "review"].includes(command ?? "");
+  return ["doctor", "init", "set", "unset", "setup", "skill", "models", "version", "sources", "graph", "gateway", "ui", "trial", "console", "dev", "review"].includes(command ?? "");
 }
 
 async function maybePrintUpdateNotice(flagDisabled: boolean): Promise<void> {
@@ -306,6 +321,42 @@ async function maybePrintUpdateNotice(flagDisabled: boolean): Promise<void> {
     }
   } catch {
     // Update notices are advisory and must never affect the requested command.
+  }
+}
+
+function inspectCodexSkill(codexHome?: string) {
+  return inspectManagedCodexSkill({
+    sourceDir: bundledCodexSkillDir(),
+    installPath: installedCodexSkillPath(codexHome),
+  });
+}
+
+export function formatSkillUpdateNotice(skill: ReturnType<typeof inspectCodexSkill>): string | null {
+  if (skill.state === "stale-managed") {
+    return [
+      `The package-managed Refinery Codex skill is stale${skill.installedPackageVersion ? ` (${skill.installedPackageVersion})` : ""}.`,
+      "Refresh it with: refinery skill install --json",
+      "Start a new Codex task or refresh the app after updating so the new instructions are loaded.",
+      "No skill files were changed automatically.",
+    ].join(" ");
+  }
+  if (skill.state === "customized") {
+    return [
+      "The installed Refinery Codex skill differs from the package bundle, so Refinery preserved it.",
+      "Inspect with: refinery skill status --json",
+      "Only after the human confirms replacing customizations, run: refinery skill install --force --json",
+    ].join(" ");
+  }
+  return null;
+}
+
+async function maybePrintSkillNotice(command: string | undefined): Promise<void> {
+  if (command === "skill" || process.env.REFINERY_NO_SKILL_CHECK === "1") return;
+  try {
+    const notice = formatSkillUpdateNotice(inspectCodexSkill());
+    if (notice) process.stderr.write(`${notice}\n`);
+  } catch {
+    // Skill notices are advisory and must never affect the requested command.
   }
 }
 
@@ -392,16 +443,36 @@ async function cmdInit(rest: string[]): Promise<number> {
 
 async function cmdSkill(rest: string[]): Promise<number> {
   const sub = rest[0];
-  if (sub !== "install") {
-    throw new RefineryError("INVALID_OPTION", "Unknown skill command. Use: refinery skill install", { phase: "args" });
+  if (sub !== "install" && sub !== "status") {
+    throw new RefineryError("INVALID_OPTION", "Unknown skill command. Use: refinery skill install|status", { phase: "args" });
   }
   const values = parseOptionArgs(rest.slice(1), {
     "codex-home": { type: "string" },
     force: { type: "boolean", default: false },
     json: { type: "boolean", default: false },
   });
+  const codexHome = typeof values["codex-home"] === "string" ? values["codex-home"] : undefined;
+  if (sub === "status") {
+    if (values.force) throw new RefineryError("INVALID_OPTION", "--force is only valid for refinery skill install.", { phase: "args" });
+    const codexSkill = inspectCodexSkill(codexHome);
+    process.stdout.write(stableJson({
+      ok: true,
+      command: "skill status",
+      schemaVersion: "refinery.skill-status.v1",
+      packageVersion: packageMetadata().version,
+      codexSkill,
+      repair: codexSkill.state === "current"
+        ? null
+        : {
+          command: codexSkill.state === "customized" ? "refinery skill install --force --json" : "refinery skill install --json",
+          requiresHumanConfirmation: codexSkill.state === "customized",
+        },
+      reloadAfterInstall: "Start a new Codex task or refresh the Codex app so updated skill instructions are loaded.",
+    }));
+    return 0;
+  }
   const codexSkill = installCodexSkill({
-    codexHome: typeof values["codex-home"] === "string" ? values["codex-home"] : undefined,
+    codexHome,
     force: Boolean(values.force),
   });
   process.stdout.write(stableJson({
@@ -412,7 +483,137 @@ async function cmdSkill(rest: string[]): Promise<number> {
       path: bundledCodexSkillPath(),
       exists: fs.existsSync(bundledCodexSkillPath()),
     },
+    reloadAfterInstall: "Start a new Codex task or refresh the Codex app so updated skill instructions are loaded.",
   }));
+  return 0;
+}
+
+function modelCommandContext(values: Record<string, unknown>): { project: string; home?: string } {
+  return {
+    project: path.resolve(typeof values.project === "string" ? values.project : process.cwd()),
+    home: typeof values.home === "string" ? values.home : undefined,
+  };
+}
+
+function writeModelHumanOutput(value: Record<string, unknown>): void {
+  const command = String(value.command ?? "models");
+  if (command === "models list") {
+    const selected = value.selected as { modelName: string; source: string; available: boolean };
+    const models = value.models as Array<{ id: string; compatibility: { supported: boolean; family: string } }>;
+    process.stdout.write(`Coral models (${models.length})\n`);
+    for (const model of models) {
+      const marker = model.id === selected.modelName ? "*" : " ";
+      const support = model.compatibility.supported ? model.compatibility.family : "unsupported";
+      process.stdout.write(`${marker} ${model.id}  [${support}]\n`);
+    }
+    process.stdout.write(`Selected: ${selected.modelName} (${selected.source}; ${selected.available ? "available" : "not advertised"})\n`);
+    return;
+  }
+  if (command === "models get") {
+    const selected = value.selected as { modelName: string; source: string };
+    process.stdout.write(`${selected.modelName} (${selected.source})\n`);
+    return;
+  }
+  if (command === "models set") {
+    const selection = value.selection as { modelName: string };
+    process.stdout.write(`Selected Coral model: ${selection.modelName}\n`);
+    return;
+  }
+  const reset = value.reset as { removed: boolean };
+  process.stdout.write(reset.removed ? "Removed persisted Coral model selection.\n" : "No persisted Coral model selection was present.\n");
+}
+
+async function cmdModels(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  if (!sub || !["list", "get", "set", "reset"].includes(sub)) {
+    throw new RefineryError("INVALID_OPTION", "Unknown models command. Use: refinery models list|get|set|reset", { phase: "args" });
+  }
+  const modelId = sub === "set" ? rest[1] : undefined;
+  if (sub === "set" && (!modelId || modelId.startsWith("-"))) {
+    throw new RefineryError("INVALID_OPTION", "Use: refinery models set <model-id>", { phase: "args" });
+  }
+  const optionArgs = sub === "set" ? rest.slice(2) : rest.slice(1);
+  const values = parseOptionArgs(optionArgs, {
+    project: { type: "string" },
+    home: { type: "string" },
+    json: { type: "boolean", default: false },
+  });
+  const context = modelCommandContext(values);
+  const selected = resolveModelSelection({ home: context.home, cwd: context.project, env: process.env });
+  let output: Record<string, unknown>;
+  if (sub === "get") {
+    output = {
+      ok: true,
+      command: "models get",
+      schemaVersion: "refinery.models-get.v1",
+      selected,
+      compatibility: classifyModelCompatibility(selected.modelName),
+      builtInFallback: defaultModelName,
+      configPath: resolveRefineryPaths({ home: context.home, cwd: context.project }).modelSelectionPath,
+    };
+  } else if (sub === "reset") {
+    const reset = resetPersistedModelSelection({ home: context.home, cwd: context.project, env: process.env });
+    output = {
+      ok: true,
+      command: "models reset",
+      schemaVersion: "refinery.models-reset.v1",
+      reset,
+      selected: resolveModelSelection({ home: context.home, cwd: context.project, env: process.env }),
+    };
+  } else {
+    const access = resolveCatalogueAccess({ home: context.home, cwd: context.project, env: process.env });
+    const catalogue = await fetchCoralModelCatalogue({ apiKey: access.apiKey, baseUrl: access.baseUrl });
+    if (sub === "set") {
+      const record = catalogue.models.find((candidate) => candidate.id === modelId);
+      if (!record) {
+        throw new RefineryError("MODEL_NOT_ADVERTISED", `Coral does not currently advertise model ${modelId}.`, {
+          phase: "model-config",
+          details: { modelName: modelId, catalogueEndpoint: catalogue.endpoint },
+        });
+      }
+      const compatibility = classifyModelCompatibility(record.id);
+      if (!compatibility.supported) {
+        throw new RefineryError("MODEL_UNSUPPORTED", `Refinery cannot safely select model ${record.id}: ${compatibility.reason}`, {
+          phase: "model-config",
+          details: { modelName: record.id, compatibility },
+        });
+      }
+      const selection = writePersistedModelSelection({
+        home: context.home,
+        cwd: context.project,
+        env: process.env,
+        modelName: record.id,
+        catalogueEndpoint: catalogue.endpoint,
+      });
+      output = {
+        ok: true,
+        command: "models set",
+        schemaVersion: "refinery.models-set.v1",
+        selection,
+        resolved: resolveModelSelection({ home: context.home, cwd: context.project, env: process.env }),
+        compatibility,
+        model: record,
+      };
+    } else {
+      output = {
+        ok: true,
+        command: "models list",
+        schemaVersion: "refinery.models-list.v1",
+        provider: catalogue.provider,
+        endpoint: catalogue.endpoint,
+        retrievedAt: catalogue.retrievedAt,
+        authSource: access.authSource,
+        selected: {
+          ...selected,
+          available: catalogue.models.some((model) => model.id === selected.modelName),
+        },
+        builtInFallback: defaultModelName,
+        models: catalogue.models.map((model) => ({ ...model, compatibility: classifyModelCompatibility(model.id) })),
+      };
+    }
+  }
+  if (Boolean(values.json)) process.stdout.write(stableJson(output));
+  else writeModelHumanOutput(output);
   return 0;
 }
 
@@ -647,6 +848,7 @@ async function cmdDoctor(rest: string[]): Promise<number> {
     localEnv,
     cwd: process.cwd(),
   }).status;
+  const modelSelection = resolveModelSelection({ cwd: process.cwd(), env: process.env, localEnv });
   const coralAuth = storedAuthStatus("coral");
   const output = {
     ok: true,
@@ -661,6 +863,12 @@ async function cmdDoctor(rest: string[]): Promise<number> {
       source: modelAuth.source,
       provider: modelAuth.provider,
       ...(modelAuth.credentialPath ? { credentialPath: modelAuth.credentialPath } : {}),
+    },
+    model: {
+      selected: modelSelection,
+      builtInFallback: defaultModelName,
+      compatibility: classifyModelCompatibility(modelSelection.modelName),
+      catalogueCommand: "refinery models list --json",
     },
     storedAuth: {
       coral: {
@@ -1247,6 +1455,8 @@ async function cmdConsole(rest: string[]): Promise<number> {
       coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
       llmProxy: Boolean(values["coral-llm-proxy"]),
       modelName: typeof values.model === "string" ? values.model : undefined,
+      modelHome: typeof values.home === "string" ? values.home : undefined,
+      modelCwd: project,
       modelProxyProvider: typeof values["model-provider"] === "string" ? values["model-provider"] : undefined,
       reasoningEffort: typeof values["reasoning-effort"] === "string" ? values["reasoning-effort"] : undefined,
       timeoutMs: coralTimeoutMs,
@@ -1387,6 +1597,8 @@ async function cmdReview(rest: string[]): Promise<number> {
       coralJar: typeof values["coral-jar"] === "string" ? values["coral-jar"] : undefined,
       llmProxy: Boolean(values["coral-llm-proxy"]),
       modelName: typeof values.model === "string" ? values.model : undefined,
+      modelHome: typeof values.home === "string" ? values.home : undefined,
+      modelCwd: project,
       modelProxyProvider: typeof values["model-provider"] === "string" ? values["model-provider"] : undefined,
       reasoningEffort: typeof values["reasoning-effort"] === "string" ? values["reasoning-effort"] : undefined,
       timeoutMs: coralTimeoutMs,
@@ -1411,12 +1623,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     throw new RefineryError("INVALID_OPTION", `Unknown command: ${command}`, { phase: "args" });
   }
   await maybePrintUpdateNotice(updateCheck.disabled);
+  await maybePrintSkillNotice(command);
   if (command === "doctor") return cmdDoctor(commandArgs.slice(1));
   if (command === "init") return cmdInit(commandArgs.slice(1));
   if (command === "set") return cmdSet(commandArgs.slice(1));
   if (command === "unset") return cmdUnset(commandArgs.slice(1));
   if (command === "setup") return cmdSetup(commandArgs.slice(1));
   if (command === "skill") return cmdSkill(commandArgs.slice(1));
+  if (command === "models") return cmdModels(commandArgs.slice(1));
   if (command === "version") return cmdVersion(commandArgs.slice(1));
   if (command === "sources") return cmdSources(commandArgs.slice(1));
   if (command === "graph") return cmdGraph(commandArgs.slice(1));

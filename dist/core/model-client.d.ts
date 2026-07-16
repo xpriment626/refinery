@@ -9,6 +9,11 @@ export interface ModelCallMetadata {
     finishReason: string | null;
     usage: unknown;
 }
+export declare function buildChatRequestBody(request: {
+    model: ModelConfig;
+    system: string;
+    user: string;
+}): Record<string, unknown>;
 export declare function callCoralChatWithMetadata(request: {
     model: ModelConfig;
     system: string;

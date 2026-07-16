@@ -24,6 +24,7 @@ surface.
 ```bash
 npm i -g @itsshadowai/refinery
 refinery setup inspect --project "$PWD" --json
+refinery skill status --json
 refinery skill install --json
 refinery setup start --project "$PWD" --json
 ```
@@ -38,6 +39,7 @@ through chat, command arguments, the URL, logs, or browser storage.
 After the page completes, run:
 
 ```bash
+refinery models list --project "$PWD" --json
 refinery setup status --project "$PWD" --json
 ```
 
@@ -53,6 +55,7 @@ control to Codex or the human.
 To install or refresh only the Codex skill:
 
 ```bash
+refinery skill status --json
 refinery skill install --json
 refinery skill install --force --json
 ```
@@ -60,6 +63,9 @@ refinery skill install --force --json
 Package-managed skill copies carry a content manifest. An unchanged older copy
 is refreshed automatically. A customized copy is preserved and reported as a
 conflict with an explicit `--force` repair action.
+After a managed skill refresh, start a new Codex task or refresh the app so the
+new instructions are loaded. A customized-copy replacement always requires
+explicit human confirmation.
 
 The local credential store uses mode `0700`/`0600` and owner validation on
 POSIX systems. On Windows it uses the access controls inherited from the
@@ -69,6 +75,42 @@ files, rotates via atomic replacement, and supports revocation with
 `refinery unset auth coral --json`. You can also provide `CORAL_API_KEY` in the
 environment for development sessions.
 
+The intended agent-first path is: install Refinery, inspect setup and the
+bundled skill, open the one-time authorization page, list live Coral models,
+optionally select one, verify readiness, and then steer `$refinery` naturally
+in chat. Future package and skill notices remain advisory and never silently
+mutate the installation.
+
+## Coral Models
+
+Read the authenticated model catalogue instead of relying on a copied list:
+
+```bash
+refinery models list --project "$PWD" --json
+refinery models get --project "$PWD" --json
+refinery models set gpt-5.4-nano --project "$PWD" --json
+refinery models reset --project "$PWD" --json
+```
+
+Without `--json`, the same commands print concise human-readable output.
+`models list` returns schema `refinery.models-list.v1`, the catalogue endpoint,
+retrieval time, exact server records, current selection, built-in fallback,
+and a separate compatibility assessment. Catalogue presence does not by itself
+prove that every model family accepts Refinery's request shape.
+
+The resolved model precedence is a per-command `--model`, process or project
+environment (`MODEL_NAME` / `REFINERY_MODEL_NAME`), the private persisted
+selection under `~/.refinery/config/model.json`, then the built-in release
+default. `models set` fetches the current catalogue and validates both exact ID
+presence and Refinery compatibility before atomically replacing that file. A
+failed request leaves the prior selection unchanged. `models reset` removes
+only the persisted override and reports the resulting fallback.
+
+Ordinary Coral Cloud catalogue models infer the normal provider route. The
+review/console `--model-provider` option is for advanced Coral Server provider
+overrides. DeepSeek remains an advanced provider path unless it appears in the
+live Coral catalogue; it is not required for v0.3.
+
 ## Version Checks
 
 The CLI performs a best-effort, cached check of the public npm registry and
@@ -76,6 +118,13 @@ prints a notice on stderr when a newer Refinery version is available. It never
 installs an update automatically. If the notice appears, ask the human user to
 confirm before running the suggested `npm i -g @itsshadowai/refinery@<version>`
 command.
+
+After a human-approved package update, run `refinery skill status --json`. A
+`stale-managed` copy can be refreshed with the exact non-conflicting command
+`refinery skill install --json`. A `customized` copy is preserved; inspect it
+and obtain explicit human confirmation before using
+`refinery skill install --force --json`. Refinery does not download a separate
+remote skill feed.
 
 Use `--no-update-check` or set `REFINERY_NO_UPDATE_CHECK=1` to suppress the
 notice. Update checks are also disabled when `CI=true`. Network failures are
@@ -96,7 +145,14 @@ refinery setup status --project "$PWD" --json
 refinery version --json
 
 # Install or refresh the companion Codex skill.
+refinery skill status --json
 refinery skill install --json
+
+# Discover and optionally select an advertised compatible Coral model.
+refinery models list --project "$PWD" --json
+refinery models get --project "$PWD" --json
+refinery models set <exact-model-id> --project "$PWD" --json
+refinery models reset --project "$PWD" --json
 
 # Inspect source loading without invoking Coral.
 refinery sources inspect \
@@ -172,6 +228,33 @@ graph, runtime, and validation failures exit nonzero and use `ok: false` with
 `error.code`, `error.message`, `error.phase`, and actionable `error.details`
 when available. `graph status` exits `0` with `exists: false` when no index has
 been built. Secrets are not emitted.
+
+## Upgrading And Rollback
+
+Upgrade only after the human approves the version notice:
+
+```bash
+npm i -g @itsshadowai/refinery@0.3.0
+refinery version --json
+refinery skill status --json
+refinery setup status --project "$PWD" --json
+```
+
+Existing private credentials, persisted model/UI preferences, derived graph
+state, and canonical Codex sources remain outside the package directory. A
+package-managed v0.2 skill is reported as `stale-managed` and can be refreshed;
+a customized skill is left untouched.
+
+If rollback is necessary, first preserve any local run evidence needed for
+diagnosis, then ask the human before installing the prior public package:
+
+```bash
+npm i -g @itsshadowai/refinery@0.2.0
+refinery version --json
+```
+
+Rollback does not rewrite v0.3 state schemas for an older CLI. Prefer restoring
+the v0.3 package after diagnosis, and do not force-replace customized skills.
 
 ## Sources And Targets
 

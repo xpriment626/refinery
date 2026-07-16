@@ -9,6 +9,7 @@ import { storedAuthStatus, storedAuthPath } from "../core/credentials.ts";
 import { resolveRefineryPaths } from "../core/paths.ts";
 import { inspectManagedCodexSkill } from "../core/skill-installer.ts";
 import { readUiConfig } from "../gateway/config.ts";
+import { classifyModelCompatibility, resolveModelSelection } from "../core/model-selection.ts";
 
 export const setupStatusSchemaVersion = "refinery.setup-status.v1" as const;
 export const setupReceiptSchemaVersion = "refinery.setup-receipt.v1" as const;
@@ -121,8 +122,8 @@ function receiptMatchesCredential(receipt: SetupReceipt | null, revision: Creden
     && receipt.credential.device === revision.device
     && receipt.credential.inode === revision.inode
     && receipt.coral.verified
-    && receipt.coral.modelCatalogue.modelName === "gpt-5.4-nano"
-    && receipt.coral.modelCatalogue.available);
+    && receipt.coral.registry.reachable
+    && receipt.coral.modelCatalogue.reachable);
 }
 
 export function inspectSetup(args: {
@@ -154,6 +155,13 @@ export function inspectSetup(args: {
   const revision = credentialRevision(storedAuthPath("coral", { home: args.home, cwd: project, env }));
   const receipt = readSetupReceipt({ home: args.home, project });
   const coralVerified = receiptMatchesCredential(receipt, revision);
+  const selectedModel = resolveModelSelection({ home: args.home, cwd: project, env });
+  const advertisedModelIds = coralVerified ? receipt?.coral.modelCatalogue.modelIds ?? [] : [];
+  const selectedModelAvailable = coralVerified
+    ? advertisedModelIds.length === 0
+      ? receipt?.coral.modelCatalogue.modelName === selectedModel.modelName && receipt?.coral.modelCatalogue.available === true
+      : advertisedModelIds.includes(selectedModel.modelName)
+    : null;
   const runtime = inspectCoralRuntime({ home: args.home, cwd: project, env });
   const graphExists = fs.existsSync(paths.graphIndexPath) && fs.statSync(paths.graphIndexPath).isFile();
   const uiAssetsPresent = fs.existsSync(path.join(packageRoot, "dist", "ui", "index.html"));
@@ -186,6 +194,19 @@ export function inspectSetup(args: {
     message: "The stored Coral credential has not been verified against the registry and model catalogue.",
     repair: { command: `refinery setup start --project ${JSON.stringify(project)} --json`, requiresHumanConfirmation: true },
   });
+  else if (!selectedModelAvailable) issues.push({
+    code: "CORAL_MODEL_UNAVAILABLE",
+    severity: "repair",
+    message: `The selected Coral model is not advertised by the last verified catalogue: ${selectedModel.modelName}`,
+    repair: { command: "refinery models list --json", requiresHumanConfirmation: false },
+  });
+  const modelCompatibility = classifyModelCompatibility(selectedModel.modelName);
+  if (!modelCompatibility.supported) issues.push({
+    code: "CORAL_MODEL_UNSUPPORTED",
+    severity: "repair",
+    message: `The selected Coral model has no validated Refinery request contract: ${selectedModel.modelName}`,
+    repair: { command: "refinery models list --json", requiresHumanConfirmation: false },
+  });
   if (!runtime.verified) issues.push({
     code: "CORAL_RUNTIME_NOT_PROVISIONED",
     severity: "human",
@@ -215,7 +236,8 @@ export function inspectSetup(args: {
     agent: skill.state === "current",
     graph: memoryHomeSafe && memoryHomeExists,
     liveReview: memoryHomeSafe && memoryHomeExists && Boolean(auth?.present) && !authError
-      && coralVerified && runtime.verified && runtime.java.sufficient,
+      && coralVerified && selectedModelAvailable === true && modelCompatibility.supported
+      && runtime.verified && runtime.java.sufficient,
     ui: graphExists && uiAssetsPresent,
   };
   const state = readyFor.agent && readyFor.graph && readyFor.liveReview && readyFor.ui
@@ -242,7 +264,13 @@ export function inspectSetup(args: {
       mode: auth?.mode ?? null,
       verified: coralVerified,
       verifiedAt: coralVerified ? receipt?.coral.verifiedAt ?? null : null,
-      modelName: coralVerified ? receipt?.coral.modelCatalogue.modelName ?? null : null,
+      modelName: selectedModel.modelName,
+    },
+    model: {
+      selected: selectedModel,
+      compatibility: modelCompatibility,
+      advertisedByVerifiedCatalogue: selectedModelAvailable,
+      catalogueCount: coralVerified ? receipt?.coral.modelCatalogue.count ?? receipt?.coral.modelCatalogue.modelIds?.length ?? null : null,
     },
     runtime,
     graph: { exists: graphExists, path: paths.graphIndexPath },

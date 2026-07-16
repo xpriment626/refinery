@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { hashSkillTree, installManagedCodexSkill } from "./skill-installer.ts";
+import { hashSkillTree, inspectManagedCodexSkill, installManagedCodexSkill } from "./skill-installer.ts";
 
 function seedBundle(root: string, body: string): string {
   const source = path.join(root, "bundle");
@@ -34,4 +34,19 @@ test("managed skill installs, refreshes unchanged content, and preserves customi
   assert.equal(preserved.conflict, true);
   assert.equal(hashSkillTree(path.dirname(installPath)), before);
   assert.match(preserved.next ?? "", /--force/);
+});
+
+test("the exact public v0.2 skill fixture remains recognized as legacy managed state", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-v02-skill-"));
+  const source = path.resolve(import.meta.dirname, "../../test/fixtures/public-v0.2-skill");
+  const installDir = path.join(root, "codex/skills/refinery");
+  fs.cpSync(source, installDir, { recursive: true });
+  const inspection = inspectManagedCodexSkill({
+    sourceDir: path.resolve(import.meta.dirname, "../../skills/refinery"),
+    installPath: path.join(installDir, "SKILL.md"),
+  });
+  assert.equal(hashSkillTree(installDir), "c8c8cf803697f2889e56d1bb387177c68210326ac041acf34e4f46b3c003bfbf");
+  assert.equal(inspection.state, "stale-managed");
+  assert.equal(inspection.managed, true);
+  assert.equal(inspection.conflict, false);
 });

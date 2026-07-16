@@ -1,8 +1,8 @@
 import { RefineryError } from "../core/errors.js";
+import { parseCoralModelCatalogue } from "../core/model-selection.js";
 export const coralVerificationSchemaVersion = "refinery.coral-verification.v1";
 export const defaultCoralCloudApiUrl = "https://api.coralcloud.ai";
 export const defaultCoralModelBaseUrl = "https://llm.coralcloud.ai/openai/v1";
-export const releaseCoralModelName = "gpt-5.4-nano";
 function safeBaseUrl(value, label) {
     let parsed;
     try {
@@ -49,22 +49,13 @@ async function fetchJson(args) {
         });
     }
 }
-function catalogueContainsModel(value, modelName) {
-    if (!value || typeof value !== "object")
-        return false;
-    const data = value.data;
-    if (!Array.isArray(data))
-        return false;
-    return data.some((entry) => Boolean(entry) && typeof entry === "object"
-        && (entry.id === modelName || entry.name === modelName));
-}
 export async function verifyCoralCredential(args) {
     const apiKey = args.apiKey.trim();
     if (!apiKey)
         throw new RefineryError("CORAL_AUTH_MISSING", "Coral API key is required.", { phase: "coral-auth-verify" });
     const cloudApiUrl = safeBaseUrl(args.cloudApiUrl ?? defaultCoralCloudApiUrl, "Coral Cloud API URL");
     const modelBaseUrl = safeBaseUrl(args.modelBaseUrl ?? defaultCoralModelBaseUrl, "Coral model proxy URL");
-    const modelName = args.modelName?.trim() || releaseCoralModelName;
+    const modelName = args.modelName?.trim() || null;
     const timeoutMs = Math.max(1_000, Math.min(30_000, args.timeoutMs ?? 8_000));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -91,12 +82,9 @@ export async function verifyCoralCredential(args) {
             signal: controller.signal,
             label: "Coral model catalogue",
         });
-        if (!catalogueContainsModel(models.value, modelName)) {
-            throw new RefineryError("CORAL_MODEL_UNAVAILABLE", `Required release model is not available: ${modelName}`, {
-                phase: "coral-auth-verify",
-                details: { endpoint: modelsEndpoint, status: models.response.status, modelName },
-            });
-        }
+        const modelRecords = parseCoralModelCatalogue(models.value);
+        const modelIds = modelRecords.map((model) => model.id);
+        const requestedModelAvailable = modelName ? modelIds.includes(modelName) : null;
         return {
             schemaVersion: coralVerificationSchemaVersion,
             verified: true,
@@ -106,8 +94,10 @@ export async function verifyCoralCredential(args) {
                 reachable: true,
                 status: models.response.status,
                 endpoint: modelsEndpoint,
-                modelName,
-                available: true,
+                count: modelIds.length,
+                modelIds,
+                requestedModelName: modelName,
+                requestedModelAvailable,
             },
         };
     }

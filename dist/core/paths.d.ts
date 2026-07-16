@@ -14,6 +14,7 @@ export interface RefineryPaths {
     gatewayStatePath: string;
     gatewayLogPath: string;
     uiConfigPath: string;
+    modelSelectionPath: string;
     setupDir: string;
     setupStatePath: string;
     setupReceiptPath: string;

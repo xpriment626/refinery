@@ -36,6 +36,8 @@
     "postinstall": "node scripts/postinstall.mjs",
     "test": "node scripts/run-tests.mjs",
     "acceptance:packed": "node scripts/acceptance.mjs",
+    "acceptance:upgrade": "node scripts/upgrade-acceptance.mjs",
+    "acceptance:upgrade:public": "node scripts/upgrade-acceptance.mjs --public",
     "audit:licenses": "node scripts/license-audit.mjs",
     "audit:release": "node scripts/release-audit.mjs",
     "benchmark:graph": "node --expose-gc bench/graph-benchmark.ts",

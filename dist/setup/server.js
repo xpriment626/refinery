@@ -6,7 +6,8 @@ import { asRefineryError, RefineryError } from "../core/errors.js";
 import { removeStoredAuth, writeStoredAuth } from "../core/credentials.js";
 import { resolveRefineryPaths } from "../core/paths.js";
 import { provisionCoralRuntime } from "../coral/runtime.js";
-import { releaseCoralModelName, verifyCoralCredential } from "../coral/verification.js";
+import { verifyCoralCredential } from "../coral/verification.js";
+import { resolveModelSelection } from "../core/model-selection.js";
 import { writeUiConfig } from "../gateway/config.js";
 import { inspectSetup, writeSetupReceipt } from "./status.js";
 export const setupProtocolVersion = "refinery.setup-gateway.v1";
@@ -137,7 +138,7 @@ async function boot() {
   values[1].textContent = setup.memoryHome.path + " (read-only)";
   values[2].textContent = setup.graph.path + " (Refinery-managed)";
   values[3].textContent = setup.credential.path + " (" + setup.credential.protection + ")";
-  values[4].textContent = "gpt-5.4-nano through Coral-coordinated specialists";
+  values[4].textContent = setup.model.selected.modelName + " (" + setup.model.selected.source + ") through Coral-coordinated specialists";
   document.querySelector("#browser-open").checked = Boolean(setup.ui?.browserOpenOnSync);
   loading.hidden = true;
   form.hidden = false;
@@ -288,11 +289,12 @@ export async function startSetupHttpServer(options) {
                     || typeof body.browserOpenOnSync !== "boolean") {
                     throw new RefineryError("SETUP_FIELDS_INVALID", "Setup request fields are invalid.", { phase: "setup-server" });
                 }
+                const selectedModel = resolveModelSelection({ home: options.home, cwd: options.project, env });
                 const coral = await verifyCoralCredential({
                     apiKey: body.coralApiKey,
                     cloudApiUrl: env.CORAL_CLOUD_API_URL,
                     modelBaseUrl: env.REFINERY_MODEL_BASE_URL,
-                    modelName: releaseCoralModelName,
+                    modelName: selectedModel.modelName,
                 });
                 writeStoredAuth("coral", body.coralApiKey, { home: options.home, cwd: options.project, env });
                 writeSetupReceipt({ home: options.home, project: options.project, coral });

@@ -23,6 +23,8 @@ export interface CoralReviewRuntimeOptions {
     llmProxy?: boolean;
     modelProxyProvider?: string;
     topology?: ReviewTopology;
+    modelHome?: string;
+    modelCwd?: string;
 }
 export interface CoralReviewRunOptions {
     packet: ReviewPacket;

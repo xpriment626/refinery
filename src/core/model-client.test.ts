@@ -1,6 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callCoralChatWithMetadata } from "./model-client.ts";
+import { buildChatRequestBody, callCoralChatWithMetadata } from "./model-client.ts";
+
+test("request shaping uses reasoning-model controls and rejects unknown families", () => {
+  const body = buildChatRequestBody({
+    model: {
+      provider: "coral",
+      modelName: "o4-mini",
+      baseUrl: "https://llm.coralcloud.ai/openai/v1",
+      apiKey: "unused",
+      reasoningEffort: "high",
+      maxTokens: 1234,
+    },
+    system: "system",
+    user: "user",
+  });
+  assert.equal(body.max_completion_tokens, 1234);
+  assert.equal("max_tokens" in body, false);
+  assert.equal("temperature" in body, false);
+  assert.equal(body.reasoning_effort, "high");
+  assert.throws(() => buildChatRequestBody({
+    model: { provider: "coral", modelName: "future-model", baseUrl: "https://example.test/v1", apiKey: "unused" },
+    system: "system",
+    user: "user",
+  }), /Unsupported model family/);
+});
 
 test("callCoralChatWithMetadata uses Coral streaming chat completions", async () => {
   const originalFetch = globalThis.fetch;

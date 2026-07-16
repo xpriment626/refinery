@@ -18,6 +18,7 @@ import {
 import type { LocalSpecialist, SpecialistName } from "../core/specialists/types.ts";
 import { callCoralChatWithMetadata, type ModelCallMetadata } from "../core/model-client.ts";
 import { resolveModelApiKey } from "../core/credentials.ts";
+import { resolveModelSelection } from "../core/model-selection.ts";
 import {
   getCoralAgentBySpecialistName,
   getSpecialistNameArg,
@@ -54,7 +55,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()): WorkerModelConfig {
   if (proxyUrl) {
     return {
       provider: "coral",
-      modelName: proxyModel ?? readEnv("MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
+      modelName: proxyModel ?? resolveModelSelection({ cwd, env: process.env, localEnv }).modelName,
       baseUrl: `${proxyUrl.replace(/\/$/, "")}/v1`,
       apiKey: "",
       authMode: "coral-agent-proxy",
@@ -70,7 +71,7 @@ export function loadWorkerModelConfig(cwd = process.cwd()): WorkerModelConfig {
   });
   return {
     provider: "coral",
-    modelName: readEnv("MODEL_NAME", localEnv) ?? readEnv("REFINERY_MODEL_NAME", localEnv) ?? refineryCoralModelDefaults.modelName,
+    modelName: resolveModelSelection({ cwd, env: process.env, localEnv }).modelName,
     baseUrl: readEnv("MODEL_BASE_URL", localEnv) ?? readEnv("REFINERY_MODEL_BASE_URL", localEnv) ?? refineryCoralModelDefaults.baseUrl,
     apiKey: modelAuth.apiKey,
     authMode: "bearer",
