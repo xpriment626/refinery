@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,16 @@ function seedBundle(root: string, body: string): string {
   fs.writeFileSync(path.join(source, "SKILL.md"), body);
   fs.writeFileSync(path.join(source, "agents/openai.yaml"), "display_name: Refinery\n");
   return source;
+}
+
+function hashSeedBundleAsLegacyWindowsTree(root: string): string {
+  const hash = crypto.createHash("sha256");
+  for (const segments of [["agents", "openai.yaml"], ["SKILL.md"]]) {
+    hash.update(segments.join("\\")).update("\0");
+    hash.update(fs.readFileSync(path.join(root, ...segments)));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 test("managed skill installs, refreshes unchanged content, and preserves customization", () => {
@@ -49,4 +60,31 @@ test("the exact public v0.2 skill fixture remains recognized as legacy managed s
   assert.equal(inspection.state, "stale-managed");
   assert.equal(inspection.managed, true);
   assert.equal(inspection.conflict, false);
+});
+
+test("a v0.3.0 Windows manifest remains managed after canonical tree hashing", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-windows-skill-"));
+  const source = seedBundle(root, "version one\n");
+  const installDir = path.join(root, "codex/skills/refinery");
+  const installPath = path.join(installDir, "SKILL.md");
+  fs.cpSync(source, installDir, { recursive: true });
+
+  const legacyWindowsHash = hashSeedBundleAsLegacyWindowsTree(installDir);
+  assert.notEqual(hashSkillTree(installDir), legacyWindowsHash);
+  fs.writeFileSync(path.join(installDir, ".refinery-managed.json"), `${JSON.stringify({
+    schemaVersion: "refinery.managed-skill.v1",
+    packageName: "@itsshadowai/refinery",
+    packageVersion: "0.3.0",
+    installedTreeHash: legacyWindowsHash,
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(source, "SKILL.md"), "version two\n");
+
+  const inspection = inspectManagedCodexSkill({ sourceDir: source, installPath });
+  assert.equal(inspection.state, "stale-managed");
+  assert.equal(inspection.managed, true);
+  assert.equal(inspection.conflict, false);
+
+  const upgraded = installManagedCodexSkill({ sourceDir: source, installPath, packageVersion: "0.3.1" });
+  assert.equal(upgraded.action, "upgraded");
+  assert.equal(fs.readFileSync(installPath, "utf8"), "version two\n");
 });

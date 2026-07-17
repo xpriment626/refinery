@@ -47,8 +47,10 @@ transcripts/
 runs/
 memory-graph.json
 *.memory-graph.json
+*.tgz
 tmp/
 
 # local logs and operating-system files
 *.log
 .DS_Store
+.idea/

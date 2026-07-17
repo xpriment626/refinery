@@ -189,7 +189,7 @@ try {
   });
 
   const versionResult = await cliRun(["version", "--json"]);
-  assert.equal(parseJson(versionResult).version, "0.3.0");
+  assert.equal(parseJson(versionResult).version, "0.3.1");
   assert.match(versionResult.stderr, /package-managed Refinery Codex skill is stale/);
   const stale = parseJson(await cliRun(["skill", "status", "--json"]));
   assert.equal(stale.codexSkill.state, "stale-managed");
@@ -243,7 +243,7 @@ try {
     source: publicMode ? "public-npm-0.2.0" : "exact-public-v0.2-skill-fixture",
     publicPackageVerified,
     fromVersion: "0.2.0",
-    toVersion: "0.3.0",
+    toVersion: "0.3.1",
     tarball: path.basename(tarball),
     legacySkillHash: stale.codexSkill.installedTreeHash,
     managedSkillUpgraded: true,

@@ -147,7 +147,7 @@ try {
   const cliRun = (args, options = {}) => run(process.execPath, [cli, ...args], { cwd: project, env, ...options });
 
   const version = parseJson(await cliRun(["version", "--json"]));
-  assert.equal(version.version, "0.3.0");
+  assert.equal(version.version, "0.3.1");
   const installedSkill = parseJson(await cliRun(["skill", "install", "--json"]));
   assert.equal(installedSkill.codexSkill.action, "installed");
   assert.equal(installedSkill.codexSkill.managed, true);

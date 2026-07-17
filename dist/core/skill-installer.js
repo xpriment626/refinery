@@ -9,31 +9,52 @@ const knownManagedTreeHashes = new Set([
     "9110ec1c68449b92f9047623af977a0c91e3356244f3a51f2a00ce24ca5d207b", // 0.1.1
     "c8c8cf803697f2889e56d1bb387177c68210326ac041acf34e4f46b3c003bfbf", // 0.2.0
 ]);
-function walkTree(root, relative = "") {
-    const directory = path.join(root, relative);
+function walkTree(root, relative = []) {
+    const directory = path.join(root, ...relative);
     const files = [];
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        const rel = relative ? path.join(relative, entry.name) : entry.name;
-        if (rel === managedManifestName)
+        const segments = [...relative, entry.name];
+        if (segments.length === 1 && entry.name === managedManifestName)
             continue;
         if (entry.isDirectory())
-            files.push(...walkTree(root, rel));
+            files.push(...walkTree(root, segments));
         else if (entry.isFile())
-            files.push(rel);
+            files.push({ segments, kind: "file" });
         else
-            files.push(`${rel}\0${entry.isSymbolicLink() ? "symlink" : "special"}`);
+            files.push({ segments, kind: entry.isSymbolicLink() ? "symlink" : "special" });
     }
-    return files.sort((left, right) => left.localeCompare(right));
+    return files;
 }
-export function hashSkillTree(root) {
+function hashSkillTreeWithSeparator(root, separator) {
     const hash = crypto.createHash("sha256");
-    for (const rel of walkTree(root)) {
-        hash.update(rel).update("\0");
-        if (!rel.includes("\0"))
-            hash.update(fs.readFileSync(path.join(root, rel)));
+    const entries = walkTree(root)
+        .map((entry) => {
+        const relativePath = entry.segments.join(separator);
+        return {
+            entry,
+            logicalPath: entry.kind === "file" ? relativePath : `${relativePath}\0${entry.kind}`,
+        };
+    })
+        .sort((left, right) => left.logicalPath.localeCompare(right.logicalPath));
+    for (const { entry, logicalPath } of entries) {
+        hash.update(logicalPath).update("\0");
+        if (entry.kind === "file")
+            hash.update(fs.readFileSync(path.join(root, ...entry.segments)));
         hash.update("\0");
     }
     return hash.digest("hex");
+}
+export function hashSkillTree(root) {
+    return hashSkillTreeWithSeparator(root, "/");
+}
+function manifestMatchesTree(root, manifest, canonicalTreeHash) {
+    if (!manifest)
+        return false;
+    if (manifest.installedTreeHash === canonicalTreeHash)
+        return true;
+    // v0.3.0 used native path separators, so Windows manifests contain a
+    // backslash-based digest. Accept that exact legacy digest during upgrades.
+    return manifest.installedTreeHash === hashSkillTreeWithSeparator(root, "\\");
 }
 export function inspectManagedCodexSkill(options) {
     const destination = path.dirname(options.installPath);
@@ -77,7 +98,8 @@ export function inspectManagedCodexSkill(options) {
             installedPackageVersion: manifest?.packageVersion ?? null,
         };
     }
-    const managed = knownManagedTreeHashes.has(installedTreeHash) || manifest?.installedTreeHash === installedTreeHash;
+    const managed = knownManagedTreeHashes.has(installedTreeHash)
+        || manifestMatchesTree(destination, manifest, installedTreeHash);
     return {
         path: options.installPath,
         exists: fs.existsSync(options.installPath),
@@ -198,7 +220,7 @@ export function installManagedCodexSkill(options) {
     const manifest = readManagedManifest(destination);
     const isManaged = installedTreeHash === bundledTreeHash
         || knownManagedTreeHashes.has(installedTreeHash)
-        || manifest?.installedTreeHash === installedTreeHash;
+        || manifestMatchesTree(destination, manifest, installedTreeHash);
     if (installedTreeHash === bundledTreeHash && !options.force) {
         writeManagedManifest(destination, options.packageVersion, bundledTreeHash);
         return {

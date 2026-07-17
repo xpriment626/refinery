@@ -234,7 +234,7 @@ been built. Secrets are not emitted.
 Upgrade only after the human approves the version notice:
 
 ```bash
-npm i -g @itsshadowai/refinery@0.3.0
+npm i -g @itsshadowai/refinery@0.3.1
 refinery version --json
 refinery skill status --json
 refinery setup status --project "$PWD" --json
