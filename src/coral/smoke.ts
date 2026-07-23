@@ -30,7 +30,7 @@ import {
   refineryCoralPort,
 } from "./definitions.ts";
 import { resolveRefineryPaths } from "../core/paths.ts";
-import { coralRuntimeJarPath } from "./runtime.ts";
+import { coralRuntimeJarPath, inspectJavaRuntime } from "./runtime.ts";
 import { cleanupRuntimeCoralConfigPath, resolveRuntimeCoralConfigPath } from "./review-conductor.ts";
 
 interface SmokeArgs {
@@ -130,7 +130,9 @@ function startCoralServer(args: SmokeArgs, logs: string[]): ChildProcessWithoutN
   if (!args.coralRuntimeJar || !fs.existsSync(args.coralRuntimeJar)) {
     throw new Error("Latest-stable Coral Server runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
   }
-  const child = spawn(process.env.REFINERY_JAVA_BIN ?? "java", ["-jar", args.coralRuntimeJar], {
+  const java = inspectJavaRuntime(process.env);
+  if (!java.sufficient) throw new Error("Coral requires Java 24 or newer.");
+  const child = spawn(java.command, ["-jar", args.coralRuntimeJar], {
     cwd: repoRoot,
     env: {
       ...process.env,

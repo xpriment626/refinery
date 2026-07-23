@@ -42,14 +42,18 @@ export interface CoralSessionRequestInput {
     ttlMs?: number;
     holdAfterExitMs?: number;
     topology?: ReviewTopology;
+    sessionBudgetMicroCents?: number;
     llmProxy?: {
         enabled: boolean;
         configurationName?: string;
     };
 }
+export declare const defaultCoralSessionBudgetMicroCents = 100000000;
 export interface CoralRuntimeCapabilities {
     schemaVersion: "refinery.coral-runtime-capabilities.v1";
     graphAgentProxyOverrides: boolean;
+    sessionBudgetSettings: boolean;
+    graphAgentBudgetSettings: boolean;
     dynamicAgentInsertion: false;
     nativeSleep: false;
     softSleep: "wait_for_mention";

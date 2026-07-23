@@ -58,7 +58,7 @@ USAGE
   refinery models get [--project <dir>] [--home <dir>] [--json]
   refinery models set <model-id> [--project <dir>] [--home <dir>] [--json]
   refinery models reset [--project <dir>] [--home <dir>] [--json]
-  refinery set auth coral [--home <dir>] [--value-stdin] [--json]
+  refinery set auth coral [--project <dir>] [--home <dir>] [--codex-home <dir>] [--value-stdin] [--json]
   refinery unset auth coral [--home <dir>] [--json]
   refinery setup inspect [--project <dir>] [--home <dir>] [--codex-home <dir>] [--memory-home <dir>] [--json]
   refinery setup start [--project <dir>] [--home <dir>] [--codex-home <dir>] [--json]
@@ -86,10 +86,11 @@ USAGE
 
 Refinery builds a bounded ReviewPacket from source specs, runs a dry-run Coral-coordinated review, and emits proposal artifacts.
 It does not approve, apply, or write durable memory. Runtime state defaults to ~/.refinery/runs/by-project/<project-key>.
-After installation, run setup inspect and setup start so Codex can open the one-time local authorization page.
+After installation, run set auth coral so Refinery can open the one-time local authorization page.
 Run init once to create ~/.refinery and install the bundled $refinery Codex skill.
 Run skill install when you only want to install or refresh the bundled Codex skill.
-Use setup start for browser-safe Coral authorization. The legacy set auth command remains available for non-browser environments.
+Use set auth coral for browser-safe Coral authorization. setup start is a compatibility alias for the same local flow.
+The explicit --value-stdin option remains temporarily available for legacy automation and is deprecated.
 Use console run for local Coral Console trials that seed a live session without writing run artifacts.
 Use models list to read the live Coral LLM proxy catalogue, then models set to persist a validated default.
 Use --no-update-check to suppress the best-effort public version notice.`;
@@ -624,57 +625,45 @@ async function readAllStdin(): Promise<string> {
   return value;
 }
 
-async function readSecretFromTty(prompt: string): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
-    throw new RefineryError(
-      "AUTH_INPUT_REQUIRED",
-      "Use an interactive terminal or pass --value-stdin to read the secret from stdin.",
-      { phase: "auth" },
-    );
-  }
-  return await new Promise<string>((resolve, reject) => {
-    const stdin = process.stdin;
-    const stdout = process.stdout;
-    const previousRaw = stdin.isRaw;
-    let value = "";
-    const cleanup = () => {
-      stdin.off("data", onData);
-      stdin.setRawMode(previousRaw);
-      stdin.pause();
-    };
-    const finish = () => {
-      cleanup();
-      stdout.write("\n");
-      resolve(value);
-    };
-    const fail = (error: Error) => {
-      cleanup();
-      stdout.write("\n");
-      reject(error);
-    };
-    const onData = (chunk: Buffer | string) => {
-      const input = chunk.toString("utf8");
-      for (const char of input) {
-        if (char === "\u0003") {
-          fail(new RefineryError("AUTH_INPUT_CANCELLED", "Auth input cancelled.", { phase: "auth" }));
-          return;
-        }
-        if (char === "\r" || char === "\n") {
-          finish();
-          return;
-        }
-        if (char === "\u007f" || char === "\b") {
-          value = value.slice(0, -1);
-          continue;
-        }
-        value += char;
-      }
-    };
-    stdout.write(prompt);
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdin.on("data", onData);
+async function startAuthorizationUi(args: {
+  command: "set auth" | "setup start";
+  project: string;
+  home?: string;
+  codexHome?: string;
+  openBrowser: boolean;
+}): Promise<Record<string, unknown>> {
+  const server = await startSetupLifecycle({
+    home: args.home,
+    project: args.project,
+    codexHome: args.codexHome,
+    env: process.env,
   });
+  const url = typeof server.url === "string" ? server.url : "";
+  if (!url) {
+    throw new RefineryError("SETUP_URL_UNAVAILABLE", "The local authorization server started without a capability URL.", {
+      phase: "setup-lifecycle",
+    });
+  }
+  if (args.openBrowser) openExternalUrl(url);
+  return {
+    ok: true,
+    command: args.command,
+    provider: "coral",
+    schemaVersion: "refinery.setup-start.v1",
+    state: "awaiting-human",
+    project: args.project,
+    ...server,
+    browser: {
+      action: "open",
+      requested: args.openBrowser,
+      preferredHarness: args.openBrowser ? "system-browser" : "codex-in-app-browser",
+      fallback: "Open the returned loopback URL in any browser on this machine.",
+    },
+    next: [
+      "Open the one-time URL and let the human authorize Coral and local preferences.",
+      `Then run refinery setup status --project ${JSON.stringify(args.project)} --json.`,
+    ],
+  };
 }
 
 async function cmdSet(rest: string[]): Promise<number> {
@@ -684,14 +673,27 @@ async function cmdSet(rest: string[]): Promise<number> {
     throw new RefineryError("INVALID_OPTION", "Unknown set command. Use: refinery set auth coral", { phase: "args" });
   }
   const values = parseOptionArgs(rest.slice(2), {
+    project: { type: "string" },
     home: { type: "string" },
+    "codex-home": { type: "string" },
     "value-stdin": { type: "boolean", default: false },
     json: { type: "boolean", default: false },
   });
+  const project = path.resolve(typeof values.project === "string" ? values.project : process.cwd());
   const home = typeof values.home === "string" ? values.home : undefined;
-  const value = Boolean(values["value-stdin"])
-    ? await readAllStdin()
-    : await readSecretFromTty("Coral API key: ");
+  const codexHome = typeof values["codex-home"] === "string" ? values["codex-home"] : undefined;
+  if (!Boolean(values["value-stdin"])) {
+    const result = await startAuthorizationUi({
+      command: "set auth",
+      project,
+      home,
+      codexHome,
+      openBrowser: !Boolean(values.json),
+    });
+    process.stdout.write(stableJson(result));
+    return 0;
+  }
+  const value = await readAllStdin();
   const credential = writeStoredAuth("coral", value, { home });
   process.stdout.write(stableJson({
     ok: true,
@@ -703,9 +705,13 @@ async function cmdSet(rest: string[]): Promise<number> {
       source: credential.source,
       mode: credential.mode,
     },
+    deprecated: {
+      option: "--value-stdin",
+      replacement: `refinery set auth coral --project ${JSON.stringify(project)} --json`,
+      limitation: "Legacy credential storage does not complete live verification; run the browser authorization flow.",
+    },
     next: [
-      "refinery doctor --json",
-      "refinery review --json",
+      `refinery set auth coral --project ${JSON.stringify(project)} --json`,
     ],
   }));
   return 0;
@@ -782,24 +788,13 @@ async function cmdSetup(rest: string[]): Promise<number> {
     return 0;
   }
   if (sub === "start") {
-    const server = await startSetupLifecycle(common);
-    process.stdout.write(stableJson({
-      ok: true,
+    process.stdout.write(stableJson(await startAuthorizationUi({
       command: "setup start",
-      schemaVersion: "refinery.setup-start.v1",
-      state: "awaiting-human",
       project,
-      ...server,
-      browser: {
-        action: "open",
-        preferredHarness: "codex-in-app-browser",
-        fallback: "Open the returned loopback URL in any browser on this machine.",
-      },
-      next: [
-        "Open the one-time URL and let the human authorize Coral and local preferences.",
-        `Then run refinery setup status --project ${JSON.stringify(project)} --json.`,
-      ],
-    }));
+      home,
+      codexHome,
+      openBrowser: !Boolean(values.json),
+    })));
     return 0;
   }
   if (sub === "stop") {

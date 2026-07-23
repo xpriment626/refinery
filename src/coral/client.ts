@@ -59,15 +59,20 @@ export interface CoralSessionRequestInput {
   ttlMs?: number;
   holdAfterExitMs?: number;
   topology?: ReviewTopology;
+  sessionBudgetMicroCents?: number;
   llmProxy?: {
     enabled: boolean;
     configurationName?: string;
   };
 }
 
+export const defaultCoralSessionBudgetMicroCents = 100_000_000;
+
 export interface CoralRuntimeCapabilities {
   schemaVersion: "refinery.coral-runtime-capabilities.v1";
   graphAgentProxyOverrides: boolean;
+  sessionBudgetSettings: boolean;
+  graphAgentBudgetSettings: boolean;
   dynamicAgentInsertion: false;
   nativeSleep: false;
   softSleep: "wait_for_mention";
@@ -141,6 +146,9 @@ export function buildCoralSessionRequest(input: CoralSessionRequestInput): unkno
         description: agent.specialist.purpose,
         blocking: true,
         provider: { type: "local", runtime: "executable" },
+        budgetSettings: {
+          budget: 0,
+        },
         ...(proxyOverride ? { proxies: proxyOverride } : {}),
         annotations: {
           "refinery.specialist": agent.specialistName,
@@ -155,6 +163,9 @@ export function buildCoralSessionRequest(input: CoralSessionRequestInput): unkno
       })),
       groups: buildCoralCommunicationGroups(topology),
       customTools: {},
+    },
+    budgetSettings: {
+      budget: input.sessionBudgetMicroCents ?? defaultCoralSessionBudgetMicroCents,
     },
     namespaceProvider: {
       type: "create_if_not_exists",
@@ -185,12 +196,20 @@ export async function inspectCoralRuntimeCapabilities(apiUrl: string): Promise<C
   const response = await fetch(`${apiUrl.replace(/\/$/, "")}/api_v1.json`);
   if (!response.ok) throw new Error(`Coral schema request failed (${response.status}).`);
   const schema = await response.json() as {
-    components?: { schemas?: { GraphAgentRequest?: { properties?: Record<string, unknown> } } };
+    components?: {
+      schemas?: {
+        GraphAgentRequest?: { properties?: Record<string, unknown> };
+        SessionRequest?: { properties?: Record<string, unknown> };
+      };
+    };
   };
   const graphAgentProperties = schema.components?.schemas?.GraphAgentRequest?.properties ?? {};
+  const sessionProperties = schema.components?.schemas?.SessionRequest?.properties ?? {};
   return {
     schemaVersion: "refinery.coral-runtime-capabilities.v1",
     graphAgentProxyOverrides: "proxies" in graphAgentProperties,
+    sessionBudgetSettings: "budgetSettings" in sessionProperties,
+    graphAgentBudgetSettings: "budgetSettings" in graphAgentProperties,
     dynamicAgentInsertion: false,
     nativeSleep: false,
     softSleep: "wait_for_mention",

@@ -26,11 +26,14 @@ npm i -g @itsshadowai/refinery
 refinery setup inspect --project "$PWD" --json
 refinery skill status --json
 refinery skill install --json
-refinery setup start --project "$PWD" --json
+refinery set auth coral --project "$PWD"
 ```
 
-`setup start` returns a short-lived loopback capability URL. Codex should open
-it in the in-app browser; without browser automation, open the URL manually.
+`set auth coral` starts the short-lived loopback authorization service and,
+for a human CLI invocation, requests the system browser. An agent should add
+`--json` and open the returned capability URL in its in-app browser; without
+browser automation, open the URL manually. `setup start` remains a compatibility
+alias for the same local flow.
 The human enters the Coral API key directly in that local page, confirms the
 private local credential file, and chooses whether to provision the latest stable
 Coral runtime and request the graph UI after syncs. The API key does not pass
@@ -45,8 +48,8 @@ refinery setup status --project "$PWD" --json
 
 The result has stable issue codes, repair actions, and granular
 `readyFor.agent`, `readyFor.graph`, `readyFor.liveReview`, and `readyFor.ui`
-fields. Setup never opens a browser itself. It returns a URL and leaves browser
-control to Codex or the human.
+fields. JSON mode never requests an external browser; it returns a URL and
+leaves browser control to Codex or the human.
 
 `refinery init` remains available to create global Refinery state under
 `~/.refinery` and install the bundled skill into
@@ -73,7 +76,9 @@ user-profile directory and reports them as platform-managed; it does not claim
 to be an OS keychain. On every platform it rejects symlinks and non-regular
 files, rotates via atomic replacement, and supports revocation with
 `refinery unset auth coral --json`. You can also provide `CORAL_API_KEY` in the
-environment for development sessions.
+environment for development sessions. The deprecated `--value-stdin` option is
+retained only for legacy automation; it stores bytes but does not replace the
+verified browser authorization flow.
 
 The intended agent-first path is: install Refinery, inspect setup and the
 bundled skill, open the one-time authorization page, list live Coral models,
@@ -138,7 +143,7 @@ refinery doctor --json
 
 # Inspect or start the agent-first setup contract.
 refinery setup inspect --project "$PWD" --json
-refinery setup start --project "$PWD" --json
+refinery set auth coral --project "$PWD" --json
 refinery setup status --project "$PWD" --json
 
 # Verify the installed CLI version.
@@ -234,7 +239,7 @@ been built. Secrets are not emitted.
 Upgrade only after the human approves the version notice:
 
 ```bash
-npm i -g @itsshadowai/refinery@0.3.1
+npm i -g @itsshadowai/refinery@0.3.2
 refinery version --json
 refinery skill status --json
 refinery setup status --project "$PWD" --json

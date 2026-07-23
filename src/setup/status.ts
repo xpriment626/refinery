@@ -186,13 +186,13 @@ export function inspectSetup(args: {
     code: authError ? "CORAL_CREDENTIAL_UNSAFE" : "CORAL_AUTH_MISSING",
     severity: "human",
     message: authError ?? "Coral authorization has not been completed.",
-    repair: { command: `refinery setup start --project ${JSON.stringify(project)} --json`, requiresHumanConfirmation: true },
+    repair: { command: `refinery set auth coral --project ${JSON.stringify(project)} --json`, requiresHumanConfirmation: true },
   });
   else if (!coralVerified) issues.push({
     code: "CORAL_AUTH_UNVERIFIED",
     severity: "human",
     message: "The stored Coral credential has not been verified against the registry and model catalogue.",
-    repair: { command: `refinery setup start --project ${JSON.stringify(project)} --json`, requiresHumanConfirmation: true },
+    repair: { command: `refinery set auth coral --project ${JSON.stringify(project)} --json`, requiresHumanConfirmation: true },
   });
   else if (!selectedModelAvailable) issues.push({
     code: "CORAL_MODEL_UNAVAILABLE",

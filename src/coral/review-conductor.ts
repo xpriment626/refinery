@@ -12,6 +12,7 @@ import {
   classifyAgentReadiness,
   closeSession,
   createSession,
+  defaultCoralSessionBudgetMicroCents,
   getExtended,
   getLocalAgent,
   inspectCoralRuntimeCapabilities,
@@ -36,7 +37,7 @@ import {
   refineryCoralPort,
 } from "./definitions.ts";
 import { buildCoralCommunicationProjection, defaultReviewTopology, type CoralCommunicationProjection, type ReviewTopology } from "./topology.ts";
-import { coralRuntimeJarPath, verifyCoralRuntimeJarPath } from "./runtime.ts";
+import { coralRuntimeJarPath, inspectJavaRuntime, verifyCoralRuntimeJarPath } from "./runtime.ts";
 import {
   createSparseBlackboard,
   routeSparseClaims,
@@ -150,6 +151,11 @@ export interface CoralReviewRunResult extends ReviewRunResult {
     };
     runtimeCapabilities?: CoralRuntimeCapabilities;
     runtimeProjection?: CoralCommunicationProjection;
+    budget?: {
+      sessionMicroCents: number;
+      perAgentMicroCents: number;
+      agentFallback: "consume-session";
+    };
     usage?: CoralUsageSummary;
   };
   sink?: ReviewSinkResult;
@@ -202,6 +208,11 @@ export interface CoralConsoleRunResult {
     };
     runtimeCapabilities: CoralRuntimeCapabilities;
     runtimeProjection: CoralCommunicationProjection;
+    budget: {
+      sessionMicroCents: number;
+      perAgentMicroCents: number;
+      agentFallback: "consume-session";
+    };
   };
   seededMessages: Array<{
     id: string;
@@ -876,7 +887,15 @@ function startCoralServer(args: {
       { phase: "coral-runtime", details: { jarPath: selectedJar } },
     );
   }
-  const command = process.env.REFINERY_JAVA_BIN ?? "java";
+  const java = inspectJavaRuntime(process.env);
+  if (!java.sufficient) {
+    throw new RefineryError(
+      "JAVA_VERSION_UNSUPPORTED",
+      "Coral requires Java 24 or newer.",
+      { phase: "coral-runtime", details: java },
+    );
+  }
+  const command = java.command;
   const commandArgs = ["-jar", selectedJar];
   const logSecrets = [refineryCoralAuthKey, ...(args.logSecrets ?? []), ...Object.values(args.secretEnv ?? {})];
   const inheritedEnv = { ...process.env };
@@ -1679,6 +1698,13 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
       );
     }
     runtimeCapabilities = await inspectCoralRuntimeCapabilities(apiUrl);
+    if (!runtimeCapabilities.sessionBudgetSettings || !runtimeCapabilities.graphAgentBudgetSettings) {
+      throw new RefineryError(
+        "CORAL_BUDGET_SETTINGS_UNSUPPORTED",
+        "The running Coral Server schema does not expose explicit session and per-agent budget settings.",
+        { phase: "coral", runId: options.runId, details: runtimeCapabilities },
+      );
+    }
     if (configuredModel.transport === "coral-server-proxy" && !runtimeCapabilities.graphAgentProxyOverrides) {
       throw new RefineryError(
         "CORAL_SERVER_PROXY_UNSUPPORTED",
@@ -1719,6 +1745,10 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
           ttlMs: Math.max(timeoutMs + 60_000, 30 * 60_000),
           holdAfterExitMs: Math.max(timeoutMs + 60_000, 30 * 60_000),
           topology,
+          llmProxy: {
+            enabled: configuredModel.transport === "coral-server-proxy",
+            configurationName: configuredModel.proxyProvider ?? undefined,
+          },
         }),
       );
       sessionCreated = true;
@@ -1920,6 +1950,11 @@ export async function startCoralConsoleRun(options: CoralConsoleRunOptions): Pro
           },
           runtimeCapabilities: runtimeCapabilities!,
           runtimeProjection,
+          budget: {
+            sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+            perAgentMicroCents: 0,
+            agentFallback: "consume-session",
+          },
         },
         seededMessages,
         next: `Open ${buildConsoleUrl(apiUrl, "/ui/console")} and inspect namespace ${session.namespace}, session ${session.sessionId}.`,
@@ -2056,6 +2091,13 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       );
     }
     runtimeCapabilities = await inspectCoralRuntimeCapabilities(apiUrl);
+    if (!runtimeCapabilities.sessionBudgetSettings || !runtimeCapabilities.graphAgentBudgetSettings) {
+      throw new RefineryError(
+        "CORAL_BUDGET_SETTINGS_UNSUPPORTED",
+        "The running Coral Server schema does not expose explicit session and per-agent budget settings.",
+        { phase: "coral", runId: options.runId, runDir, details: runtimeCapabilities },
+      );
+    }
     if (configuredModel.transport === "coral-server-proxy" && !runtimeCapabilities.graphAgentProxyOverrides) {
       throw new RefineryError(
         "CORAL_SERVER_PROXY_UNSUPPORTED",
@@ -2467,6 +2509,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       topology,
       model: configuredModel.modelName,
       provider: configuredModel.proxyProvider,
+      budget: {
+        sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+        perAgentMicroCents: 0,
+        agentFallback: "consume-session",
+      },
       status: "succeeded",
       usage,
       outcome: {
@@ -2521,6 +2568,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       runtimeCapabilities,
       runtimeProjection,
       sparseBlackboard,
+      budget: {
+        sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+        perAgentMicroCents: 0,
+        agentFallback: "consume-session",
+      },
       usage,
       sourceSets: options.packet.sourceSets,
       targets: options.packet.targets,
@@ -2545,6 +2597,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       runtimeCapabilities,
       runtimeProjection,
       sparseBlackboard,
+      budget: {
+        sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+        perAgentMicroCents: 0,
+        agentFallback: "consume-session",
+      },
       usage,
       sourceSets: options.packet.sourceSets,
       targets: options.packet.targets,
@@ -2629,6 +2686,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
         },
         runtimeCapabilities: runtimeCapabilities!,
         runtimeProjection,
+        budget: {
+          sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+          perAgentMicroCents: 0,
+          agentFallback: "consume-session",
+        },
         usage,
       },
       metadata,
@@ -2680,6 +2742,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       topology,
       model: configuredModel.modelName,
       provider: configuredModel.proxyProvider,
+      budget: {
+        sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+        perAgentMicroCents: 0,
+        agentFallback: "consume-session",
+      },
       status: "failed",
       usage,
       outcome: {
@@ -2702,6 +2769,11 @@ export async function runCoralReview(options: CoralReviewRunOptions): Promise<Co
       critiqueThreadId,
       agents: refineryCoralAgentNames,
       model: configuredModel,
+      budget: {
+        sessionMicroCents: defaultCoralSessionBudgetMicroCents,
+        perAgentMicroCents: 0,
+        agentFallback: "consume-session",
+      },
       sourceSets: options.packet.sourceSets,
       targets: options.packet.targets,
       intent,

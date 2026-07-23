@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { allMessages, buildCoralSessionRequest, classifyAgentReadiness, closeSession, createSession, evaluatePingPong, getExtended, getLocalAgent, inspectCoralRuntimeCapabilities, pollPingPong, puppetCreateThread, puppetSendMessage, waitForAgentsReady, } from "./client.js";
 import { refineryCoralAgentNames, refineryCoralAuthKey, refineryCoralConfigPath, refineryCoralModelDefaults, refineryCoralPort, } from "./definitions.js";
 import { resolveRefineryPaths } from "../core/paths.js";
-import { coralRuntimeJarPath } from "./runtime.js";
+import { coralRuntimeJarPath, inspectJavaRuntime } from "./runtime.js";
 import { cleanupRuntimeCoralConfigPath, resolveRuntimeCoralConfigPath } from "./review-conductor.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
@@ -66,7 +66,10 @@ function startCoralServer(args, logs) {
     if (!args.coralRuntimeJar || !fs.existsSync(args.coralRuntimeJar)) {
         throw new Error("Latest-stable Coral Server runtime is not provisioned. Run refinery setup provision coral --confirm --json.");
     }
-    const child = spawn(process.env.REFINERY_JAVA_BIN ?? "java", ["-jar", args.coralRuntimeJar], {
+    const java = inspectJavaRuntime(process.env);
+    if (!java.sufficient)
+        throw new Error("Coral requires Java 24 or newer.");
+    const child = spawn(java.command, ["-jar", args.coralRuntimeJar], {
         cwd: repoRoot,
         env: {
             ...process.env,

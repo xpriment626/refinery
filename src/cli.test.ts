@@ -164,7 +164,7 @@ test("package surface does not publish experiment commands", () => {
   };
 
   assert.equal(pkg.name, "@itsshadowai/refinery");
-  assert.equal(pkg.version, "0.3.1");
+  assert.equal(pkg.version, "0.3.2");
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.license, "MIT");
   assert.deepEqual(pkg.publishConfig, { access: "public" });
@@ -180,7 +180,7 @@ test("package surface does not publish experiment commands", () => {
   assert.equal(pkg.devDependencies?.graphology, "0.26.0");
   const postinstall = fs.readFileSync(path.join(repoRoot, "scripts/postinstall.mjs"), "utf8");
   assert.match(postinstall, /refinery setup inspect/);
-  assert.match(postinstall, /refinery setup start/);
+  assert.match(postinstall, /refinery set auth coral/);
   assert.match(postinstall, /refinery skill status --json/);
   assert.match(postinstall, /refinery models list --json/);
   assert.match(postinstall, /refinery models set <model-id> --json/);
@@ -310,7 +310,7 @@ test("CLI reports a cached update before running and supports the global opt-out
   fs.mkdirSync(path.dirname(cachePath), { recursive: true });
   fs.writeFileSync(cachePath, JSON.stringify({
     checkedAt: Date.now(),
-    currentVersion: "0.3.1",
+    currentVersion: "0.3.2",
     latestVersion: "0.4.0",
   }));
 
@@ -323,8 +323,8 @@ test("CLI reports a cached update before running and supports the global opt-out
   const noticed = runCli(["version", "--json"], { env, updateCheck: true });
   const noticedJson = parseJson(noticed.stdout);
   assert.equal(noticed.status, 0, noticed.stderr || noticed.stdout);
-  assert.equal(noticedJson.version, "0.3.1");
-  assert.match(noticed.stderr, /A newer Refinery version is available: 0\.3\.1 -> 0\.4\.0/);
+  assert.equal(noticedJson.version, "0.3.2");
+  assert.match(noticed.stderr, /A newer Refinery version is available: 0\.3\.2 -> 0\.4\.0/);
   assert.match(noticed.stderr, /No update was installed automatically/);
   assert.match(noticed.stderr, /refinery skill status --json/);
 
@@ -586,6 +586,27 @@ test("set auth coral stores a redacted Coral credential under Refinery home", ()
   }
 });
 
+test("set auth coral routes JSON callers to the verified setup UI", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "refinery-set-auth-ui-"));
+  const home = path.join(tmp, "refinery-home");
+  const project = path.join(tmp, "project");
+  fs.mkdirSync(project);
+  const result = runCli(["set", "auth", "coral", "--home", home, "--project", project, "--json"]);
+  const parsed = parseJson(result.stdout);
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(parsed.command, "set auth");
+  assert.equal(parsed.provider, "coral");
+  assert.equal(parsed.state, "awaiting-human");
+  assert.equal(parsed.project, project);
+  assert.match(String(parsed.url), /^http:\/\/127\.0\.0\.1:\d+\/#cap=/);
+  assert.equal((parsed.browser as Record<string, unknown>).requested, false);
+  assert.equal((parsed.browser as Record<string, unknown>).preferredHarness, "codex-in-app-browser");
+
+  const stopped = runCli(["setup", "stop", "--home", home, "--project", project, "--json"]);
+  assert.equal(stopped.status, 0, stopped.stderr || stopped.stdout);
+});
+
 test("removed commands return structured JSON failures", () => {
   for (const args of [
     ["instance", "init", "--json"],
@@ -681,7 +702,7 @@ test("init creates global state directories and installs bundled Codex skill", (
   assert.equal(codexSkill.path, installedSkill);
   assert.equal(codexSkill.managed, true);
   assert.equal(codexSkill.conflict, false);
-  assert.equal(codexSkill.packageVersion, "0.3.1");
+  assert.equal(codexSkill.packageVersion, "0.3.2");
   assert.match(String(codexSkill.installedTreeHash), /^[a-f0-9]{64}$/);
 });
 
@@ -732,7 +753,7 @@ test("skill status reports missing then current state with package and tree hash
   const codexHome = path.join(tmp, "codex-home");
   const missing = parseJson(runCli(["skill", "status", "--codex-home", codexHome, "--json"]).stdout);
   assert.equal((missing.codexSkill as Record<string, unknown>).state, "missing");
-  assert.equal(missing.packageVersion, "0.3.1");
+  assert.equal(missing.packageVersion, "0.3.2");
   assert.match(String((missing.codexSkill as Record<string, unknown>).bundledTreeHash), /^[a-f0-9]{64}$/);
   assert.equal((missing.repair as Record<string, unknown>).command, "refinery skill install --json");
 
@@ -741,7 +762,7 @@ test("skill status reports missing then current state with package and tree hash
   const currentSkill = current.codexSkill as Record<string, unknown>;
   assert.equal(currentSkill.state, "current");
   assert.equal(currentSkill.installedTreeHash, currentSkill.bundledTreeHash);
-  assert.equal(currentSkill.installedPackageVersion, "0.3.1");
+  assert.equal(currentSkill.installedPackageVersion, "0.3.2");
   assert.equal(current.repair, null);
   assert.match(String(current.reloadAfterInstall), /new Codex task/i);
 });
@@ -772,7 +793,7 @@ test("skill status and ordinary CLI use report stale managed skills without muta
 
   const ordinary = runCli(["version", "--json"], { env: { CODEX_HOME: codexHome } });
   assert.equal(ordinary.status, 0, ordinary.stderr || ordinary.stdout);
-  assert.equal(parseJson(ordinary.stdout).version, "0.3.1");
+  assert.equal(parseJson(ordinary.stdout).version, "0.3.2");
   assert.match(ordinary.stderr, /package-managed Refinery Codex skill is stale/);
   assert.match(ordinary.stderr, /refinery skill install --json/);
   assert.match(ordinary.stderr, /No skill files were changed automatically/);
