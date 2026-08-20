@@ -51,22 +51,40 @@ function parseJavaMajorVersion(output) {
     return match ? Number.parseInt(match[1], 10) : null;
 }
 export function inspectJavaRuntime(env = process.env) {
-    const command = env.REFINERY_JAVA_BIN?.trim() || "java";
-    const result = spawnSync(command, ["-version"], {
+    const explicit = env.REFINERY_JAVA_BIN?.trim();
+    const inspect = (command) => {
+        const result = spawnSync(command, ["-version"], {
+            encoding: "utf8",
+            windowsHide: true,
+            timeout: 5_000,
+            env: { ...process.env, ...env },
+        });
+        if (result.error || result.status !== 0)
+            return { command, present: false, majorVersion: null, sufficient: false };
+        const majorVersion = parseJavaMajorVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+        return {
+            command,
+            present: majorVersion !== null,
+            majorVersion,
+            sufficient: majorVersion !== null && majorVersion >= minimumCoralJavaVersion,
+        };
+    };
+    if (explicit)
+        return inspect(explicit);
+    const system = inspect("java");
+    if (system.sufficient || process.platform !== "darwin")
+        return system;
+    const javaHome = spawnSync("/usr/libexec/java_home", ["-v", `${minimumCoralJavaVersion}+`], {
         encoding: "utf8",
         windowsHide: true,
         timeout: 5_000,
         env: { ...process.env, ...env },
     });
-    if (result.error || result.status !== 0)
-        return { command, present: false, majorVersion: null, sufficient: false };
-    const majorVersion = parseJavaMajorVersion(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
-    return {
-        command,
-        present: majorVersion !== null,
-        majorVersion,
-        sufficient: majorVersion !== null && majorVersion >= minimumCoralJavaVersion,
-    };
+    const discoveredHome = javaHome.status === 0 ? javaHome.stdout.trim() : "";
+    if (!discoveredHome || !path.isAbsolute(discoveredHome))
+        return system;
+    const discovered = inspect(path.join(discoveredHome, "bin", "java"));
+    return discovered.sufficient ? discovered : system;
 }
 function readJson(file) {
     try {

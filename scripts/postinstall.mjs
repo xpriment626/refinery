@@ -7,11 +7,12 @@ Next steps:
   refinery setup inspect --json
   refinery skill status --json
   refinery skill install --json
-  refinery setup start --json
+  refinery set auth coral
   refinery models list --json
 
-The setup command returns a short-lived loopback URL. If an agent installed
-Refinery, it should open that URL in its in-app browser so the human can enter
+The auth command opens a short-lived loopback page for a human CLI invocation.
+If an agent installed Refinery, it should run "refinery set auth coral --json"
+and open the returned URL in its in-app browser so the human can enter
 the Coral key without placing it in chat, shell arguments, or logs.
 
 After authorization, list Coral's live model IDs and optionally select one with

@@ -63,6 +63,11 @@ export interface CoralReviewRunResult extends ReviewRunResult {
         };
         runtimeCapabilities?: CoralRuntimeCapabilities;
         runtimeProjection?: CoralCommunicationProjection;
+        budget?: {
+            sessionMicroCents: number;
+            perAgentMicroCents: number;
+            agentFallback: "consume-session";
+        };
         usage?: CoralUsageSummary;
     };
     sink?: ReviewSinkResult;
@@ -113,6 +118,11 @@ export interface CoralConsoleRunResult {
         };
         runtimeCapabilities: CoralRuntimeCapabilities;
         runtimeProjection: CoralCommunicationProjection;
+        budget: {
+            sessionMicroCents: number;
+            perAgentMicroCents: number;
+            agentFallback: "consume-session";
+        };
     };
     seededMessages: Array<{
         id: string;

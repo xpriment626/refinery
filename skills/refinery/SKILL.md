@@ -34,7 +34,7 @@ For a fresh packaged install or an unverified Coral credential, start the
 one-time local setup page:
 
 ```bash
-refinery setup start --project "$PWD" --json
+refinery set auth coral --project "$PWD" --json
 ```
 
 Open the returned loopback capability URL with the Codex in-app browser when
@@ -45,6 +45,11 @@ paste it into chat or place it in command arguments. After completion, run
 actions, then use `refinery ui url --project "$PWD" --json` when `readyFor.ui`
 is true. Repo-local `.env` files with `CORAL_API_KEY` remain supported only for
 development sessions.
+
+`refinery setup start --project "$PWD" --json` is a compatibility alias for
+the same authorization service. Do not use `--value-stdin` in an interactive
+or agent-assisted setup: that deprecated legacy option only stores credential
+bytes and does not complete the live verification receipt.
 
 After authorization, inspect the live Coral model catalogue and current
 selection:

@@ -158,7 +158,7 @@ async function request(path, options = {}) {
 }
 
 async function boot() {
-  if (!capability) throw new Error("This one-time setup link has no capability. Ask Codex to run refinery setup start again.");
+  if (!capability) throw new Error("This one-time setup link has no capability. Ask Codex to run refinery set auth coral --json again.");
   const exchange = await request("/api/v1/session", { method: "POST", headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" }, body: "{}" });
   sessionToken = exchange.sessionToken;
   const setup = await request("/api/v1/setup");

@@ -228,10 +228,12 @@ test("Coral session request contains executable specialists in topology-specific
   };
   assert.deepEqual(request.agentGraphRequest.groups, buildCoralCommunicationGroups("pipeline"));
   assert.equal(request.agentGraphRequest.agents.length, 5);
+  assert.deepEqual((request as unknown as { budgetSettings: unknown }).budgetSettings, { budget: 100_000_000 });
   for (const agent of request.agentGraphRequest.agents) {
     assert.equal(agent.id.version, refineryCoralAgentVersion);
     assert.deepEqual(agent.id.registrySourceId, { type: "local" });
     assert.deepEqual(agent.provider, { type: "local", runtime: "executable" });
+    assert.deepEqual((agent as unknown as { budgetSettings: unknown }).budgetSettings, { budget: 0 });
     assert.equal(agent.options.MODEL_NAME.value, refineryCoralModelDefaults.modelName);
     assert.equal(agent.options.MODEL_BASE_URL.value, refineryCoralModelDefaults.baseUrl);
   }

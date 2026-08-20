@@ -130,7 +130,7 @@ try {
   const cli = path.join(packageDir, "dist", "cli.js");
   const postinstall = await run(process.execPath, [path.join(packageDir, "scripts", "postinstall.mjs")], { cwd: consumer });
   assert.match(`${postinstall.stdout}\n${postinstall.stderr}`, /Refinery installed/);
-  assert.match(`${postinstall.stdout}\n${postinstall.stderr}`, /refinery setup start/);
+  assert.match(`${postinstall.stdout}\n${postinstall.stderr}`, /refinery set auth coral/);
   const env = {
     ...process.env,
     HOME: userHome,
@@ -147,7 +147,7 @@ try {
   const cliRun = (args, options = {}) => run(process.execPath, [cli, ...args], { cwd: project, env, ...options });
 
   const version = parseJson(await cliRun(["version", "--json"]));
-  assert.equal(version.version, "0.3.1");
+  assert.equal(version.version, "0.3.2");
   const installedSkill = parseJson(await cliRun(["skill", "install", "--json"]));
   assert.equal(installedSkill.codexSkill.action, "installed");
   assert.equal(installedSkill.codexSkill.managed, true);
@@ -281,7 +281,7 @@ try {
   const packageJsonPath = path.join(packageDir, "package.json");
   const bundledSkillPath = path.join(packageDir, "skills", "refinery", "SKILL.md");
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  packageJson.version = "0.3.1-fixture";
+  packageJson.version = "0.3.2-fixture";
   fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
   fs.appendFileSync(bundledSkillPath, "\n<!-- packed managed upgrade fixture -->\n");
   const staleManaged = parseJson(await cliRun(["skill", "status", "--json"]));
