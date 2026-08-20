@@ -149,7 +149,7 @@ test("top-level help exposes only the Codex-first CLI surface", () => {
   assert.doesNotMatch(result.stdout, /runtime sequential/);
 });
 
-test("package surface does not publish experiment commands", () => {
+test("archived package surface is publication-blocked and does not expose experiment commands", () => {
   const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8")) as {
     name?: string;
     version?: string;
@@ -165,9 +165,9 @@ test("package surface does not publish experiment commands", () => {
 
   assert.equal(pkg.name, "@itsshadowai/refinery");
   assert.equal(pkg.version, "0.3.2");
-  assert.equal(pkg.private, undefined);
+  assert.equal(pkg.private, true);
   assert.equal(pkg.license, "MIT");
-  assert.deepEqual(pkg.publishConfig, { access: "public" });
+  assert.equal(pkg.publishConfig, undefined);
   assert.deepEqual(pkg.files, ["dist", "coral", "skills", "scripts/postinstall.mjs", "README.md", "LICENSE", "package.json"]);
   assert.deepEqual(Object.keys(pkg.bin ?? {}).sort(), ["refinery"]);
   assert.equal(pkg.bin?.refinery, "dist/cli.js");

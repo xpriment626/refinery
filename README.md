@@ -1,5 +1,27 @@
 # refinery
 
+> [!IMPORTANT]
+> This repository is the archived, MIT-licensed Refinery `0.x` implementation.
+> It is no longer maintained and will not receive new product releases.
+> Published npm versions `0.1.0` through `0.3.1` remain available as historical
+> software. Repository `master` also contains an unpublished `0.3.2` hardening
+> snapshot; it is not an npm release.
+>
+> The next Refinery generation is a separate, privately developed hosted
+> Research Preview built around a web application, authenticated remote MCP,
+> durable cloud memory, and a private Coral runtime. It is not a continuation
+> of this repository's local self-hosted packaging model.
+
+## Archive And License Boundary
+
+The complete history in this repository and the published `0.x` npm packages
+remain licensed under the included MIT License. That grant is unchanged.
+
+No license to the separately developed hosted Refinery implementation or to
+`coral-server-private` is granted by this repository. Historical source,
+releases, issues, and documentation are preserved for existing users and
+technical provenance.
+
 Refinery is a Codex-first source review CLI. It builds a bounded, run-scoped
 `ReviewPacket` from Codex memories, Codex sessions, Codex skills, files, globs,
 or mixed source sets, then runs a dry-run Coral-coordinated specialist review.

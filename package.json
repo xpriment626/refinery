@@ -1,8 +1,9 @@
 {
   "name": "@itsshadowai/refinery",
   "version": "0.3.2",
+  "private": true,
   "type": "module",
-  "description": "Refinery - Codex-first source review CLI.",
+  "description": "Archived local-first Refinery 0.x implementation.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -11,9 +12,6 @@
   "homepage": "https://github.com/xpriment626/refinery#readme",
   "bugs": {
     "url": "https://github.com/xpriment626/refinery/issues"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "files": [
     "dist",
